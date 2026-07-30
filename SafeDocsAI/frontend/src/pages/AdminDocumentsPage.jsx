@@ -1,0 +1,831 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import {
+    AlertTriangle,
+    CheckCircle2,
+    ChevronLeft,
+    ChevronRight,
+    Clock,
+    CloudUpload,
+    Eye,
+    FileText,
+    Loader2,
+    RefreshCw,
+    Trash2,
+    X,
+} from 'lucide-react';
+import { sourcesService } from '../services/sourcesService';
+import { Button } from '../components/ui/Button';
+import { cn } from '../lib/utils';
+import { useModalDialog } from '../hooks/useModalDialog';
+import { useSources, useSourcesActions } from '../contexts/SourcesContext';
+import { useLocale } from '../i18n';
+import { resolveApiErrorMessage } from '../lib/apiError';
+import { formatDocumentLanguage, formatLocaleDate, parseTimestamp } from '../lib/locale';
+import { formatSize, resolveStatus } from '../lib/sources';
+
+const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
+const ALLOWED_MIME_TYPES = new Set([
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'text/plain',
+    'application/octet-stream',
+    'binary/octet-stream',
+    'application/zip',
+]);
+
+const normalizeMimeType = (mimeType) => String(mimeType || '').split(';', 1)[0].trim().toLowerCase();
+
+const STATUS_ORDER = ['all', 'ready', 'pending', 'indexing', 'error'];
+
+const ACTIVE_NOTEBOOK_STORAGE_KEY = 'knowledgeai.activeNotebookId';
+
+const PAGE_SIZE_OPTIONS = [10, 25, 50];
+const DEFAULT_PAGE_SIZE = 25;
+
+const resolveNotebookId = (notebookId) => {
+    if (notebookId !== undefined) {
+        return notebookId == null ? null : Number(notebookId);
+    }
+
+    const storedValue = localStorage.getItem(ACTIVE_NOTEBOOK_STORAGE_KEY);
+    return storedValue ? Number(storedValue) : null;
+};
+
+const AdminDocumentsPage = ({ notebookId }) => {
+    const { locale, t } = useLocale();
+    const [isUploading, setIsUploading] = useState(false);
+    const [uploadError, setUploadError] = useState('');
+    const [statusFilter, setStatusFilter] = useState('all');
+    const [isDragActive, setIsDragActive] = useState(false);
+    const [sortField, setSortField] = useState('created_at');
+    const [sortOrder, setSortOrder] = useState('desc');
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+    const [selectedFiles, setSelectedFiles] = useState([]);
+    const [deleteTarget, setDeleteTarget] = useState(null);
+    const [isDeleting, setIsDeleting] = useState(false);
+    const [deleteError, setDeleteError] = useState('');
+
+    // Поиск читаем из URL param ?q= (устанавливается хедером)
+    const [searchParams] = useSearchParams();
+    const searchTerm = searchParams.get('q') || '';
+    const [chunksModal, setChunksModal] = useState({
+        isOpen: false,
+        docId: null,
+        docName: '',
+        chunks: [],
+        isLoading: false,
+        error: null,
+    });
+
+    const fileInputRef = useRef(null);
+    const chunksDialogRef = useRef(null);
+    const chunksCloseRef = useRef(null);
+    const deleteDialogRef = useRef(null);
+    const deleteCancelRef = useRef(null);
+
+    const effectiveNotebookId = resolveNotebookId(notebookId);
+    const statusMeta = useMemo(() => ({
+        ready: {
+            label: t('documents.status.ready'),
+            badgeClass: 'bg-emerald-100 text-emerald-700',
+        },
+        pending: {
+            label: t('documents.status.pending'),
+            badgeClass: 'bg-slate-100 text-slate-600',
+        },
+        indexing: {
+            label: t('documents.status.indexing'),
+            badgeClass: 'bg-amber-100 text-amber-700',
+        },
+        error: {
+            label: t('documents.status.error'),
+            badgeClass: 'bg-red-100 text-red-700',
+        },
+    }), [t]);
+
+    // Единый слой данных: список, постраничное чтение, опрос индексации и обработка
+    // ошибок живут в SourcesProvider — тот же кэш читают панель блокнота и его шапка.
+    const {
+        items: documents,
+        total: totalCount,
+        isTruncated: isListTruncated,
+        isLoading,
+        error: loadError,
+        reload: retryFetchDocuments,
+    } = useSources(effectiveNotebookId);
+
+    const { uploadSource, deleteSource, updateSource, invalidate } = useSourcesActions();
+
+    const validateFile = useCallback((file) => {
+        const ext = file.name.split('.').pop()?.toLowerCase() || '';
+        const hasAllowedExt = ALLOWED_EXTENSIONS.includes(ext);
+        if (!hasAllowedExt) return false;
+        if (ext === 'txt') return true;
+
+        const hasAllowedMime = ALLOWED_MIME_TYPES.has(normalizeMimeType(file.type));
+        return hasAllowedExt && hasAllowedMime;
+    }, []);
+
+    const applyFileSelection = useCallback((files) => {
+        const valid = files.filter(validateFile);
+        const invalid = files.filter((file) => !validateFile(file));
+
+        if (valid.length > 0) {
+            setSelectedFiles(valid);
+        }
+
+        // Предупреждение о непринятых файлах не затираем: при смешанном наборе (PDF + ZIP)
+        // это единственный сигнал о том, что часть файлов отброшена.
+        if (invalid.length > 0) {
+            setUploadError(t('documents.unsupportedFiles', { files: invalid.map((file) => file.name).join(', ') }));
+        } else if (valid.length > 0) {
+            setUploadError('');
+        } else if (files.length > 0) {
+            setUploadError(t('documents.invalidFormats'));
+        }
+    }, [t, validateFile]);
+
+    const resetFileInput = useCallback(() => {
+        // Без сброса value повторный выбор того же файла не вызывает onChange.
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
+    }, []);
+
+    const handleDragEnter = useCallback((event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsDragActive(true);
+    }, []);
+
+    const handleDragLeave = useCallback((event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsDragActive(false);
+    }, []);
+
+    const handleDragOver = useCallback((event) => {
+        event.preventDefault();
+        event.stopPropagation();
+    }, []);
+
+    const handleDrop = useCallback((event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsDragActive(false);
+
+        applyFileSelection(Array.from(event.dataTransfer.files));
+    }, [applyFileSelection]);
+
+    const uploadFiles = useCallback(async (files) => {
+        if (!files || files.length === 0) return;
+
+        setIsUploading(true);
+        setUploadError('');
+
+        const uploadPromises = files.map(async (file) => {
+            try {
+                await uploadSource(file, effectiveNotebookId);
+                return { success: true, name: file.name };
+            } catch (error) {
+                return {
+                    success: false,
+                    name: file.name,
+                    error: resolveApiErrorMessage(error, t, 'documents.uploadError'),
+                };
+            }
+        });
+
+        const results = await Promise.all(uploadPromises);
+        const failed = results.filter((r) => !r.success);
+
+        if (failed.length > 0) {
+            setUploadError(
+                t('notebook.uploadFailed', { files: failed.map((f) => `${f.name}${f.error ? ` (${f.error})` : ''}`).join(', ') })
+            );
+        }
+
+        setSelectedFiles([]);
+        resetFileInput();
+        // Общая инвалидация: список обновляется и здесь, и в панели блокнота, и в его шапке.
+        await invalidate();
+        setIsUploading(false);
+    }, [effectiveNotebookId, invalidate, resetFileInput, t, uploadSource]);
+
+    const fetchChunks = useCallback(async (docId, docName) => {
+        setChunksModal({
+            isOpen: true,
+            docId,
+            docName,
+            chunks: [],
+            isLoading: true,
+            error: null,
+        });
+
+        try {
+            const response = await sourcesService.getChunks(docId);
+            const fetchedChunks = response.data || [];
+
+            if (fetchedChunks.length === 0) {
+                updateSource(docId, { status: 'indexing' });
+            }
+
+            setChunksModal((prev) => ({
+                ...prev,
+                chunks: fetchedChunks,
+                isLoading: false,
+            }));
+        } catch (error) {
+            console.error('Failed to fetch chunks:', error);
+            setChunksModal((prev) => ({
+                ...prev,
+                isLoading: false,
+                error: resolveApiErrorMessage(error, t, 'documents.chunksLoadFailed'),
+            }));
+        }
+    }, [t, updateSource]);
+
+    const closeChunksModal = useCallback(() => {
+        setChunksModal({
+            isOpen: false,
+            docId: null,
+            docName: '',
+            chunks: [],
+            isLoading: false,
+            error: null,
+        });
+    }, []);
+
+    const closeDeleteDialog = useCallback(() => {
+        setDeleteTarget(null);
+        setDeleteError('');
+        setIsDeleting(false);
+    }, []);
+
+    const confirmDelete = useCallback(async () => {
+        if (!deleteTarget) return;
+
+        setIsDeleting(true);
+        setDeleteError('');
+
+        try {
+            await deleteSource(deleteTarget.id);
+            setDeleteTarget(null);
+        } catch (error) {
+            console.error('Delete failed:', error);
+            setDeleteError(resolveApiErrorMessage(error, t, 'documents.deleteFailed'));
+        } finally {
+            setIsDeleting(false);
+        }
+    }, [deleteSource, deleteTarget, t]);
+
+    useModalDialog(chunksModal.isOpen, closeChunksModal, chunksDialogRef, chunksCloseRef);
+    useModalDialog(Boolean(deleteTarget), closeDeleteDialog, deleteDialogRef, deleteCancelRef);
+
+    const stats = useMemo(() => {
+        const counts = {
+            all: documents.length,
+            ready: 0,
+            pending: 0,
+            indexing: 0,
+            error: 0,
+        };
+
+        documents.forEach((doc) => {
+            const status = resolveStatus(doc.status);
+            counts[status] += 1;
+        });
+
+        return counts;
+    }, [documents]);
+
+    const filteredDocuments = useMemo(() => {
+        const query = searchTerm.trim().toLowerCase();
+
+        return documents.filter((doc) => {
+            const status = resolveStatus(doc.status);
+            const statusMatch = statusFilter === 'all' || statusFilter === status;
+            const queryMatch = !query || String(doc.name || '').toLowerCase().includes(query);
+            return statusMatch && queryMatch;
+        });
+    }, [documents, searchTerm, statusFilter]);
+
+    const sortedDocuments = useMemo(() => {
+        const sorted = [...filteredDocuments];
+        sorted.sort((a, b) => {
+            let valA = a[sortField];
+            let valB = b[sortField];
+
+            if (sortField === 'name') {
+                valA = String(valA || '').toLowerCase();
+                valB = String(valB || '').toLowerCase();
+                if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
+                if (valA > valB) return sortOrder === 'asc' ? 1 : -1;
+                return 0;
+            } else if (sortField === 'created_at') {
+                // Наивные метки без зоны разбираем как UTC, иначе порядок «поплывёт» на границе суток.
+                const timeA = parseTimestamp(valA)?.getTime() || 0;
+                const timeB = parseTimestamp(valB)?.getTime() || 0;
+                return sortOrder === 'asc' ? timeA - timeB : timeB - timeA;
+            } else if (sortField === 'size') {
+                const sizeA = Number(valA || 0);
+                const sizeB = Number(valB || 0);
+                return sortOrder === 'asc' ? sizeA - sizeB : sizeB - sizeA;
+            }
+            return 0;
+        });
+        return sorted;
+    }, [filteredDocuments, sortField, sortOrder]);
+
+    // Смена фильтра, поиска или размера страницы возвращает пользователя на первую страницу.
+    useEffect(() => {
+        setPage(1);
+    }, [searchTerm, statusFilter, sortField, sortOrder, pageSize]);
+
+    const pageCount = Math.max(1, Math.ceil(sortedDocuments.length / pageSize));
+    const currentPage = Math.min(page, pageCount);
+    const rangeStart = sortedDocuments.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+    const rangeEnd = Math.min(currentPage * pageSize, sortedDocuments.length);
+    const visibleDocuments = useMemo(
+        () => sortedDocuments.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+        [sortedDocuments, currentPage, pageSize],
+    );
+
+    const listStatusMessage = isLoading
+        ? t('documents.loading')
+        : loadError || t('documents.listStatus', { count: sortedDocuments.length });
+
+    const openDeleteDialog = (doc) => {
+        setDeleteError('');
+        setDeleteTarget({ id: doc.id, name: doc.name });
+    };
+
+    return (
+        <div className="space-y-6 px-4">
+            <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+
+                <div
+                    onDragEnter={handleDragEnter}
+                    onDragLeave={handleDragLeave}
+                    onDragOver={handleDragOver}
+                    onDrop={handleDrop}
+                    className={cn(
+                        'rounded-2xl border-2 border-dashed p-8 text-center transition-all duration-200',
+                        isDragActive
+                            ? 'border-[#1f3a60] bg-[#1f3a60]/5'
+                            : 'border-slate-300 bg-slate-50',
+                    )}
+                >
+                    <div className={cn(
+                        'mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full transition-all duration-200',
+                        isDragActive
+                            ? 'bg-[#1f3a60] text-white'
+                            : 'bg-[#1f3a60]/10 text-[#1f3a60]',
+                    )}>
+                        <CloudUpload className={cn('h-7 w-7', isDragActive && 'animate-bounce')} />
+                    </div>
+                    <h3 className="text-2xl font-bold text-slate-800">
+                        {isDragActive ? t('documents.dropActive') : t('documents.dropIdle')}
+                    </h3>
+                    <p className="mt-1 text-sm text-slate-500">{t('documents.supportedFormats')}</p>
+
+                    <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+                        {/* Кнопка, а не label: скрытый input недоступен с клавиатуры, label не фокусируется. */}
+                        <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            className="inline-flex items-center gap-2 rounded-lg bg-[#c5a059] px-5 py-2 text-sm font-semibold text-[#1f3a60] transition hover:bg-[#d7b878] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-2"
+                        >
+                            <CloudUpload className="h-4 w-4" />
+                            {t('documents.chooseFile')}
+                        </button>
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            multiple
+                            className="hidden"
+                            accept=".pdf,.docx,.txt,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            onChange={(event) => applyFileSelection(Array.from(event.target.files || []))}
+                        />
+
+                        <Button
+                            type="button"
+                            disabled={isUploading || selectedFiles.length === 0}
+                            onClick={() => uploadFiles(selectedFiles)}
+                        >
+                            {isUploading ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    {t('documents.uploadLoading')}
+                                </>
+                            ) : selectedFiles.length > 1 ? (
+                                t('documents.uploadMany', { count: selectedFiles.length })
+                            ) : (
+                                t('documents.uploadOne')
+                            )}
+                        </Button>
+                    </div>
+
+                    <div aria-live="polite">
+                        {selectedFiles.length > 0 && (
+                            <div className="mt-4 rounded-lg bg-emerald-50 p-3">
+                                <p className="text-sm font-semibold text-emerald-700">
+                                    {t('documents.pendingUpload', { files: selectedFiles.map((file) => file.name).join(', ') })}
+                                </p>
+                            </div>
+                        )}
+                    </div>
+
+                    {uploadError && (
+                        <p role="alert" className="mt-3 text-sm font-semibold text-red-600">{uploadError}</p>
+                    )}
+                </div>
+            </section>
+
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                    <div className="flex flex-wrap gap-2" role="group" aria-label={t('documents.statusFilterLabel')}>
+                        {STATUS_ORDER.map((status) => (
+                            <button
+                                key={status}
+                                type="button"
+                                onClick={() => setStatusFilter(status)}
+                                aria-pressed={statusFilter === status}
+                                className={cn(
+                                    'rounded-lg px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1',
+                                    statusFilter === status
+                                        ? 'bg-[#1f3a60] text-white'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200',
+                                )}
+                            >
+                                {status === 'all' ? t('documents.status.all') : statusMeta[status].label}
+                                <span className="ml-1">{stats[status]}</span>
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <label className="text-sm font-semibold text-slate-500" htmlFor="documents-sort">{t('documents.sort')}</label>
+                        <select
+                            id="documents-sort"
+                            value={`${sortField}-${sortOrder}`}
+                            onChange={(e) => {
+                                const [field, order] = e.target.value.split('-');
+                                setSortField(field);
+                                setSortOrder(order);
+                            }}
+                            className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-[#1f3a60] focus:ring-1 focus:ring-[#1f3a60]"
+                        >
+                            <option value="created_at-desc">{t('documents.sortOptions.dateDesc')}</option>
+                            <option value="created_at-asc">{t('documents.sortOptions.dateAsc')}</option>
+                            <option value="name-asc">{t('documents.sortOptions.nameAsc')}</option>
+                            <option value="name-desc">{t('documents.sortOptions.nameDesc')}</option>
+                            <option value="size-desc">{t('documents.sortOptions.sizeDesc')}</option>
+                            <option value="size-asc">{t('documents.sortOptions.sizeAsc')}</option>
+                        </select>
+                    </div>
+                </div>
+
+                {/* Единственный источник голосового статуса списка для скринридера. */}
+                <p className="sr-only" role="status" aria-live="polite">{listStatusMessage}</p>
+
+                {/* Сбой фонового обновления не должен прятать уже загруженный список. */}
+                {loadError && documents.length > 0 && (
+                    <div role="alert" className="flex flex-wrap items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-3">
+                        <span className="flex items-center gap-2 text-sm font-semibold text-red-700">
+                            <AlertTriangle className="h-4 w-4" />
+                            {loadError}
+                        </span>
+                        <Button type="button" variant="outline" size="sm" onClick={retryFetchDocuments}>
+                            <RefreshCw className="h-4 w-4" />
+                            {t('documents.retry')}
+                        </Button>
+                    </div>
+                )}
+
+                {isListTruncated && !loadError && (
+                    <p className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs font-semibold text-amber-800">
+                        {t('documents.pagination.truncated', { count: documents.length })}
+                    </p>
+                )}
+
+                <div className="overflow-x-auto">
+                    <table className="w-full min-w-[820px] text-left">
+                        <thead className="bg-slate-50 text-xs uppercase tracking-[0.08em] text-slate-500">
+                            <tr>
+                                <th className="px-5 py-3 font-semibold">{t('documents.table.fileName')}</th>
+                                <th className="px-5 py-3 font-semibold">{t('documents.table.language')}</th>
+                                <th className="px-5 py-3 font-semibold">{t('documents.table.uploadedAt')}</th>
+                                <th className="px-5 py-3 font-semibold">{t('documents.table.size')}</th>
+                                <th className="px-5 py-3 font-semibold">{t('documents.table.status')}</th>
+                                <th className="px-5 py-3 text-right font-semibold">{t('documents.table.actions')}</th>
+                            </tr>
+                        </thead>
+
+                        <tbody>
+                            {isLoading ? (
+                                <tr>
+                                    <td colSpan="6" className="px-5 py-12 text-center text-slate-500">
+                                        <div className="inline-flex items-center gap-2">
+                                            <Loader2 className="h-5 w-5 animate-spin" />
+                                            {t('documents.loading')}
+                                        </div>
+                                    </td>
+                                </tr>
+                            ) : loadError && documents.length === 0 ? (
+                                <tr>
+                                    <td colSpan="6" className="px-5 py-12">
+                                        {/* Сбой загрузки: явно отличаем от пустой базы и даём повторить. */}
+                                        <div role="alert" className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-xl bg-red-50 p-6 text-center">
+                                            <AlertTriangle className="h-6 w-6 text-red-600" />
+                                            <p className="text-sm font-semibold text-red-700">{loadError}</p>
+                                            <Button type="button" variant="outline" onClick={retryFetchDocuments}>
+                                                <RefreshCw className="h-4 w-4" />
+                                                {t('documents.retry')}
+                                            </Button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ) : visibleDocuments.length === 0 ? (
+                                <tr>
+                                    <td colSpan="6" className="px-5 py-12 text-center text-slate-500">
+                                        {t('documents.empty')}
+                                    </td>
+                                </tr>
+                            ) : (
+                                visibleDocuments.map((doc) => {
+                                    const statusKey = resolveStatus(doc.status);
+                                    const documentStatusMeta = statusMeta[statusKey];
+                                    const languageTag = formatDocumentLanguage(doc.language);
+
+                                    return (
+                                        <tr key={doc.id} className="border-t border-slate-100 text-sm hover:bg-slate-50/70">
+                                            <td className="px-5 py-3">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-100 text-red-500">
+                                                        <FileText className="h-4 w-4" />
+                                                    </div>
+                                                    <div>
+                                                        <p className="font-semibold text-slate-800">{doc.name}</p>
+                                                        <p className="text-xs text-slate-400">ID #{doc.id}</p>
+                                                    </div>
+                                                </div>
+                                            </td>
+
+                                            <td className="px-5 py-3">
+                                                <span className={cn('rounded px-2 py-0.5 text-xs font-semibold', languageTag.className)}>
+                                                    {languageTag.text}
+                                                </span>
+                                            </td>
+
+                                            <td className="px-5 py-3 text-slate-500">
+                                                {formatLocaleDate(doc.created_at, locale, {
+                                                    month: 'short',
+                                                    day: 'numeric',
+                                                    year: 'numeric',
+                                                })}
+                                            </td>
+
+                                            <td className="px-5 py-3 text-slate-500">
+                                                {formatSize(doc.size, t)}
+                                            </td>
+
+                                            <td className="px-5 py-3">
+                                                <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold', documentStatusMeta.badgeClass)}>
+                                                    {statusKey === 'indexing' ? (
+                                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                    ) : statusKey === 'pending' ? (
+                                                        <Clock className="h-3.5 w-3.5" />
+                                                    ) : statusKey === 'error' ? (
+                                                        <AlertTriangle className="h-3.5 w-3.5" />
+                                                    ) : (
+                                                        <CheckCircle2 className="h-3.5 w-3.5" />
+                                                    )}
+                                                    {documentStatusMeta.label}
+                                                </span>
+                                            </td>
+
+                                            <td className="px-5 py-3 text-right">
+                                                <div className="inline-flex items-center gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => fetchChunks(doc.id, doc.name)}
+                                                        className="rounded-md p-1.5 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                                        title={t('documents.viewChunks')}
+                                                        aria-label={t('documents.viewChunksFor', { name: doc.name })}
+                                                    >
+                                                        <Eye className="h-4 w-4" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openDeleteDialog(doc)}
+                                                        className="rounded-md p-1.5 text-slate-500 transition hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                                        title={t('documents.delete')}
+                                                        aria-label={t('documents.deleteSource', { name: doc.name })}
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+
+                {!isLoading && sortedDocuments.length > 0 && (
+                    <nav
+                        className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3"
+                        aria-label={t('documents.pagination.label')}
+                    >
+                        <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-500">
+                            <span>{t('documents.pagination.range', { from: rangeStart, to: rangeEnd, total: sortedDocuments.length })}</span>
+                            {sortedDocuments.length !== totalCount && (
+                                <span>{t('documents.pagination.totalAll', { count: totalCount })}</span>
+                            )}
+                            <span className="flex items-center gap-2">
+                                <label htmlFor="documents-page-size">{t('documents.pagination.pageSize')}</label>
+                                <select
+                                    id="documents-page-size"
+                                    value={pageSize}
+                                    onChange={(event) => setPageSize(Number(event.target.value))}
+                                    className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-semibold text-slate-700 outline-none focus:border-[#1f3a60] focus:ring-1 focus:ring-[#1f3a60]"
+                                >
+                                    {PAGE_SIZE_OPTIONS.map((option) => (
+                                        <option key={option} value={option}>{option}</option>
+                                    ))}
+                                </select>
+                            </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={currentPage <= 1}
+                                onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                                aria-label={t('documents.pagination.previous')}
+                            >
+                                <ChevronLeft className="h-4 w-4" />
+                            </Button>
+                            <span className="text-xs font-semibold text-slate-600">
+                                {t('documents.pagination.pageOf', { page: currentPage, pages: pageCount })}
+                            </span>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={currentPage >= pageCount}
+                                onClick={() => setPage((prev) => Math.min(pageCount, prev + 1))}
+                                aria-label={t('documents.pagination.next')}
+                            >
+                                <ChevronRight className="h-4 w-4" />
+                            </Button>
+                        </div>
+                    </nav>
+                )}
+            </section>
+
+            {/* Chunks Modal */}
+            {chunksModal.isOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div
+                        className="absolute inset-0 bg-black/50"
+                        onClick={closeChunksModal}
+                        aria-hidden="true"
+                    />
+                    <div
+                        ref={chunksDialogRef}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="chunks-dialog-title"
+                        className="relative max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-xl"
+                    >
+                        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+                            <div>
+                                <h3 id="chunks-dialog-title" className="text-lg font-bold text-slate-800">{t('documents.chunksTitle')}</h3>
+                                <p className="text-sm text-slate-500">{chunksModal.docName}</p>
+                            </div>
+                            <button
+                                ref={chunksCloseRef}
+                                type="button"
+                                onClick={closeChunksModal}
+                                className="rounded-lg p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                aria-label={t('documents.close')}
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        <div className="max-h-[calc(90vh-80px)] overflow-y-auto p-6" aria-live="polite">
+                            {chunksModal.isLoading ? (
+                                <div className="flex items-center justify-center py-12 text-slate-500">
+                                    <Loader2 className="h-6 w-6 animate-spin" />
+                                    <span className="ml-2">{t('documents.loadingChunks')}</span>
+                                </div>
+                            ) : chunksModal.error ? (
+                                <div role="alert" className="rounded-lg bg-red-50 p-4 text-center text-red-600">
+                                    {chunksModal.error}
+                                </div>
+                            ) : chunksModal.chunks.length === 0 ? (
+                                <div className="rounded-lg bg-slate-50 p-8 text-center text-slate-500">
+                                    {t('documents.emptyChunks')}
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    <div className="mb-4 text-sm text-slate-500">
+                                        {t('documents.totalChunks', { count: chunksModal.chunks.length })}
+                                    </div>
+                                    {chunksModal.chunks.map((chunk, index) => (
+                                        <div
+                                            key={chunk.id || index}
+                                            className="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                                        >
+                                            <div className="mb-2 flex items-center gap-2">
+                                                <span className="rounded-full bg-[#1f3a60]/10 px-2 py-0.5 text-xs font-semibold text-[#1f3a60]">
+                                                    {t('documents.page', { page: chunk.page || '?' })}
+                                                </span>
+                                                <span className="text-xs text-slate-400">
+                                                    {t('documents.id', { id: chunk.id })}
+                                                </span>
+                                            </div>
+                                            <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
+                                                {chunk.text}
+                                            </p>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Delete confirmation modal — вместо window.confirm/alert, чтобы кнопки были на языке приложения */}
+            {deleteTarget && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div
+                        className="absolute inset-0 bg-black/50"
+                        onClick={closeDeleteDialog}
+                        aria-hidden="true"
+                    />
+                    <div
+                        ref={deleteDialogRef}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="delete-dialog-title"
+                        aria-describedby="delete-dialog-description"
+                        className="relative w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-xl"
+                    >
+                        <div className="flex items-start gap-3 px-6 py-5">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
+                                <AlertTriangle className="h-5 w-5" />
+                            </div>
+                            <div>
+                                <h3 id="delete-dialog-title" className="text-base font-semibold text-slate-900">
+                                    {t('documents.deleteConfirm')}
+                                </h3>
+                                <p id="delete-dialog-description" className="mt-1 text-sm text-slate-500">
+                                    {t('documents.deleteDescription', { name: deleteTarget.name })}
+                                </p>
+                            </div>
+                        </div>
+
+                        {deleteError && (
+                            <p role="alert" className="mx-6 mb-2 rounded-lg bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">
+                                {deleteError}
+                            </p>
+                        )}
+
+                        <div className="flex justify-end gap-2 border-t border-slate-200 px-6 py-4">
+                            <Button
+                                ref={deleteCancelRef}
+                                type="button"
+                                variant="outline"
+                                onClick={closeDeleteDialog}
+                                disabled={isDeleting}
+                            >
+                                {t('documents.cancel')}
+                            </Button>
+                            <Button
+                                type="button"
+                                variant="destructive"
+                                onClick={confirmDelete}
+                                isLoading={isDeleting}
+                            >
+                                {isDeleting ? t('documents.deleting') : t('documents.delete')}
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+export default AdminDocumentsPage;

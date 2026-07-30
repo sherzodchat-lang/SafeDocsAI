@@ -1,0 +1,272 @@
+ИНСТРУКЦИЯ ПО ЛОКАЛЬНОМУ ЗАПУСКУ ПРОЕКТА SafeDocsAI С НУЛЯ
+
+Назначение
+Этот файл описывает, что нужно установить и как локально запустить проект на одном компьютере без серверного развертывания. Инструкция основана на фактической структуре папки проекта `SafeDocsAI/`.
+
+Для кого эта инструкция
+Инструкция рассчитана на запуск с нуля на Ubuntu Linux. На Windows и macOS команды установки и запуска служб будут другими.
+
+Что должно быть у пользователя
+- папка проекта на диске или распакованный архив проекта;
+- доступ в интернет для скачивания пакетов, контейнеров и моделей;
+- права на установку программ на компьютер.
+
+Стек проекта
+- Frontend: React 19 + Vite + Tailwind CSS
+- Backend: FastAPI + Python 3.12
+- База данных: PostgreSQL
+- Векторное хранилище: ChromaDB
+- Локальная LLM: Ollama
+- OCR: Tesseract OCR
+
+Что нужно скачать и установить заранее
+1. Node.js 20 или выше
+2. npm (обычно ставится вместе с Node.js)
+3. Python 3.12 или выше
+4. pip
+5. PostgreSQL 14 или выше
+6. Ollama
+7. Tesseract OCR
+8. Poppler Utils
+
+Если нужен самый простой локальный запуск, дополнительно рекомендуется установить:
+9. Docker
+10. Docker Compose plugin
+
+Какие модели Ollama нужны проекту
+- `gemma3n:e4b` для чата
+- `nomic-embed-text` для эмбеддингов
+
+Рекомендуемый вариант локального запуска
+Рекомендуется запускать локально так:
+- Ollama ставится и работает на хостовой машине
+- `postgres`, `chromadb`, `backend`, `frontend` запускаются через `docker compose`
+
+Это самый предсказуемый вариант, потому что контейнеры уже описаны в `SafeDocsAI/docker-compose.yml`.
+
+==================================================
+ВАРИАНТ A. ЛОКАЛЬНЫЙ ЗАПУСК ЧЕРЕЗ DOCKER COMPOSE
+==================================================
+
+1. Скопировать проект на локальный компьютер
+Нужно получить папку проекта на диске или распаковать архив.
+
+2. Открыть терминал в папке проекта
+Нужно перейти именно в ту папку, где лежат `docker-compose.yml`, `backend/` и `frontend/`.
+
+Пример:
+`cd "/path/to/SafeDocsAI"`
+
+3. Установить и запустить Ollama на локальной машине
+Пример для Linux:
+`curl -fsSL https://ollama.com/install.sh | sh`
+
+Запустить сервис Ollama в отдельном терминале:
+`ollama serve`
+
+Важно:
+- эту команду нужно оставить работающей;
+- если закрыть терминал с `ollama serve`, backend не сможет обращаться к моделям.
+
+Скачать обязательные модели:
+`ollama pull gemma3n:e4b`
+`ollama pull nomic-embed-text`
+
+Проверка:
+`ollama list`
+
+4. Подготовить переменные окружения
+Для Docker Compose отдельный `.env` не обязателен, потому что основные переменные уже указаны в `docker-compose.yml`, но секретный ключ лучше задать явно.
+
+Пример:
+`export SECRET_KEY=$(openssl rand -hex 32)`
+
+При необходимости можно также задать:
+`export OLLAMA_API_BASE=http://host.docker.internal:11434`
+`export OLLAMA_MODEL_CHAT=gemma3n:e4b`
+`export OLLAMA_MODEL_EMBEDDING=nomic-embed-text`
+
+5. Собрать и поднять контейнеры
+Команда:
+`docker compose up --build -d`
+
+Будут подняты сервисы:
+- `postgres`
+- `chromadb`
+- `backend`
+- `frontend`
+
+6. Инициализировать таблицы базы данных
+После первого старта выполнить:
+`docker compose exec backend python -c "import asyncio; from app.core.database import init_db; asyncio.run(init_db())"`
+
+7. Проверить локальную доступность
+Frontend:
+`http://localhost:3000`
+
+Backend API:
+`http://localhost:8001`
+
+Swagger:
+`http://localhost:8001/api/v1/docs`
+
+Health check:
+`curl http://localhost:8001/health`
+
+Readiness check:
+`curl http://localhost:8001/ready`
+
+8. Полезные команды диагностики
+Список контейнеров:
+`docker compose ps`
+
+Логи backend:
+`docker compose logs backend`
+
+Логи frontend:
+`docker compose logs frontend`
+
+Логи postgres:
+`docker compose logs postgres`
+
+Остановка проекта:
+`docker compose down`
+
+==================================================
+ВАРИАНТ B. ПОЛНОСТЬЮ ЛОКАЛЬНЫЙ ЗАПУСК БЕЗ DOCKER
+==================================================
+
+Этот вариант требует ручной установки всех зависимостей в систему.
+
+1. Скопировать проект на локальный компьютер
+Нужно получить папку проекта на диске или распаковать архив.
+
+2. Открыть терминал в папке проекта
+Нужно перейти именно в ту папку, где лежат `backend/` и `frontend/`.
+
+Пример:
+`cd "/path/to/SafeDocsAI"`
+
+3. Установить системные зависимости
+Для Ubuntu/Debian пример такой:
+`sudo apt update`
+`sudo apt install -y python3.12 python3.12-venv python3-pip nodejs npm postgresql postgresql-contrib tesseract-ocr tesseract-ocr-rus poppler-utils`
+
+Если Node.js из системного репозитория слишком старый, нужно установить Node.js 20+ отдельно.
+
+4. Запустить PostgreSQL и создать базу данных
+Пример:
+`sudo systemctl start postgresql`
+`sudo -u postgres psql -c "CREATE USER andozai_user WITH PASSWORD 'your_secure_password_here';"`
+`sudo -u postgres psql -c "CREATE DATABASE andozai_db OWNER andozai_user;"`
+
+5. Установить и запустить Ollama
+`curl -fsSL https://ollama.com/install.sh | sh`
+`ollama serve`
+`ollama pull gemma3n:e4b`
+`ollama pull nomic-embed-text`
+
+Важно:
+- `ollama serve` лучше запускать в отдельном терминале;
+- этот процесс должен продолжать работать во время использования проекта.
+
+6. Настроить backend
+Перейти в backend:
+`cd backend`
+
+Создать виртуальное окружение:
+`python3.12 -m venv venv`
+`source venv/bin/activate`
+
+Установить Python-зависимости:
+`pip install -r requirements.txt`
+
+Создать `.env` на основе шаблона:
+`cp .env.example .env`
+
+В `.env` должны быть корректно заполнены как минимум такие параметры:
+- `OLLAMA_API_BASE=http://localhost:11434`
+- `OLLAMA_MODEL_CHAT=gemma3n:e4b`
+- `OLLAMA_MODEL_EMBEDDING=nomic-embed-text`
+- `POSTGRES_USER=andozai_user`
+- `POSTGRES_PASSWORD=your_secure_password_here`
+- `POSTGRES_SERVER=localhost`
+- `POSTGRES_PORT=5432`
+- `POSTGRES_DB=andozai_db`
+- `SECRET_KEY=<случайная длинная строка>`
+- `CORS_ORIGINS=http://localhost:5173,http://localhost:4173`
+- `ENVIRONMENT=development`
+
+Секретный ключ можно сгенерировать командой:
+`openssl rand -hex 32`
+
+7. Инициализировать базу данных
+Находясь в `SafeDocsAI/backend`:
+`source venv/bin/activate`
+`python -c "import asyncio; from app.core.database import init_db; asyncio.run(init_db())"`
+
+8. Запустить backend
+Находясь в `SafeDocsAI/backend`:
+`source venv/bin/activate`
+`uvicorn app.main:app --reload --host 0.0.0.0 --port 8001`
+
+После запуска backend будет доступен по адресу:
+`http://localhost:8001`
+
+Документация API:
+`http://localhost:8001/api/v1/docs`
+
+9. Запустить frontend
+Открыть второй терминал и перейти в `SafeDocsAI/frontend`:
+`cd ../frontend`
+
+Установить Node-зависимости:
+`npm install`
+
+Так как в dev-режиме frontend по умолчанию использует относительный путь `/api/v1`, для локального запуска без reverse proxy нужно явно указать адрес backend:
+`export VITE_API_BASE_URL=http://localhost:8001/api/v1`
+
+Запуск frontend:
+`npm run dev`
+
+После запуска frontend будет доступен по адресу:
+`http://localhost:5173`
+
+10. Проверить работу проекта
+Проверка backend:
+`curl http://localhost:8001/health`
+
+Проверка готовности:
+`curl http://localhost:8001/ready`
+
+Проверка Ollama:
+`ollama list`
+
+Открыть в браузере:
+- `http://localhost:5173`
+- `http://localhost:8001/api/v1/docs`
+
+Примечания по ChromaDB
+В коде backend предусмотрена работа с ChromaDB. В локальном режиме без отдельного сервера Chroma приложение может использовать локальное persist-хранилище. Если требуется строго отдельный сервис ChromaDB, его проще всего поднимать через `docker compose` из варианта A.
+
+Минимальный чек-лист для локального запуска
+1. Установлены `Node.js`, `Python`, `PostgreSQL`, `Ollama`, `Tesseract`, `Poppler`
+2. Скачаны модели `gemma3n:e4b` и `nomic-embed-text`
+3. Создан и заполнен файл `backend/.env`
+4. Создана база `andozai_db`
+5. Выполнена инициализация таблиц
+6. Запущен процесс `ollama serve`
+7. Запущен backend на `localhost:8001`
+8. Запущен frontend на `localhost:5173` или `localhost:3000` при Docker-режиме
+9. `GET /health` отвечает без ошибки
+
+Итоговые локальные адреса
+- Frontend в Docker-режиме: `http://localhost:3000`
+- Frontend в обычном dev-режиме: `http://localhost:5173`
+- Backend API: `http://localhost:8001`
+- Swagger: `http://localhost:8001/api/v1/docs`
+- Health: `http://localhost:8001/health`
+- Ready: `http://localhost:8001/ready`
+
+Краткий вывод
+Для локального запуска с нуля проекту нужны Node.js, Python 3.12, PostgreSQL, Ollama, Tesseract OCR и Poppler Utils. Самый простой и повторяемый способ запуска локально: поднять `SafeDocsAI/docker-compose.yml`, отдельно установить Ollama на хост и скачать модели `gemma3n:e4b` и `nomic-embed-text`.

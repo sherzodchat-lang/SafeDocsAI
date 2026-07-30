@@ -1,0 +1,7 @@
+from app.modules.rag.service import (
+    MULTILINGUAL_EMBEDDING_MODEL,
+    RELEVANCE_DISTANCE_THRESHOLD,
+    RAGService,
+)
+
+__all__ = ["MULTILINGUAL_EMBEDDING_MODEL", "RELEVANCE_DISTANCE_THRESHOLD", "RAGService"]

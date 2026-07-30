@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15.2-alpine
+    container_name: andozai-postgres
+    environment:
+      POSTGRES_USER: andozai_user
+      POSTGRES_PASSWORD: andozai_password
+      POSTGRES_DB: andozai_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U andozai_user -d andozai_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: andozai-chromadb
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: andozai-backend
+    ports:
+      # Только loopback: наружу бэкенд ходит через nginx, иначе его
+      # client_max_body_size обходится прямым запросом на 8001.
+      - "127.0.0.1:8001:8001"
+    environment:
+      - ENVIRONMENT=production
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=andozai_user
+      - POSTGRES_PASSWORD=andozai_password
+      - POSTGRES_DB=andozai_db
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://host.docker.internal:11434}
+      - OLLAMA_TIMEOUT_SECONDS=${OLLAMA_TIMEOUT_SECONDS:-120}
+      - OLLAMA_MODEL_CHAT=${OLLAMA_MODEL_CHAT:-gemma4:27b}
+      - OLLAMA_MODEL_EMBEDDING=${OLLAMA_MODEL_EMBEDDING:-qwen3-embedding:8b}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set (python -c "import secrets; print(secrets.token_hex(32))")}
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:4173,http://64.247.206.198,http://64.247.206.198:80
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    volumes:
+      - ./backend/data:/app/data
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --workers 2
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: andozai-frontend
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  chroma_data:

@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <title>AndozAI - Суверенный ИИ</title>
+
+    <!-- Reveal.js CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.3.1/reset.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.3.1/reveal.min.css">
+
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Fonts -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&family=Inter:wght@400;500;600&display=swap"
+        rel="stylesheet">
+
+    <!-- Custom Styles -->
+    <style>
+        :root {
+            --primary: #1e3a5f;
+            --primary-dark: #112238;
+            --primary-light: #2a5080;
+            --gold: #d4af37;
+            --gold-light: #e8cc6e;
+            --bg-color: #f0f2f5;
+            --text-main: #2d3748;
+            --danger: #e53e3e;
+            --success: #38a169;
+            --accent-blue: #3b82f6;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+        }
+
+        .reveal .slides {
+            text-align: center;
+        }
+
+        .reveal .slides section {
+            padding: 20px 40px;
+        }
+
+        /* Typography */
+        .reveal h1,
+        .reveal h2,
+        .reveal h3,
+        .reveal h4 {
+            font-family: 'Outfit', sans-serif;
+            color: var(--primary);
+            text-transform: none;
+            font-weight: 700;
+            margin-bottom: 20px;
+        }
+
+        .reveal h1 {
+            font-size: 3.6em;
+            line-height: 1.05;
+            letter-spacing: -0.02em;
+        }
+
+        .reveal h2 {
+            font-size: 2.4em;
+        }
+
+        .reveal h3 {
+            font-size: 1.5em;
+        }
+
+        .reveal p,
+        .reveal li {
+            font-size: 1.25em;
+            line-height: 1.55;
+            color: var(--text-main);
+        }
+
+        .reveal strong {
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        /* UI Elements */
+        .glass-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(30, 58, 95, 0.08);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.05);
+            margin: 20px auto;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .glass-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.08);
+        }
+
+        .hero-slide {
+            background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary) 50%, var(--primary-light) 100%);
+            color: white;
+            border-radius: 30px;
+            padding: 70px 60px;
+            box-shadow: 0 25px 60px rgba(17, 34, 56, 0.35);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero-slide::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -20%;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(212, 175, 55, 0.08) 0%, transparent 70%);
+            border-radius: 50%;
+        }
+
+        .hero-slide::after {
+            content: '';
+            position: absolute;
+            bottom: -30%;
+            left: -10%;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, rgba(255, 255, 255, 0.03) 0%, transparent 70%);
+            border-radius: 50%;
+        }
+
+        .hero-slide h1,
+        .hero-slide h2,
+        .hero-slide h3,
+        .hero-slide p {
+            color: white;
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero-slide h3 {
+            font-weight: 400;
+            opacity: 0.9;
+        }
+
+        .status-badge {
+            background-color: rgba(212, 175, 55, 0.15);
+            color: var(--gold);
+            padding: 10px 24px;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 0.85em;
+            display: inline-block;
+            border: 1px solid rgba(212, 175, 55, 0.3);
+        }
+
+        .hero-badge {
+            background: rgba(212, 175, 55, 0.15);
+            border: 1px solid rgba(212, 175, 55, 0.4);
+            color: var(--gold-light);
+            padding: 8px 22px;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 0.75em;
+            display: inline-block;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            position: relative;
+            z-index: 1;
+        }
+
+        .flex-row {
+            display: flex;
+            gap: 30px;
+            justify-content: center;
+            align-items: stretch;
+            width: 100%;
+        }
+
+        .flex-col {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .text-left {
+            text-align: left;
+        }
+
+        /* Problem Cards */
+        .problem-card {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            text-align: left;
+            flex: 1;
+            border-left: 4px solid var(--danger);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.06);
+        }
+
+        .problem-card .icon-circle {
+            width: 50px;
+            height: 50px;
+            border-radius: 12px;
+            background: rgba(229, 62, 62, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+        }
+
+        .problem-card .icon-circle i {
+            color: var(--danger);
+            font-size: 1.3em;
+        }
+
+        .problem-card h4 {
+            font-size: 1.15em;
+            margin-bottom: 8px;
+            color: var(--primary-dark);
+        }
+
+        .problem-card p {
+            font-size: 1em !important;
+            color: #64748b;
+            margin: 0;
+            line-height: 1.4;
+        }
+
+        /* Step Cards */
+        .step-card {
+            background: white;
+            border-radius: 20px;
+            padding: 35px 30px;
+            text-align: left;
+            flex: 1;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            position: relative;
+            border: 1px solid rgba(30, 58, 95, 0.08);
+        }
+
+        .step-number {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Outfit', sans-serif;
+            font-weight: 800;
+            font-size: 1.2em;
+            margin-bottom: 18px;
+        }
+
+        .step-card.external .step-number {
+            background: linear-gradient(135deg, var(--gold), var(--gold-light));
+        }
+
+        .step-arrow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8em;
+            color: var(--primary);
+            opacity: 0.4;
+            padding: 0 5px;
+        }
+
+        /* Value Cards */
+        .value-card {
+            flex: 1;
+            text-align: left;
+            padding: 25px;
+        }
+
+        .value-card .icon-box {
+            width: 52px;
+            height: 52px;
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+            font-size: 1.3em;
+        }
+
+        .value-card h3 {
+            font-size: 1.2em;
+            margin-bottom: 8px;
+        }
+
+        .value-card p {
+            font-size: 1em !important;
+            color: #64748b;
+            line-height: 1.45;
+        }
+
+        /* --- ARCHITECTURE DIAGRAM --- */
+        .diagram-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 35px;
+            margin-top: 30px;
+            position: relative;
+            width: 100%;
+        }
+
+        .diagram-zone-secure {
+            border: 2px dashed var(--success);
+            background: rgba(56, 161, 105, 0.04);
+            border-radius: 24px;
+            padding: 35px 25px;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+        }
+
+        .diagram-zone-secure::before {
+            content: "🛡 Закрытый Контур (Внутри РТ)";
+            position: absolute;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--success);
+            color: white;
+            padding: 5px 20px;
+            border-radius: 20px;
+            font-size: 0.65em;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .node {
+            background: white;
+            border: 2px solid var(--primary);
+            border-radius: 16px;
+            padding: 22px 18px;
+            width: 230px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+            position: relative;
+            z-index: 2;
+        }
+
+        .node.external {
+            border-color: var(--gold);
+            border-style: dashed;
+        }
+
+        .node i {
+            font-size: 2.5em;
+            margin-bottom: 12px;
+            color: var(--primary);
+        }
+
+        .node.external i {
+            color: var(--gold);
+        }
+
+        .node h4 {
+            font-size: 1.05em;
+            margin: 0 0 8px 0;
+            color: var(--primary-dark);
+        }
+
+        .node p {
+            font-size: 0.8em !important;
+            margin: 0;
+            color: #4a5568;
+            line-height: 1.35;
+        }
+
+        .animated-arrow {
+            width: 70px;
+            height: 4px;
+            background: var(--primary);
+            position: relative;
+            border-radius: 2px;
+        }
+
+        .animated-arrow::after {
+            content: '';
+            position: absolute;
+            right: -10px;
+            top: -8px;
+            border-top: 10px solid transparent;
+            border-bottom: 10px solid transparent;
+            border-left: 15px solid var(--primary);
+        }
+
+        .arrow-dot {
+            width: 12px;
+            height: 12px;
+            background: var(--gold);
+            border-radius: 50%;
+            position: absolute;
+            top: -4px;
+            left: 0;
+            animation: travel 2.5s infinite ease-in-out;
+            box-shadow: 0 0 12px var(--gold), 0 0 4px var(--gold);
+        }
+
+        @keyframes travel {
+            0% {
+                left: 0;
+                opacity: 0;
+            }
+
+            10% {
+                opacity: 1;
+            }
+
+            80% {
+                opacity: 1;
+            }
+
+            100% {
+                left: 100%;
+                opacity: 0;
+            }
+        }
+
+        /* Return arrow (right to left) */
+        .animated-arrow-back {
+            width: 70px;
+            height: 4px;
+            background: var(--success);
+            position: relative;
+            border-radius: 2px;
+        }
+
+        .animated-arrow-back::after {
+            content: '';
+            position: absolute;
+            left: -10px;
+            top: -8px;
+            border-top: 10px solid transparent;
+            border-bottom: 10px solid transparent;
+            border-right: 15px solid var(--success);
+        }
+
+        .arrow-dot-back {
+            width: 12px;
+            height: 12px;
+            background: var(--success);
+            border-radius: 50%;
+            position: absolute;
+            top: -4px;
+            right: 0;
+            animation: travel-back 2.5s infinite ease-in-out;
+            animation-delay: 1.2s;
+            box-shadow: 0 0 12px var(--success), 0 0 4px var(--success);
+        }
+
+        @keyframes travel-back {
+            0% {
+                right: 0;
+                opacity: 0;
+            }
+
+            10% {
+                opacity: 1;
+            }
+
+            80% {
+                opacity: 1;
+            }
+
+            100% {
+                right: 100%;
+                opacity: 0;
+            }
+        }
+
+        /* Pulse glow on nodes */
+        .node {
+            animation: node-pulse 3s ease-in-out infinite;
+        }
+
+        @keyframes node-pulse {
+
+            0%,
+            100% {
+                box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+            }
+
+            50% {
+                box-shadow: 0 10px 30px rgba(30, 58, 95, 0.15);
+            }
+        }
+
+        .diagram-zone-secure .node {
+            animation: secure-pulse 3s ease-in-out infinite;
+        }
+
+        @keyframes secure-pulse {
+
+            0%,
+            100% {
+                box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+            }
+
+            50% {
+                box-shadow: 0 10px 30px rgba(56, 161, 105, 0.2);
+            }
+        }
+
+        /* Diagram layout with two rows */
+        .diagram-flow {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            margin-top: 25px;
+            width: 100%;
+        }
+
+        .diagram-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 35px;
+            width: 100%;
+        }
+
+        .flow-label {
+            font-size: 0.7em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            padding: 4px 14px;
+            border-radius: 20px;
+            white-space: nowrap;
+        }
+
+        /* Progress Bar */
+        .progress-track {
+            background: rgba(30, 58, 95, 0.1);
+            border-radius: 8px;
+            height: 10px;
+            width: 100%;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 8px;
+            background: linear-gradient(90deg, var(--primary), var(--accent-blue));
+            transition: width 1s ease;
+        }
+
+        .progress-fill.gold {
+            background: linear-gradient(90deg, var(--gold), var(--gold-light));
+        }
+
+        /* Status Cards */
+        .status-card {
+            background: white;
+            border-radius: 20px;
+            padding: 35px;
+            text-align: left;
+            flex: 1;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+            border: 1px solid rgba(30, 58, 95, 0.08);
+        }
+
+        .status-card ul {
+            padding-left: 0;
+            list-style: none;
+        }
+
+        .status-card ul li {
+            padding: 6px 0 6px 28px;
+            position: relative;
+            font-size: 1.05em;
+            color: #475569;
+        }
+
+        .status-card ul li::before {
+            content: '✓';
+            position: absolute;
+            left: 0;
+            color: var(--success);
+            font-weight: 700;
+        }
+
+        /* Timeline */
+        .timeline {
+            display: flex;
+            justify-content: center;
+            gap: 0;
+            margin-top: 30px;
+            position: relative;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            top: 28px;
+            left: 15%;
+            right: 15%;
+            height: 3px;
+            background: linear-gradient(90deg, var(--success), var(--primary), var(--gold), #94a3b8);
+            z-index: 0;
+        }
+
+        .timeline-item {
+            flex: 1;
+            text-align: center;
+            position: relative;
+            z-index: 1;
+            max-width: 220px;
+        }
+
+        .timeline-dot {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin: 18px auto 16px;
+            border: 3px solid white;
+            box-shadow: 0 0 0 3px var(--primary);
+        }
+
+        .timeline-dot.done {
+            background: var(--success);
+            box-shadow: 0 0 0 3px var(--success);
+        }
+
+        .timeline-dot.active {
+            background: var(--primary);
+            box-shadow: 0 0 0 3px var(--primary), 0 0 12px rgba(30, 58, 95, 0.4);
+        }
+
+        .timeline-dot.future {
+            background: #e2e8f0;
+            box-shadow: 0 0 0 3px #cbd5e1;
+        }
+
+        .timeline-label {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 700;
+            font-size: 0.85em;
+            color: var(--primary);
+        }
+
+        .timeline-desc {
+            font-size: 0.75em;
+            color: #64748b;
+            margin-top: 4px;
+            line-height: 1.3;
+        }
+
+        /* CTA Block */
+        .cta-block {
+            display: flex;
+            gap: 40px;
+            justify-content: center;
+            margin-top: 50px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .cta-item {
+            text-align: center;
+        }
+
+        .cta-item i {
+            font-size: 1.6em;
+            color: var(--gold);
+            margin-bottom: 10px;
+            display: block;
+        }
+
+        .cta-item .label {
+            font-size: 0.8em;
+            opacity: 0.7;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 4px;
+        }
+
+        .cta-item .value {
+            font-family: 'Outfit', sans-serif;
+            font-size: 1.15em;
+            font-weight: 700;
+        }
+
+        /* Footer info */
+        .slide-footer {
+            position: relative;
+            z-index: 1;
+            margin-top: 40px;
+            font-size: 0.75em;
+            opacity: 0.6;
+            letter-spacing: 0.02em;
+        }
+
+        /* Reveal customizations */
+        .reveal .controls {
+            color: var(--primary);
+        }
+
+        .reveal .progress {
+            color: var(--gold);
+            height: 4px;
+        }
+
+        /* Subtle background for non-hero slides */
+        .reveal .slides section:not(.hero-section) {
+            background: transparent;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="reveal">
+        <div class="slides">
+
+            <!-- ======== SLIDE 1: TITLE ======== -->
+            <section class="hero-section">
+                <div class="hero-slide">
+                    <p
+                        style="font-size: 0.95em; opacity: 0.85; margin: 0 0 6px 0; letter-spacing: 0.03em; position: relative; z-index: 1;">
+                        Политехнический институт Таджикского технического университета<br>
+                        им. академика М. С. Осими
+                    </p>
+                    <p style="font-size: 0.8em; opacity: 0.65; margin: 0 0 20px 0; position: relative; z-index: 1;">
+                        Специальность: 4_40.01.02 &nbsp;|&nbsp; 4 курс
+                    </p>
+
+                    <div>
+                        <i class="fa-solid fa-building-columns"
+                            style="font-size: 3.5em; color: var(--gold); margin-bottom: 15px; display: block; position: relative; z-index: 1;"></i>
+                        <h1 style="margin-bottom: 10px;">AndozAI</h1>
+                        <h3 style="font-size: 1.3em; max-width: 800px; margin: 0 auto; line-height: 1.3;">
+                            Первый суверенный ИИ-консультант<br>
+                            для Налоговой службы Республики Таджикистан
+                        </h3>
+                    </div>
+
+                    <div
+                        style="margin-top: 40px; display: flex; justify-content: center; gap: 60px; position: relative; z-index: 1;">
+                        <div style="text-align: center;">
+                            <p
+                                style="font-size: 0.65em; opacity: 0.5; margin: 0 0 3px 0; text-transform: uppercase; letter-spacing: 0.06em;">
+                                Руководитель</p>
+                            <p style="font-size: 0.9em; margin: 0; font-weight: 600;">Иномов Б.Б.</p>
+                        </div>
+                        <div style="text-align: center;">
+                            <p
+                                style="font-size: 0.65em; opacity: 0.5; margin: 0 0 3px 0; text-transform: uppercase; letter-spacing: 0.06em;">
+                                Исполнитель</p>
+                            <p style="font-size: 0.9em; margin: 0; font-weight: 600;">Зокиров Ш.Ш.</p>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 20px; position: relative; z-index: 1;">
+                        <p style="font-size: 0.75em; opacity: 0.45; margin: 0;">Февраль 2026</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ======== SLIDE 2: PROBLEM ======== -->
+            <section>
+                <h2><i class="fa-solid fa-triangle-exclamation"
+                        style="color: var(--danger); margin-right: 10px;"></i>Какую проблему мы решаем?</h2>
+                <p
+                    style="font-size: 1.1em; color: #64748b; margin-bottom: 25px; max-width: 1000px; margin-left: auto; margin-right: auto;">
+                    Граждане и бизнес ежедневно нуждаются в консультациях по налогам. Публичные ИИ (ChatGPT, Gemini)
+                    <strong style="color: var(--danger);">создают критические риски</strong> для государства:
+                </p>
+
+                <div class="flex-row" style="flex-wrap: wrap; gap: 20px;">
+                    <div class="problem-card fragment" style="flex: 1; min-width: 250px;">
+                        <div class="icon-circle">
+                            <i class="fa-solid fa-lock-open"></i>
+                        </div>
+                        <h4>Утечка данных</h4>
+                        <p>Налоговая тайна граждан пересекает границу государства при каждом запросе к внешнему API.</p>
+                    </div>
+
+                    <div class="problem-card fragment" style="flex: 1; min-width: 250px;">
+                        <div class="icon-circle">
+                            <i class="fa-solid fa-ghost"></i>
+                        </div>
+                        <h4>Галлюцинации ИИ</h4>
+                        <p>ИИ выдумывает несуществующие статьи Налогового кодекса и даёт ложные юридические советы.</p>
+                    </div>
+
+                    <div class="problem-card fragment" style="flex: 1; min-width: 250px;">
+                        <div class="icon-circle">
+                            <i class="fa-solid fa-file-circle-question"></i>
+                        </div>
+                        <h4>Сложность языка</h4>
+                        <p>Юридические тексты непонятны обычным гражданам и предпринимателям без специального
+                            образования.</p>
+                    </div>
+
+                    <div class="problem-card fragment"
+                        style="flex: 1; min-width: 250px; border-left-color: var(--gold);">
+                        <div class="icon-circle" style="background: rgba(212, 175, 55, 0.1);">
+                            <i class="fa-solid fa-plug-circle-xmark" style="color: var(--gold);"></i>
+                        </div>
+                        <h4>Зависимость от иностранных сервисов</h4>
+                        <p>Если доступ к ChatGPT или Gemini будет отключён — государство останется без ИИ‑инструментов.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ======== SLIDE 3: ARCHITECTURE ======== -->
+            <section>
+                <h2 style="margin-bottom: 5px;">Архитектура AndozAI</h2>
+                <p style="color: var(--success); font-weight: 600; font-size: 1.1em;">
+                    <i class="fa-solid fa-shield-halved"></i> Все данные остаются внутри территории РТ
+                </p>
+
+                <div class="diagram-flow">
+                    <!-- Row 1: Request flow -->
+                    <div class="diagram-row">
+                        <span class="flow-label" style="background: rgba(30,58,95,0.08); color: var(--primary);">
+                            <i class="fa-solid fa-arrow-right"></i> Запрос
+                        </span>
+                    </div>
+                    <div class="diagram-row">
+                        <!-- User -->
+                        <div class="node">
+                            <i class="fa-solid fa-user-tie"></i>
+                            <h4>Пользователь</h4>
+                            <p>Задает вопрос о налогах на русском или таджикском</p>
+                        </div>
+
+                        <!-- Arrow to secure zone -->
+                        <div class="animated-arrow">
+                            <div class="arrow-dot"></div>
+                        </div>
+
+                        <!-- Secure Zone -->
+                        <div class="diagram-zone-secure">
+                            <div class="node" style="width: 250px;">
+                                <i class="fa-solid fa-database"></i>
+                                <h4>Локальный RAG</h4>
+                                <p>Поиск по закрытой базе законов и кодексов</p>
+                            </div>
+                            <div class="node" style="width: 250px;">
+                                <i class="fa-solid fa-microchip"></i>
+                                <h4>Gemma 3 (Локально)</h4>
+                                <p>Формирует ответ строго на основе найденных документов</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Row 2: Response flow -->
+                    <div class="diagram-row">
+                        <span class="flow-label" style="background: rgba(56,161,105,0.1); color: var(--success);">
+                            <i class="fa-solid fa-arrow-left"></i> Ответ
+                        </span>
+                    </div>
+                    <div class="diagram-row">
+                        <!-- Answer to user -->
+                        <div class="node" style="border-color: var(--success); background: rgba(56,161,105,0.03);">
+                            <i class="fa-solid fa-comment-dots" style="color: var(--success);"></i>
+                            <h4 style="color: var(--success);">Понятный Ответ</h4>
+                            <p>Гражданин получает точную консультацию со ссылкой на закон</p>
+                        </div>
+
+                        <!-- Return arrow -->
+                        <div class="animated-arrow-back">
+                            <div class="arrow-dot-back"></div>
+                        </div>
+
+                        <!-- Result from secure zone -->
+                        <div class="node" style="border-color: var(--success); width: 310px;">
+                            <i class="fa-solid fa-file-shield" style="color: var(--success);"></i>
+                            <h4>Проверенный Результат</h4>
+                            <p>Ответ основан только на загруженных законах РТ. Без фантазий и галлюцинаций.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ======== SLIDE 4: HOW IT WORKS (Steps) ======== -->
+            <section>
+                <h2>Как это работает</h2>
+                <p style="color: #64748b; font-size: 1.05em; margin-bottom: 25px;">Два этапа обработки каждого запроса
+                </p>
+
+                <div style="display: flex; align-items: stretch; justify-content: center; gap: 12px;">
+                    <div class="step-card">
+                        <div class="step-number">1</div>
+                        <h3 style="color: var(--primary); margin-bottom: 10px;">Поиск (RAG)</h3>
+                        <p style="font-size: 1.05em;">Запрос ищется <strong>локально</strong> в векторной БД. Данные не
+                            покидают сервер налоговой. Без интернета.</p>
+                    </div>
+
+                    <div class="step-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+
+                    <div class="step-card">
+                        <div class="step-number">2</div>
+                        <h3 style="color: var(--primary); margin-bottom: 10px;">Решение (Gemma)</h3>
+                        <p style="font-size: 1.05em;">Локальная нейросеть анализирует найденный закон и формирует
+                            строгий ответ. <strong style="color: var(--success);">Минимальный риск утечки.</strong></p>
+                    </div>
+
+
+                </div>
+            </section>
+
+            <!-- ======== SLIDE 5: VALUE PROPOSITION ======== -->
+            <section>
+                <h2><i class="fa-solid fa-gem" style="color: var(--gold);"></i> Ценность Проекта</h2>
+
+                <div class="glass-card" style="max-width: 1200px; padding: 30px 40px;">
+                    <div class="flex-row" style="margin-bottom: 20px;">
+                        <div class="value-card">
+                            <div class="icon-box" style="background: rgba(30, 58, 95, 0.08); color: var(--primary);">
+                                <i class="fa-solid fa-shield-halved"></i>
+                            </div>
+                            <h3>Цифровой Суверенитет</h3>
+                            <p>ИИ-движок работает внутри инфраструктуры РТ. Полное соответствие законам о защите данных.
+                            </p>
+                        </div>
+                        <div class="value-card">
+                            <div class="icon-box" style="background: rgba(56, 161, 105, 0.08); color: var(--success);">
+                                <i class="fa-solid fa-headset"></i>
+                            </div>
+                            <h3>Разгрузка Call-центров</h3>
+                            <p>Система моментально консультирует тысячи граждан на таджикском и русском языках 24/7.</p>
+                        </div>
+                    </div>
+                    <div class="flex-row">
+                        <div class="value-card">
+                            <div class="icon-box"
+                                style="background: rgba(59, 130, 246, 0.08); color: var(--accent-blue);">
+                                <i class="fa-solid fa-scale-balanced"></i>
+                            </div>
+                            <h3>Минимум Галлюцинаций</h3>
+                            <p>В отличие от публичных ИИ, система отвечает строго на основе загруженных документов. Нет
+                                в базе = «Данных нет».</p>
+                        </div>
+                        <div class="value-card">
+                            <div class="icon-box" style="background: rgba(212, 175, 55, 0.1); color: var(--gold);">
+                                <i class="fa-solid fa-plug-circle-check"></i>
+                            </div>
+                            <h3>Полная Независимость</h3>
+                            <p>Система работает автономно даже если доступ к ChatGPT/Gemini будет отключён. Локальная
+                                модель — наша страховка.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ======== SLIDE 6: CURRENT STATUS & ROADMAP ======== -->
+            <section>
+                <h2>Текущая Реализация</h2>
+
+                <div class="flex-row" style="margin-bottom: 30px;">
+                    <div class="status-card">
+                        <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 20px;">
+                            <i class="fa-solid fa-server" style="font-size: 2em; color: var(--primary);"></i>
+                            <div>
+                                <h3 style="margin: 0;">Backend Core</h3>
+                                <span class="status-badge" style="font-size: 0.7em; padding: 4px 14px;">Готово</span>
+                            </div>
+                        </div>
+                        <ul>
+                            <li>FastAPI + PostgreSQL</li>
+                            <li>Локальная база знаний (ChromaDB)</li>
+                            <li>Гибридный RAG-конвейер</li>
+                            <li>Локальный ИИ-движок (Gemma 3)</li>
+                        </ul>
+                    </div>
+                    <div class="status-card">
+                        <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 20px;">
+                            <i class="fa-solid fa-desktop" style="font-size: 2em; color: var(--primary);"></i>
+                            <div>
+                                <h3 style="margin: 0;">Frontend UI</h3>
+                                <span class="status-badge" style="font-size: 0.7em; padding: 4px 14px;">Готово</span>
+                            </div>
+                        </div>
+                        <ul>
+                            <li>Современная дизайн-система (React 19)</li>
+                            <li>Чат-интерфейс пользователя</li>
+                            <li>Панель администратора с логами</li>
+                            <li>Управление FAQ и документами</li>
+                        </ul>
+                    </div>
+                    <div class="status-card">
+                        <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 20px;">
+                            <i class="fa-solid fa-brain" style="font-size: 2em; color: var(--gold);"></i>
+                            <div>
+                                <h3 style="margin: 0;">AI и Данные</h3>
+                                <span class="status-badge" style="font-size: 0.7em; padding: 4px 14px;">В
+                                    процессе</span>
+                            </div>
+                        </div>
+                        <ul>
+                            <li>Обучение на <strong>10 000+ таджикских</strong> новостей и текстов</li>
+                            <li>Арендован выделенный сервер (<strong>$500</strong>) для дообучения собственной модели
+                            </li>
+                            <li>Fine-tuning для таджикского языка</li>
+                            <li>Расширение базы знаний законов</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Roadmap Timeline -->
+                <h3 style="font-size: 1.2em; margin-bottom: 5px;">Дорожная Карта</h3>
+                <div class="timeline">
+                    <div class="timeline-item">
+                        <div class="timeline-label">Q4 2025</div>
+                        <div class="timeline-dot done"></div>
+                        <div class="timeline-desc">Прототип и<br>базовый RAG</div>
+                    </div>
+                    <div class="timeline-item">
+                        <div class="timeline-label" style="color: var(--accent-blue); font-weight: 800;">Q1 2026</div>
+                        <div class="timeline-dot active"></div>
+                        <div class="timeline-desc"><strong>MVP + Frontend</strong><br>← Мы здесь</div>
+                    </div>
+                    <div class="timeline-item">
+                        <div class="timeline-label">Q2 2026</div>
+                        <div class="timeline-dot future"></div>
+                        <div class="timeline-desc">Пилот с<br>Налоговым комитетом</div>
+                    </div>
+                    <div class="timeline-item">
+                        <div class="timeline-label">Q3 2026</div>
+                        <div class="timeline-dot future"></div>
+                        <div class="timeline-desc">Полноценный<br>запуск</div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ======== SLIDE 7: BEYOND TAXES ======== -->
+            <section>
+                <h2><i class="fa-solid fa-arrows-spin" style="color: var(--gold); margin-right: 10px;"></i>Не только для
+                    налогов</h2>
+                <p
+                    style="font-size: 1.15em; color: #64748b; margin-bottom: 30px; max-width: 1000px; margin-left: auto; margin-right: auto;">
+                    Наша система — это <strong>готовый шаблон</strong>. Меняем базу знаний — получаем помощника для
+                    любой сферы.
+                </p>
+
+                <div class="flex-row" style="flex-wrap: wrap; gap: 20px;">
+                    <div class="step-card fragment" style="flex: 1; min-width: 220px; text-align: center;">
+                        <div style="font-size: 2.5em; margin-bottom: 12px;">🏥</div>
+                        <h3 style="margin-bottom: 8px; font-size: 1.15em;">Здравоохранение</h3>
+                        <p style="font-size: 0.95em; color: #64748b;">Загружаем медицинские протоколы — врачи и пациенты
+                            получают быстрые ответы</p>
+                    </div>
+
+                    <div class="step-card fragment" style="flex: 1; min-width: 220px; text-align: center;">
+                        <div style="font-size: 2.5em; margin-bottom: 12px;">🎓</div>
+                        <h3 style="margin-bottom: 8px; font-size: 1.15em;">Образование</h3>
+                        <p style="font-size: 0.95em; color: #64748b;">Загружаем учебные материалы — студенты получают
+                            умного помощника по учёбе</p>
+                    </div>
+
+                    <div class="step-card fragment" style="flex: 1; min-width: 220px; text-align: center;">
+                        <div style="font-size: 2.5em; margin-bottom: 12px;">🛃</div>
+                        <h3 style="margin-bottom: 8px; font-size: 1.15em;">Таможня</h3>
+                        <p style="font-size: 0.95em; color: #64748b;">Загружаем таможенные правила — бизнес быстро
+                            узнаёт про пошлины и документы</p>
+                    </div>
+
+                    <div class="step-card fragment" style="flex: 1; min-width: 220px; text-align: center;">
+                        <div style="font-size: 2.5em; margin-bottom: 12px;">⚖️</div>
+                        <h3 style="margin-bottom: 8px; font-size: 1.15em;">Юриспруденция</h3>
+                        <p style="font-size: 0.95em; color: #64748b;">Загружаем кодексы и законы — граждане получают
+                            понятные юридические ответы</p>
+                    </div>
+                </div>
+
+                <div class="glass-card fragment" style="max-width: 900px; padding: 25px 35px; margin-top: 25px;">
+                    <p style="font-size: 1.15em; margin: 0; color: var(--primary); font-weight: 600;">
+                        <i class="fa-solid fa-lightbulb" style="color: var(--gold); margin-right: 8px;"></i>
+                        Простыми словами: мы построили «движок». Достаточно подключить нужные документы — и система
+                        сразу начнёт помогать людям в любой области.
+                    </p>
+                </div>
+            </section>
+
+            <!-- ======== SLIDE 8: FINALE + CTA ======== -->
+            <section class="hero-section">
+                <div class="hero-slide" style="padding: 60px;">
+                    <h1 style="font-size: 3.8em; margin-bottom: 10px;">AndozAI</h1>
+                    <h2 style="color: var(--gold); margin: 10px 0 30px 0; font-size: 1.8em;">
+                        Это не просто чат-бот.
+                    </h2>
+                    <p style="font-size: 1.35em; max-width: 900px; margin: 0 auto; line-height: 1.45; opacity: 0.9;">
+                        Это готовое решение, которое помогает государству использовать ИИ
+                        <strong style="color: var(--gold);">безопасно и без зависимости от иностранных
+                            сервисов</strong>.
+                    </p>
+
+                    <div class="cta-block">
+                        <div class="cta-item">
+                            <i class="fa-solid fa-sack-dollar"></i>
+                            <div class="label" style="color: rgba(255,255,255,0.6);">Тендер</div>
+                            <div class="value" style="color: white;">$110,000</div>
+                        </div>
+                        <div class="cta-item">
+                            <i class="fa-solid fa-clock"></i>
+                            <div class="label" style="color: rgba(255,255,255,0.6);">Сроки</div>
+                            <div class="value" style="color: white;">3 месяца</div>
+                        </div>
+                        <div class="cta-item">
+                            <i class="fa-solid fa-check-double"></i>
+                            <div class="label" style="color: rgba(255,255,255,0.6);">Готовность</div>
+                            <div class="value" style="color: white;">MVP готов</div>
+                        </div>
+                    </div>
+
+                    <div class="slide-footer" style="color: rgba(255,255,255,0.5);">
+                        <i class="fa-solid fa-shield-halved"></i> Инновация. Безопасность. Достоверность.
+                    </div>
+                </div>
+            </section>
+
+        </div>
+    </div>
+
+    <!-- Reveal.js Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.3.1/reveal.min.js"></script>
+    <script>
+        Reveal.initialize({
+            hash: true,
+            controls: false,
+            progress: true,
+            center: true,
+            width: 1400,
+            height: 800,
+            margin: 0.08,
+            minScale: 0.2,
+            maxScale: 2.0,
+            transition: 'slide',
+            backgroundTransition: 'fade'
+        });
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,54 @@
+# Root .gitignore for SoliqAI project
+# Python virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Backend
+backend/.env
+backend/.env.local
+backend/__pycache__/
+backend/**/*.py[cod]
+backend/**/*$py.class
+backend/**/*.so
+backend/venv/
+backend/env/
+backend/.venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Database
+*.sqlite3
+*.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Runtime-настройки инстанса: перекрывают дефолты из runtime_settings.py.
+# В git они молча включали reranker и contextual embedding на каждом новом
+# деплое, что давало таймауты индексации и долгий первый ответ.
+backend/data/runtime_settings.json

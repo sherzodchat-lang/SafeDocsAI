@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Open-NotebookLM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Barlow:wght@300;400;500;600&family=Barlow+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:    #F0F4F8;
+  --white: #FFFFFF;
+  --surf:  #F8FAFC;
+  --navy:  #0F2A4A;
+  --navy2: #1E3A5F;
+  --blue:  #0369A1;
+  --blue2: #0EA5E9;
+  --blue3: rgba(14,165,233,.1);
+  --amb:   #B45309;
+  --amb2:  #F59E0B;
+  --amb3:  rgba(245,158,11,.1);
+  --red:   #DC2626;
+  --red3:  rgba(220,38,38,.08);
+  --grn:   #059669;
+  --grn3:  rgba(5,150,105,.08);
+  --purp:  #7C3AED;
+  --purp3: rgba(124,58,237,.08);
+  --text:  #0F172A;
+  --text2: #334155;
+  --muted: #64748B;
+  --muted2:#94A3B8;
+  --border:#CBD5E1;
+  --bord2: rgba(14,165,233,.25);
+  --shad:  0 1px 4px rgba(15,42,74,.06),0 4px 16px rgba(15,42,74,.08);
+  --shad2: 0 2px 8px rgba(15,42,74,.1),0 8px 32px rgba(15,42,74,.12);
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);}
+body{font-family:'Barlow',sans-serif;color:var(--text);font-size:16px;}
+h1,h2,h3,h4{font-family:'Oswald',sans-serif;letter-spacing:.01em;}
+.mono{font-family:'JetBrains Mono',monospace;}
+
+/* ── SUBTLE DOTS BG ── */
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:radial-gradient(circle,rgba(14,165,233,.12) 1px,transparent 1px);
+  background-size:32px 32px;
+}
+
+/* ── DECK ── */
+#deck{width:100%;height:100%;position:relative;z-index:1;}
+.slide{
+  position:absolute;inset:0;
+  display:flex;flex-direction:column;justify-content:center;align-items:center;
+  padding:36px 64px 76px;
+  opacity:0;transform:translateX(32px);
+  transition:opacity .45s cubic-bezier(.25,.46,.45,.94),transform .45s cubic-bezier(.25,.46,.45,.94);
+  pointer-events:none;overflow:hidden;
+}
+.slide.active{opacity:1;transform:translateX(0);pointer-events:all;}
+.slide.out{opacity:0;transform:translateX(-32px);}
+
+/* ── PROGRESS ── */
+#progress-bar{
+  position:fixed;top:0;left:0;height:3px;z-index:200;
+  background:linear-gradient(90deg,var(--blue),var(--amb2));
+  transition:width .4s cubic-bezier(.25,.46,.45,.94);
+  box-shadow:0 1px 8px rgba(14,165,233,.4);
+}
+
+/* ── NAV ── */
+#nav{
+  position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:14px;z-index:100;
+  background:var(--white);border:1px solid var(--border);
+  border-radius:99px;padding:7px 20px;
+  box-shadow:var(--shad2);
+}
+#nav button{
+  background:transparent;border:1px solid var(--border);color:var(--navy2);
+  padding:5px 18px;border-radius:40px;cursor:pointer;font-size:12px;
+  font-family:'Barlow Condensed',sans-serif;font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;transition:.2s;
+}
+#nav button:hover{background:var(--navy);color:#fff;border-color:var(--navy);}
+#prog{color:var(--muted);font-size:11px;min-width:52px;text-align:center;font-family:'JetBrains Mono',monospace;}
+#dots{display:flex;gap:6px;align-items:center;}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--border);cursor:pointer;transition:.3s;}
+.dot.on{background:var(--blue);box-shadow:0 0 0 3px rgba(14,165,233,.2);transform:scale(1.3);}
+.dot:hover{background:var(--muted2);}
+
+/* ── SLIDE NUM ── */
+.sn{position:absolute;bottom:20px;right:30px;font-size:10px;color:var(--muted2);font-family:'JetBrains Mono',monospace;letter-spacing:.06em;}
+
+/* ── CHIP ── */
+.chip{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  padding:4px 12px;border-radius:3px;margin-bottom:12px;
+  background:var(--blue3);color:var(--blue);border-left:2px solid var(--blue2);
+  font-family:'Barlow Condensed',sans-serif;
+}
+.chip.amb{background:var(--amb3);color:var(--amb);border-color:var(--amb2);}
+.chip.grn{background:var(--grn3);color:var(--grn);border-color:var(--grn);}
+.chip.purp{background:var(--purp3);color:var(--purp);border-color:var(--purp);}
+
+/* ── SHARED ── */
+.w{width:100%;max-width:1080px;}
+.slide-title{width:100%;max-width:1080px;margin-bottom:18px;}
+.slide-title h2{font-size:1.9rem;font-weight:700;color:var(--navy);line-height:1.1;}
+.slide-title h2 em{font-style:normal;color:var(--blue);}
+
+/* ── CARD ── */
+.card{
+  background:var(--white);border:1px solid var(--border);border-radius:10px;
+  box-shadow:var(--shad);
+}
+
+/* ════════════ SLIDE 0 — TITLE ════════════ */
+#s0{
+  background:var(--navy);text-align:center;
+}
+#s0::before{
+  content:'';position:absolute;inset:0;pointer-events:none;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%,rgba(14,165,233,.18) 0%,transparent 60%),
+    radial-gradient(ellipse 40% 40% at 90% 90%,rgba(245,158,11,.1) 0%,transparent 60%);
+}
+#s0>*{position:relative;}
+.t-badge{
+  display:inline-flex;align-items:center;gap:8px;margin-bottom:24px;
+  border:1px solid rgba(14,165,233,.3);border-radius:3px;padding:5px 16px;
+  background:rgba(14,165,233,.08);
+  font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--blue2);
+  font-family:'Barlow Condensed',sans-serif;font-weight:700;
+}
+.t-dot{width:5px;height:5px;border-radius:50%;background:var(--blue2);animation:blink 1.4s infinite;}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:.2;}}
+#s0 h1{
+  font-size:clamp(3.5rem,7vw,5.5rem);font-weight:700;letter-spacing:-.01em;
+  color:#fff;line-height:1;margin-bottom:10px;
+}
+#s0 h1 em{font-style:normal;color:var(--blue2);}
+#s0 .tagline{
+  font-size:.95rem;color:rgba(255,255,255,.55);margin-bottom:32px;
+  max-width:500px;line-height:1.7;font-weight:400;
+}
+.t-tags{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;}
+.t-tag{
+  padding:5px 14px;border-radius:3px;font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.65);
+  font-family:'Barlow Condensed',sans-serif;
+}
+.t-tag.c{background:rgba(14,165,233,.15);border-color:rgba(14,165,233,.3);color:var(--blue2);}
+.t-tag.y{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.25);color:var(--amb2);}
+.t-year{margin-top:24px;font-size:10px;color:rgba(255,255,255,.25);letter-spacing:.14em;text-transform:uppercase;font-family:'JetBrains Mono',monospace;}
+
+/* ════════════ SLIDE 1 — PROBLEM ════════════ */
+#s1{background:var(--bg);}
+.prob-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;}
+.pb{
+  background:var(--white);border:1px solid var(--border);border-radius:10px;
+  padding:20px;display:flex;gap:14px;align-items:flex-start;
+  box-shadow:var(--shad);position:relative;overflow:hidden;transition:.2s;
+}
+.pb:hover{box-shadow:var(--shad2);transform:translateY(-2px);}
+.pb::after{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--red);}
+.pb-icon{
+  width:38px;height:38px;border-radius:8px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:1rem;
+  background:var(--red3);border:1px solid rgba(220,38,38,.15);
+}
+.pb h3{font-size:.92rem;font-weight:500;margin-bottom:4px;color:var(--navy);font-family:'Oswald',sans-serif;}
+.pb p{font-size:.79rem;color:var(--muted);line-height:1.65;}
+
+/* ════════════ SLIDE 2 — SOLUTION ════════════ */
+#s2{background:var(--bg);}
+.sol-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:16px;width:100%;}
+.sol-left{
+  background:var(--navy);border-radius:10px;padding:26px;
+  display:flex;flex-direction:column;gap:12px;position:relative;overflow:hidden;
+}
+.sol-left::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--blue2),var(--amb2));
+}
+.sol-left h3{font-size:1.05rem;font-weight:600;color:#fff;font-family:'Oswald',sans-serif;}
+.sol-left p{font-size:.8rem;color:rgba(255,255,255,.6);line-height:1.7;}
+.sol-left strong{color:var(--blue2);}
+.sol-right{display:flex;flex-direction:column;gap:9px;}
+.sf{
+  background:var(--white);border:1px solid var(--border);border-radius:8px;
+  padding:11px 14px;display:flex;gap:12px;align-items:center;
+  box-shadow:var(--shad);transition:.15s;
+}
+.sf:hover{border-color:var(--bord2);}
+.sf-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+.sf strong{font-size:.86rem;font-weight:600;display:block;margin-bottom:1px;color:var(--navy);font-family:'Oswald',sans-serif;}
+.sf span{font-size:.73rem;color:var(--muted);}
+
+/* ════════════ SLIDE 3 — ARCH ════════════ */
+#s3{background:var(--bg);}
+.arch{
+  width:100%;display:flex;flex-direction:column;gap:16px;
+  background:linear-gradient(180deg,rgba(255,255,255,.7),rgba(248,250,252,.92));
+  border:1px solid var(--border);border-radius:14px;padding:24px;
+  box-shadow:var(--shad2);
+}
+.arch-row{
+  display:grid;gap:12px;align-items:stretch;
+}
+.arch-row.top{grid-template-columns:minmax(0,1fr) 28px minmax(0,1.15fr) 28px minmax(0,1.15fr);}
+.arch-row.bottom{grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr) 28px minmax(0,1fr) 28px minmax(0,1fr);}
+.ab{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+  background:var(--white);border:1px solid var(--border);border-radius:12px;
+  padding:18px 16px;min-height:116px;text-align:center;position:relative;
+  box-shadow:var(--shad);transition:.2s;
+}
+.ab:hover{transform:translateY(-2px);box-shadow:var(--shad2);}
+.ab.c{border-color:var(--bord2);background:linear-gradient(180deg,rgba(14,165,233,.08),rgba(255,255,255,.98));}
+.ab.y{border-color:rgba(245,158,11,.28);background:linear-gradient(180deg,rgba(245,158,11,.08),rgba(255,255,255,.98));}
+.ab .ai{font-size:1.4rem;line-height:1;}
+.ab .at{font-size:.94rem;font-weight:600;color:var(--navy);font-family:'Oswald',sans-serif;margin-top:2px;line-height:1.1;}
+.ab .as{font-size:.68rem;color:var(--muted);font-family:'JetBrains Mono',monospace;margin-top:2px;line-height:1.45;}
+.arr{
+  color:var(--muted2);font-size:1rem;font-family:'JetBrains Mono',monospace;
+  display:flex;align-items:center;justify-content:center;
+}
+.arch-sep{
+  display:flex;align-items:center;justify-content:center;gap:10px;padding:0 6px;
+}
+.arch-sep-line{flex:1;height:1px;background:linear-gradient(90deg,transparent,var(--border),transparent);}
+.arch-sep span{
+  font-size:.62rem;color:var(--muted);letter-spacing:.18em;text-transform:uppercase;
+  font-family:'JetBrains Mono',monospace;background:var(--surf);border:1px solid var(--border);
+  border-radius:999px;padding:5px 12px;
+}
+.arch-note{
+  display:flex;justify-content:flex-end;font-size:.64rem;color:var(--muted);
+  font-family:'JetBrains Mono',monospace;letter-spacing:.04em;
+}
+
+/* ════════════ SLIDE 4 — RAG PIPELINE ════════════ */
+#s4{background:var(--bg);}
+.pipe{
+  width:100%;background:var(--white);border:1px solid var(--border);border-radius:10px;
+  padding:18px 22px;display:flex;align-items:center;justify-content:space-between;
+  box-shadow:var(--shad);position:relative;overflow:hidden;
+}
+.pipe::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,var(--blue),var(--amb2));
+}
+.ps{display:flex;flex-direction:column;align-items:center;gap:7px;flex:1;}
+.pc{
+  width:46px;height:46px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:1rem;border:2px solid var(--border);background:var(--surf);
+}
+.ps:nth-child(1) .pc{border-color:rgba(14,165,233,.4);background:rgba(14,165,233,.06);}
+.ps:nth-child(3) .pc{border-color:rgba(124,58,237,.3);background:rgba(124,58,237,.05);}
+.ps:nth-child(5) .pc{border-color:rgba(5,150,105,.3);background:rgba(5,150,105,.05);}
+.ps:nth-child(7) .pc{border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.06);}
+.ps:nth-child(9) .pc{border-color:rgba(14,165,233,.4);background:rgba(14,165,233,.06);}
+.ps:nth-child(11) .pc{border-color:rgba(220,38,38,.3);background:rgba(220,38,38,.05);}
+.ps .pt{font-size:.73rem;font-weight:600;text-align:center;color:var(--navy);font-family:'Oswald',sans-serif;}
+.ps .pb2{font-size:.61rem;color:var(--muted);text-align:center;font-family:'JetBrains Mono',monospace;line-height:1.3;}
+.pa{color:var(--muted2);font-size:.85rem;flex-shrink:0;}
+.rag3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;width:100%;}
+.r3c{background:var(--white);border:1px solid var(--border);border-radius:8px;padding:16px;box-shadow:var(--shad);}
+.r3c h3{font-size:.86rem;font-weight:600;color:var(--navy);margin-bottom:10px;font-family:'Oswald',sans-serif;padding-bottom:8px;border-bottom:1px solid var(--border);}
+.r3c ul{list-style:none;display:flex;flex-direction:column;gap:5px;}
+.r3c li{font-size:.75rem;color:var(--muted);padding-left:14px;position:relative;line-height:1.5;}
+.r3c li::before{content:'›';position:absolute;left:0;color:var(--blue);font-size:.9rem;font-weight:700;}
+
+/* ════════════ SLIDE 5 — HYBRID SEARCH ════════════ */
+#s5{background:var(--bg);}
+.hs-grid{display:grid;grid-template-columns:1fr 80px 1fr;gap:14px;width:100%;align-items:center;}
+.hs-col{display:flex;flex-direction:column;gap:10px;}
+.hsc{background:var(--white);border:1px solid var(--border);border-radius:8px;padding:16px;box-shadow:var(--shad);transition:.2s;}
+.hsc:hover{border-color:var(--bord2);}
+.hsc h3{font-size:.88rem;font-weight:600;color:var(--navy);margin-bottom:7px;font-family:'Oswald',sans-serif;}
+.hsc p{font-size:.77rem;color:var(--muted);line-height:1.65;}
+.hsc .tag{display:inline-block;font-size:.63rem;padding:2px 8px;border-radius:3px;background:var(--blue3);color:var(--blue);margin-top:8px;font-family:'JetBrains Mono',monospace;}
+.hs-mid{display:flex;flex-direction:column;align-items:center;gap:7px;}
+.rrf{
+  background:var(--navy);border-radius:8px;
+  padding:14px 8px;text-align:center;width:100%;
+  box-shadow:var(--shad2);
+}
+.rrf h3{font-size:1rem;font-weight:700;color:#fff;font-family:'Oswald',sans-serif;margin-bottom:2px;}
+.rrf p{font-size:.6rem;color:rgba(255,255,255,.5);line-height:1.5;}
+.arr-v{color:var(--muted2);font-size:.75rem;font-family:'JetBrains Mono',monospace;}
+.formula{
+  font-family:'JetBrains Mono',monospace;font-size:.67rem;
+  background:var(--surf);border:1px solid var(--border);border-radius:6px;
+  padding:10px;color:var(--blue);margin-top:10px;line-height:1.9;
+}
+
+/* ════════════ SLIDE 6 — CHUNKER ════════════ */
+#s6{background:var(--bg);}
+.ck-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;width:100%;}
+.ck-vis{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:20px;box-shadow:var(--shad);}
+.ck-level{margin-bottom:16px;}
+.ck-level:last-child{margin-bottom:0;}
+.ck-label{
+  font-size:.63rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;
+  color:var(--muted);margin-bottom:7px;font-family:'Barlow Condensed',sans-serif;
+  display:flex;align-items:center;gap:8px;
+}
+.ck-label::after{content:'';flex:1;height:1px;background:var(--border);}
+.ck-bars{display:flex;flex-direction:column;gap:5px;}
+.ck-bar{
+  height:26px;border-radius:5px;display:flex;align-items:center;padding:0 12px;
+  font-size:.67rem;font-weight:500;font-family:'JetBrains Mono',monospace;
+}
+.cb1{background:rgba(14,165,233,.06);border:1px solid rgba(14,165,233,.18);color:var(--blue);}
+.cb2{background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.18);color:var(--purp);}
+.cb3{background:rgba(5,150,105,.06);border:1px solid rgba(5,150,105,.18);color:var(--grn);}
+.ck-right{display:flex;flex-direction:column;gap:12px;}
+.ck-meta{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:18px;box-shadow:var(--shad);flex:1;}
+.ck-meta h3{font-size:.88rem;font-weight:600;color:var(--navy);margin-bottom:12px;font-family:'Oswald',sans-serif;}
+.meta-item{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);}
+.meta-item:last-of-type{border-bottom:none;}
+.meta-key{font-size:.7rem;color:var(--muted);font-family:'JetBrains Mono',monospace;}
+.meta-val{font-size:.72rem;font-weight:600;color:var(--blue);font-family:'JetBrains Mono',monospace;background:var(--blue3);padding:1px 6px;border-radius:3px;}
+
+/* ════════════ SLIDE 7 — FEATURES ════════════ */
+#s7{background:var(--bg);}
+.fg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:100%;}
+.fc{
+  background:var(--white);border:1px solid var(--border);border-radius:10px;
+  padding:18px;transition:.2s;box-shadow:var(--shad);
+}
+.fc:hover{border-color:var(--bord2);transform:translateY(-3px);box-shadow:var(--shad2);}
+.fc .fi{
+  width:38px;height:38px;border-radius:8px;display:flex;align-items:center;
+  justify-content:center;font-size:.95rem;margin-bottom:11px;
+  background:var(--blue3);border:1px solid rgba(14,165,233,.2);
+}
+.fc h3{font-size:.88rem;font-weight:600;color:var(--navy);margin-bottom:5px;font-family:'Oswald',sans-serif;}
+.fc p{font-size:.73rem;color:var(--muted);line-height:1.55;}
+
+/* ════════════ SLIDE 8 — TECH ════════════ */
+#s8{background:var(--bg);}
+.tg{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;width:100%;}
+.tgroup{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:18px;box-shadow:var(--shad);}
+.tgroup h3{
+  font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;
+  color:var(--muted);margin-bottom:12px;padding-bottom:9px;border-bottom:1px solid var(--border);
+  font-family:'Barlow Condensed',sans-serif;
+}
+.ti{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid rgba(0,0,0,.03);}
+.ti:last-child{border-bottom:none;}
+.td{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.ti span{font-size:.81rem;color:var(--text2);}
+.tv{margin-left:auto;font-size:.65rem;color:var(--muted);font-family:'JetBrains Mono',monospace;background:var(--surf);border:1px solid var(--border);padding:1px 6px;border-radius:3px;}
+
+/* ════════════ SLIDE 9 — RESULTS ════════════ */
+#s9{background:var(--bg);}
+.mrow{display:flex;gap:12px;width:100%;}
+.mc{
+  flex:1;background:var(--white);border:1px solid var(--border);
+  border-radius:10px;padding:18px;text-align:center;box-shadow:var(--shad);
+  position:relative;overflow:hidden;transition:.2s;
+}
+.mc:hover{transform:translateY(-2px);box-shadow:var(--shad2);}
+.mc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--blue),var(--amb2));}
+.mv{font-size:2.3rem;font-weight:700;color:var(--navy);font-family:'Oswald',sans-serif;}
+.ml{font-size:.71rem;color:var(--muted);margin-top:5px;line-height:1.5;}
+.rcols{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%;}
+.rc{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:18px;box-shadow:var(--shad);}
+.rc h3{font-size:.86rem;font-weight:600;color:var(--navy);margin-bottom:10px;font-family:'Oswald',sans-serif;padding-bottom:8px;border-bottom:1px solid var(--border);}
+.rc li{font-size:.75rem;color:var(--muted);padding-left:16px;position:relative;line-height:1.6;margin-bottom:5px;list-style:none;}
+.rc li::before{content:'›';position:absolute;left:0;color:var(--blue);font-weight:700;font-size:.9rem;}
+
+/* ════════════ SLIDE 10 — CONCLUSION ════════════ */
+#s10{background:var(--bg);}
+.cg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:100%;text-align:left;}
+.cc{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:20px;box-shadow:var(--shad);position:relative;overflow:hidden;}
+.cc::after{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--amb2);}
+.ccn{font-size:2.8rem;font-weight:700;color:rgba(14,165,233,.08);font-family:'Oswald',sans-serif;margin-bottom:5px;line-height:1;}
+.cc h3{font-size:.9rem;font-weight:600;color:var(--navy);margin-bottom:6px;font-family:'Oswald',sans-serif;}
+.cc p{font-size:.76rem;color:var(--muted);line-height:1.65;}
+.fq{
+  background:var(--navy);color:rgba(255,255,255,.75);
+  border-radius:10px;padding:16px 22px;font-size:.86rem;line-height:1.8;width:100%;
+}
+.fq strong{color:var(--blue2);}
+.fq-label{font-size:.63rem;color:rgba(255,255,255,.3);letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;font-family:'Barlow Condensed',sans-serif;}
+.final-thanks{font-size:.8rem;color:var(--muted);margin-top:6px;font-family:'JetBrains Mono',monospace;}
+.final-cursor{color:var(--blue);animation:blink 1.4s infinite;}
+</style>
+</head>
+<body>
+<div id="progress-bar" style="width:9.09%"></div>
+<div id="deck">
+
+<!-- ══ 0 TITLE ══ -->
+<div class="slide active" id="s0">
+  <div class="t-badge"><div class="t-dot"></div>Дипломный проект · 2026</div>
+  <h1>Open-<em>NotebookLM</em></h1>
+  <p class="tagline">AI-ассистент для работы с документами — локально, без облаков, без утечек данных</p>
+  <div class="t-tags">
+    <span class="t-tag c">RAG System</span>
+    <span class="t-tag">FastAPI + React</span>
+    <span class="t-tag">Ollama · Local LLM</span>
+    <span class="t-tag y">Русский + Тоҷикӣ</span>
+  </div>
+  <div class="t-year">sherzod4033 · 2026</div>
+  <div class="sn" style="color:rgba(255,255,255,.2)">01 / 11</div>
+</div>
+
+<!-- ══ 1 PROBLEM ══ -->
+<div class="slide" id="s1">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-title">
+      <div class="chip">Проблема</div>
+      <h2>Зачем нужен <em>Open-NotebookLM?</em></h2>
+    </div>
+    <div class="prob-grid">
+      <div class="pb">
+        <div class="pb-icon">📄</div>
+        <div><h3>Объём документации</h3><p>Сотни страниц документов. Найти нужный пункт вручную — это часы потраченного времени.</p></div>
+      </div>
+      <div class="pb">
+        <div class="pb-icon">🌐</div>
+        <div><h3>Языковой барьер</h3><p>Документы на русском и таджикском. Одновременный поиск по двум языкам практически невозможен.</p></div>
+      </div>
+      <div class="pb">
+        <div class="pb-icon">🔒</div>
+        <div><h3>Конфиденциальность</h3><p>Отправлять рабочие документы в ChatGPT или другие облачные сервисы — серьёзный риск.</p></div>
+      </div>
+      <div class="pb">
+        <div class="pb-icon">💰</div>
+        <div><h3>Стоимость API</h3><p>OpenAI, Google — дорого для большинства организаций. Нужна бесплатная локальная альтернатива.</p></div>
+      </div>
+    </div>
+  </div>
+  <div class="sn">02 / 11</div>
+</div>
+
+<!-- ══ 2 SOLUTION ══ -->
+<div class="slide" id="s2">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-title">
+      <div class="chip">Решение</div>
+      <h2>Что такое <em>Open-NotebookLM?</em></h2>
+    </div>
+    <div class="sol-grid">
+      <div class="sol-left">
+        <div style="font-size:1.8rem;">🤖</div>
+        <h3>Локальный AI-ассистент для документов</h3>
+        <p>Работает полностью локально — не нужен интернет и внешние API. Генерация текста и векторные эмбеддинги запускаются через <strong>Ollama</strong> на вашем сервере.</p>
+        <p>Загрузите документы → система их индексирует → задавайте вопросы → получайте точные ответы со ссылками на источники.</p>
+      </div>
+      <div class="sol-right">
+        <div class="sf"><div class="sf-dot" style="background:var(--blue2);"></div><div><strong>Локально / в контуре</strong><span>Нет зависимости от облачных LLM</span></div></div>
+        <div class="sf"><div class="sf-dot" style="background:var(--purp);"></div><div><strong>Гибридный поиск</strong><span>Vector + BM25 + RRF</span></div></div>
+        <div class="sf"><div class="sf-dot" style="background:var(--grn);"></div><div><strong>Двуязычность</strong><span>Автодетект русского и таджикского</span></div></div>
+        <div class="sf"><div class="sf-dot" style="background:var(--amb2);"></div><div><strong>Умный Chunking</strong><span>Разбиение с учётом структуры документа</span></div></div>
+        <div class="sf"><div class="sf-dot" style="background:var(--red);"></div><div><strong>Domain Profiles</strong><span>Tax, legal и general профили</span></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="sn">03 / 11</div>
+</div>
+
+<!-- ══ 3 ARCHITECTURE ══ -->
+<div class="slide" id="s3">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-title">
+      <div class="chip">Архитектура</div>
+      <h2>Как устроена <em>система?</em></h2>
+    </div>
+    <div class="arch">
+      <div class="arch-row top">
+        <div class="ab"><div class="ai">👤</div><div class="at">Пользователь</div><div class="as">Browser</div></div>
+        <div class="arr">→</div>
+        <div class="ab c"><div class="ai">⚛️</div><div class="at">React Frontend</div><div class="as">Vite · Tailwind<br>Nginx</div></div>
+        <div class="arr">→</div>
+        <div class="ab c"><div class="ai">🚀</div><div class="at">FastAPI Backend</div><div class="as">Python 3.12<br>Uvicorn · asyncpg</div></div>
+      </div>
+      <div class="arch-sep">
+        <div class="arch-sep-line"></div>
+        <span>внутренние сервисы</span>
+        <div class="arch-sep-line"></div>
+      </div>
+      <div class="arch-row bottom">
+        <div class="ab"><div class="ai">🗄️</div><div class="at">PostgreSQL 15</div><div class="as">Пользователи<br>Логи</div></div>
+        <div class="arr">→</div>
+        <div class="ab y"><div class="ai">🧮</div><div class="at">RAG Module</div><div class="as">Chunker<br>Retrieval · LLM</div></div>
+        <div class="arr">→</div>
+        <div class="ab y"><div class="ai">📦</div><div class="at">ChromaDB</div><div class="as">Векторное<br>хранилище</div></div>
+        <div class="arr">→</div>
+        <div class="ab c"><div class="ai">🦙</div><div class="at">Ollama</div><div class="as">Gemma 3n<br>nomic-embed</div></div>
+      </div>
+      <div class="arch-note">Frontend и backend доступны пользователю, остальные модули работают внутри контура системы.</div>
+    </div>
+  </div>
+  <div class="sn">04 / 11</div>
+</div>
+
+<!-- ══ 4 RAG PIPELINE ══ -->
+<div class="slide" id="s4">
+  <div class="w" style="display:flex;flex-direction:column;gap:14px;">
+    <div class="slide-title" style="margin-bottom:4px;">
+      <div class="chip">RAG Pipeline</div>
+      <h2>Как работает <em>система?</em></h2>
+    </div>
+    <div class="pipe">
+      <div class="ps"><div class="pc">📄</div><div class="pt">Документ</div><div class="pb2">PDF · DOCX<br>TXT</div></div>
+      <div class="pa">▶</div>
+      <div class="ps"><div class="pc">✂️</div><div class="pt">Chunking</div><div class="pb2">HybridChunker</div></div>
+      <div class="pa">▶</div>
+      <div class="ps"><div class="pc">🔢</div><div class="pt">Embedding</div><div class="pb2">nomic-embed<br>-text</div></div>
+      <div class="pa">▶</div>
+      <div class="ps"><div class="pc">💾</div><div class="pt">Индексация</div><div class="pb2">ChromaDB</div></div>
+      <div class="pa">▶</div>
+      <div class="ps"><div class="pc">🔍</div><div class="pt">Retrieval</div><div class="pb2">Vector + BM25<br>+ RRF</div></div>
+      <div class="pa">▶</div>
+      <div class="ps"><div class="pc">💬</div><div class="pt">Ответ</div><div class="pb2">Gemma 3n<br>+ цитаты</div></div>
+    </div>
+    <div class="rag3">
+      <div class="r3c">
+        <h3>✂️ Шаг 1 — Chunking</h3>
+        <ul>
+          <li>Документ разбивается на фрагменты (чанки) по ~450 токенов</li>
+          <li>Структура документа учитывается при разбиении</li>
+          <li>Каждый чанк сохраняет метаданные: источник, раздел, страница</li>
+          <li>Поддержка PDF, DOCX, TXT и сканов через OCR</li>
+        </ul>
+      </div>
+      <div class="r3c">
+        <h3>🔍 Шаг 2 — Retrieval</h3>
+        <ul>
+          <li>Вопрос превращается в вектор (embedding)</li>
+          <li>Параллельно идёт векторный и лексический (BM25) поиск</li>
+          <li>Результаты объединяются через RRF</li>
+          <li>Follow-up вопросы конденсируются в самостоятельный запрос</li>
+        </ul>
+      </div>
+      <div class="r3c">
+        <h3>🧠 Шаг 3 — Generation</h3>
+        <ul>
+          <li>Найденные чанки передаются в контекст LLM</li>
+          <li>Gemma 3n генерирует ответ на языке вопроса (ru / tj)</li>
+          <li>Domain-profile настраивает стиль промпта</li>
+          <li>Ответ содержит цитаты и ссылки на источники</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="sn">05 / 11</div>
+</div>
+
+<!-- ══ 5 HYBRID SEARCH ══ -->
+<div class="slide" id="s5">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-title">
+      <div class="chip">Гибридный поиск</div>
+      <h2>Vector + BM25 → <em>RRF</em></h2>
+    </div>
+    <div class="hs-grid">
+      <div class="hs-col">
+        <div class="hsc">
+          <h3>🧮 Векторный поиск</h3>
+          <p>Находит фрагменты по смыслу. Работает даже если слова в вопросе и документе разные.</p>
+          <span class="tag">nomic-embed-text · cosine similarity</span>
+        </div>
+        <div class="hsc">
+          <h3>🔤 BM25 поиск</h3>
+          <p>Точный поиск по словам. Незаменим для статей закона, числовых норм и терминов.</p>
+          <span class="tag">Token frequency · Exact match</span>
+        </div>
+      </div>
+      <div class="hs-mid">
+        <div class="arr-v">⇓ ⇓</div>
+        <div class="rrf"><h3>RRF</h3><p>Reciprocal<br>Rank Fusion</p></div>
+        <div class="arr-v">⇓</div>
+        <div style="font-size:.63rem;color:var(--muted);text-align:center;font-family:'JetBrains Mono',monospace;">Топ-K чанков</div>
+      </div>
+      <div class="hs-col">
+        <div class="hsc">
+          <h3>📐 Формула RRF</h3>
+          <p style="margin-bottom:0;">Оба результата объединяются по рангу, а не по сырому score:</p>
+          <div class="formula">score =<br>&nbsp;&nbsp;1/(k + vec_rank)<br>+ 1/(k + bm25_rank)<br><br>// k = 60</div>
+        </div>
+        <div class="hsc">
+          <h3>📍 Метаданные чанков</h3>
+          <p>Каждый чанк хранит путь в структуре документа:</p>
+          <div class="formula">source: "НК РТ 2024.pdf"<br>section: "СТАТЬЯ 12"<br>page: 47</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="sn">06 / 11</div>
+</div>
+
+<!-- ══ 6 CHUNKER + METADATA ══ -->
+<div class="slide" id="s6">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-title">
+      <div class="chip">HybridChunker</div>
+      <h2>Как документ <em>разбивается на чанки?</em></h2>
+    </div>
+    <div class="ck-grid">
+      <div class="ck-vis">
+        <div class="ck-level">
+          <div class="ck-label">Шаг 1 · Сырой текст из PDF</div>
+          <div class="ck-bars">
+            <div class="ck-bar cb1" style="width:100%">raw_block: "СТАТЬЯ 12. Налог на..."</div>
+            <div class="ck-bar cb1" style="width:80%">raw_block: "1. Ставка налога..."</div>
+            <div class="ck-bar cb1" style="width:90%">raw_block: "2. Плательщики..."</div>
+          </div>
+        </div>
+        <div class="ck-level">
+          <div class="ck-label">Шаг 2 · Классификация на Units</div>
+          <div class="ck-bars">
+            <div class="ck-bar cb2" style="width:90%">heading · "СТАТЬЯ 12. Налог на..."</div>
+            <div class="ck-bar cb2" style="width:85%">paragraph · "1. Ставка налога..."</div>
+            <div class="ck-bar cb2" style="width:78%">paragraph · "2. Плательщики..."</div>
+          </div>
+        </div>
+        <div class="ck-level" style="margin-bottom:0">
+          <div class="ck-label">Шаг 3 · Готовые чанки с метаданными</div>
+          <div class="ck-bars">
+            <div class="ck-bar cb3" style="width:92%">chunk #1 · ~450 tok · meta: {section, page, source}</div>
+            <div class="ck-bar cb3" style="width:80%">chunk #2 · ~380 tok · meta: {section, page, source}</div>
+          </div>
+        </div>
+      </div>
+      <div class="ck-right">
+        <div class="ck-meta">
+          <h3>📦 Метаданные каждого чанка</h3>
+          <div class="meta-item"><span class="meta-key">source</span><span class="meta-val">"НК_РТ_2024.pdf"</span></div>
+          <div class="meta-item"><span class="meta-key">page</span><span class="meta-val">47</span></div>
+          <div class="meta-item"><span class="meta-key">section</span><span class="meta-val">"СТАТЬЯ 12"</span></div>
+          <div class="meta-item"><span class="meta-key">chunk_index</span><span class="meta-val">3</span></div>
+          <div class="meta-item"><span class="meta-key">token_count</span><span class="meta-val">448</span></div>
+          <div class="meta-item"><span class="meta-key">lang</span><span class="meta-val">"ru"</span></div>
+        </div>
+        <div class="ck-meta" style="flex:0;">
+          <h3>⚙️ Параметры</h3>
+          <div class="meta-item"><span class="meta-key">TARGET_TOKENS</span><span class="meta-val">450</span></div>
+          <div class="meta-item"><span class="meta-key">MAX_TOKENS</span><span class="meta-val">800</span></div>
+          <div class="meta-item"><span class="meta-key">MIN_TOKENS</span><span class="meta-val">200</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="sn">07 / 11</div>
+</div>
+
+<!-- ══ 7 FEATURES ══ -->
+<div class="slide" id="s7">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-title">
+      <div class="chip">Функционал</div>
+      <h2>Возможности <em>системы</em></h2>
+    </div>
+    <div class="fg">
+      <div class="fc"><div class="fi">📚</div><h3>Notebooks</h3><p>Рабочие пространства с источниками, заметками и чатом в одном месте</p></div>
+      <div class="fc"><div class="fi">📄</div><h3>Загрузка файлов</h3><p>PDF · DOCX · TXT с автоматической индексацией после загрузки</p></div>
+      <div class="fc"><div class="fi">🌐</div><h3>Таджикский язык</h3><p>Автодетект таджикского по специфичным символам: ӯ қ ҳ ҷ ғ ӣ</p></div>
+      <div class="fc"><div class="fi">🔍</div><h3>OCR</h3><p>Tesseract для чтения сканированных PDF-документов</p></div>
+      <div class="fc"><div class="fi">👥</div><h3>Роли и JWT</h3><p>Аутентификация; admin-роли и управление пользователями</p></div>
+      <div class="fc"><div class="fi">📊</div><h3>Аналитика</h3><p>Логи запросов и ответов, панель администратора с метриками</p></div>
+    </div>
+  </div>
+  <div class="sn">08 / 11</div>
+</div>
+
+<!-- ══ 8 TECH ══ -->
+<div class="slide" id="s8">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;">
+    <div class="slide-title">
+      <div class="chip">Технологии</div>
+      <h2>Технологический <em>стек</em></h2>
+    </div>
+    <div class="tg">
+      <div class="tgroup">
+        <h3>⚛️ Frontend</h3>
+        <div class="ti"><div class="td" style="background:#61dafb"></div><span>React 19</span><span class="tv">19.2.0</span></div>
+        <div class="ti"><div class="td" style="background:#ffd62e"></div><span>Vite</span><span class="tv">7.3.1</span></div>
+        <div class="ti"><div class="td" style="background:#38bdf8"></div><span>Tailwind CSS</span><span class="tv">4.x</span></div>
+        <div class="ti"><div class="td" style="background:#e34c26"></div><span>React Router</span><span class="tv">7.x</span></div>
+        <div class="ti"><div class="td" style="background:#94a3b8"></div><span>Nginx</span><span class="tv">proxy</span></div>
+      </div>
+      <div class="tgroup">
+        <h3>🚀 Backend</h3>
+        <div class="ti"><div class="td" style="background:#009688"></div><span>FastAPI</span><span class="tv">Python 3.12</span></div>
+        <div class="ti"><div class="td" style="background:#4caf50"></div><span>Uvicorn + asyncpg</span><span class="tv">async</span></div>
+        <div class="ti"><div class="td" style="background:#2196f3"></div><span>SQLModel (ORM)</span><span class="tv">–</span></div>
+        <div class="ti"><div class="td" style="background:#f44336"></div><span>PyMuPDF</span><span class="tv">PDF</span></div>
+        <div class="ti"><div class="td" style="background:#795548"></div><span>pytesseract</span><span class="tv">OCR</span></div>
+      </div>
+      <div class="tgroup">
+        <h3>🗄️ AI & Infra</h3>
+        <div class="ti"><div class="td" style="background:#336791"></div><span>PostgreSQL 15</span><span class="tv">–</span></div>
+        <div class="ti"><div class="td" style="background:#e91e63"></div><span>ChromaDB</span><span class="tv">Vector DB</span></div>
+        <div class="ti"><div class="td" style="background:#00bcd4"></div><span>Ollama</span><span class="tv">Local LLM</span></div>
+        <div class="ti"><div class="td" style="background:#9c27b0"></div><span>Gemma 3n (e4b)</span><span class="tv">Chat</span></div>
+        <div class="ti"><div class="td" style="background:#4caf50"></div><span>nomic-embed-text</span><span class="tv">Embed</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="sn">09 / 11</div>
+</div>
+
+<!-- ══ 9 RESULTS ══ -->
+<div class="slide" id="s9">
+  <div class="w" style="display:flex;flex-direction:column;gap:14px;align-items:flex-start;">
+    <div class="slide-title" style="margin-bottom:4px;">
+      <div class="chip grn">Результаты</div>
+      <h2>Что <em>достигнуто?</em></h2>
+    </div>
+    <div class="mrow">
+      <div class="mc"><div class="mv">Local</div><div class="ml">Полностью локальное<br>развёртывание</div></div>
+      <div class="mc"><div class="mv">2</div><div class="ml">Языка поддержки:<br>русский + таджикский</div></div>
+      <div class="mc"><div class="mv">3+</div><div class="ml">Формата: PDF<br>DOCX · TXT + OCR</div></div>
+      <div class="mc"><div class="mv">5</div><div class="ml">Компонентов<br>RAG пайплайна</div></div>
+    </div>
+    <div class="rcols">
+      <div class="rc">
+        <h3>✅ Реализовано</h3>
+        <ul>
+          <li>Полный RAG пайплайн с гибридным поиском (Vector + BM25 + RRF)</li>
+          <li>HybridChunker с сохранением метаданных (source, page, section, lang)</li>
+          <li>Двуязычность: автодетект русского и таджикского</li>
+          <li>Multi-notebook рабочие пространства</li>
+          <li>Domain Profiles: general, tax, legal</li>
+          <li>Docker Compose — одной командой</li>
+        </ul>
+      </div>
+      <div class="rc">
+        <h3>🔮 Планируем в будущем</h3>
+        <ul>
+          <li>Обучить собственные модели для таджикского языка</li>
+          <li>Улучшить методы разбиения документов — учитывать таблицы и списки</li>
+          <li>Расширить использование метаданных при ранжировании</li>
+          <li>Добавить Reranker для более точного отбора чанков</li>
+          <li>Поддержка узбекского языка</li>
+          <li>Экспорт ответов в PDF с цитатами</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="sn">10 / 11</div>
+</div>
+
+<!-- ══ 10 CONCLUSION ══ -->
+<div class="slide" id="s10">
+  <div class="w" style="display:flex;flex-direction:column;gap:16px;align-items:center;">
+    <div style="text-align:center;">
+      <div class="chip amb">Заключение</div>
+      <h2>Итоги <em>проекта</em></h2>
+    </div>
+    <div class="cg">
+      <div class="cc"><div class="ccn">01</div><h3>Работает локально</h3><p>Не требует интернета и облачных API. Данные организации остаются внутри контура.</p></div>
+      <div class="cc"><div class="ccn">02</div><h3>Технический вклад</h3><p>Оригинальный HybridChunker с метаданными. Гибридный поиск Vector + BM25 + RRF.</p></div>
+      <div class="cc"><div class="ccn">03</div><h3>Двуязычность</h3><p>Система понимает русский и таджикский, автоматически отвечает на языке вопроса.</p></div>
+    </div>
+    <div class="fq">
+      <div class="fq-label">// резюме</div>
+      <strong>Open-NotebookLM</strong> — это полноценная RAG-система с локальными моделями, гибридным поиском, метаданными чанков и поддержкой двух языков. Разворачивается одной командой через Docker Compose.
+    </div>
+    <div class="final-thanks">// спасибо за внимание &nbsp;<span class="final-cursor">_</span></div>
+  </div>
+  <div class="sn">11 / 11</div>
+</div>
+
+</div>
+
+<!-- NAV -->
+<div id="nav">
+  <button onclick="go(-1)">← Назад</button>
+  <div id="dots"></div>
+  <span id="prog">01 / 11</span>
+  <button onclick="go(1)">Далее →</button>
+</div>
+
+<script>
+const slides = document.querySelectorAll('.slide');
+const dotsEl = document.getElementById('dots');
+const prog = document.getElementById('prog');
+const bar = document.getElementById('progress-bar');
+let cur = 0;
+
+slides.forEach((_,i)=>{
+  const d = document.createElement('div');
+  d.className = 'dot' + (i === 0 ? ' on' : '');
+  d.onclick = () => goTo(i);
+  dotsEl.appendChild(d);
+});
+
+function goTo(next) {
+  if (next === cur || next < 0 || next >= slides.length) return;
+  slides[cur].classList.remove('active');
+  slides[cur].classList.add('out');
+  slides[next].classList.remove('out');
+  slides[next].classList.add('active');
+  setTimeout(() => slides[cur].classList.remove('out'), 550);
+  cur = next;
+  document.querySelectorAll('.dot').forEach((x,i) => x.classList.toggle('on', i === cur));
+  prog.textContent = String(cur+1).padStart(2,'0') + ' / ' + String(slides.length).padStart(2,'0');
+  bar.style.width = ((cur+1) / slides.length * 100) + '%';
+}
+
+function go(d) { goTo(cur + d); }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') go(1);
+  if (e.key === 'ArrowLeft') go(-1);
+  if (e.key === 'Home') goTo(0);
+  if (e.key === 'End') goTo(slides.length - 1);
+});
+
+let tx = 0;
+document.getElementById('deck').addEventListener('touchstart', e => tx = e.touches[0].clientX);
+document.getElementById('deck').addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - tx;
+  if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+});
+</script>
+</body>
+</html>

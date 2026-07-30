@@ -1,0 +1,60 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --app-primary: #1f3a60;
+  --app-primary-strong: #162945;
+  --app-gold: #c5a059;
+  --app-bg: #f3f5f8;
+  --app-surface: #ffffff;
+  --app-border: #dfe4ee;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: 'Inter', sans-serif;
+  background: var(--app-bg);
+  color: #1f2937;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: 'Outfit', sans-serif;
+}
+
+.login-pattern {
+  background-color: #18355c;
+}
+
+.soft-grid {
+  background-color: var(--app-bg);
+}
+
+.scrollbar-soft::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-soft::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #c7cfdd;
+}
+
+.scrollbar-soft::-webkit-scrollbar-track {
+  background: transparent;
+}

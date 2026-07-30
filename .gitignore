@@ -1,0 +1,80 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment files
+.env
+.env.local
+*.env
+
+# Node modules
+node_modules/
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Large model / data files
+*.bin
+*.pt
+*.ckpt
+*.safetensors
+
+# --- Секреты. Держим правило широким: репозиторий публичный. ---
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+*credentials*.json
+.git-credentials
+
+# --- Состояние конкретного стенда, а не часть проекта ---
+SafeDocsAI/backend/data/uploads/
+SafeDocsAI/backend/data/chroma/
+SafeDocsAI/backend/data/runtime_settings.json
+merged_config.json
+
+# --- Артефакты обучения и выгрузки моделей ---
+outputs/
+checkpoints/
+*.gguf
+*.adapter
+
+# --- Служебное окружение агента, не часть проекта ---
+.agent-skills/
+.claude/
