@@ -67,16 +67,22 @@ class RuntimeSettingsUpdate(BaseModel):
     chat_model: str | None = None
     embedding_model: str | None = None
     enable_condense_query: bool | None = None
-    retrieval_top_k: int | None = Field(default=None, ge=1, le=50)
-    top_k: int | None = Field(default=None, ge=1, le=20)
+    # Границы числовых полей намеренно НЕ ge/le схемы: Pydantic отвечает на них
+    # 422 без машинного кода и с английским текстом («Input should be less than
+    # or equal to 20»), а интерфейс переведён на три языка и показывает свой
+    # перевод по error_code. Проверку держит RuntimeSettingsService и отвечает
+    # settings.value_out_of_range — см. _require_int_in_range.
+    #
+    # Держать здесь два образца политики нельзя: следующий, кто добавит поле,
+    # выберет наугад.
+    retrieval_top_k: int | None = None
+    top_k: int | None = None
     default_domain_profile: str | None = None
     contextual_embedding_enabled: bool | None = None
     contextual_embedding_model: str | None = None
-    # Границы окна контекста намеренно НЕ ge/le схемы, в отличие от top_k:
-    # Pydantic отвечает на них 422 без машинного кода и с английским текстом, а
-    # объяснить админу нужно именно причину («столько KV-кэша на эту модель не
-    # влезет, предел 32768»). Проверку держит RuntimeSettingsService и отвечает
-    # settings.value_out_of_range — см. MIN_NUM_CTX/MAX_NUM_CTX.
+    # У окна контекста та же политика, и объяснить админу нужно именно причину
+    # («столько KV-кэша на эту модель не влезет, предел 32768») — см.
+    # _require_num_ctx и MIN_NUM_CTX/MAX_NUM_CTX.
     chat_model_num_ctx: int | None = None
     contextual_embedding_num_ctx: int | None = None
     reranker_enabled: bool | None = None

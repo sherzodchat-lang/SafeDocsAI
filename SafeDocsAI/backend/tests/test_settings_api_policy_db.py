@@ -299,6 +299,59 @@ class RefusalCodesTests(SettingsApiTestCase):
             response.json()["error_code"], SettingsErrors.VALUE_OUT_OF_RANGE
         )
 
+    async def test_top_k_out_of_range_is_refused_with_a_machine_code(self):
+        """top_k и retrieval_top_k держали ge/le прямо в RuntimeSettingsUpdate,
+        и выход за границы отвергал Pydantic: 422 без error_code и с английским
+        текстом «Input should be less than or equal to 20». Границы сняты со
+        схемы, проверку делает RuntimeSettingsService — как у *_num_ctx.
+
+        Что «сегодняшний клиент туда не пустит» — свойство клиента, а не API:
+        для retrieval_top_k контрол в интерфейсе ещё появится, и серверная
+        проверка нужна именно свежему UI-коду.
+        """
+        cases = (
+            ("top_k", 0, 1, 20),
+            ("top_k", 21, 1, 20),
+            ("retrieval_top_k", 0, 1, 50),
+            ("retrieval_top_k", 51, 1, 50),
+        )
+        for field, value, minimum, maximum in cases:
+            with self.subTest(field=field, value=value):
+                response = await self.client.put(SETTINGS, json={field: value})
+
+                self.assertEqual(
+                    response.status_code,
+                    400,
+                    f"{field}={value}: ожидался отказ слоя настроек, "
+                    f"а не 422 Pydantic; тело {response.text}",
+                )
+                body = response.json()
+                self.assertEqual(
+                    body.get("error_code"),
+                    SettingsErrors.VALUE_OUT_OF_RANGE,
+                    f"{field}={value}: отказ без машинного кода — интерфейс "
+                    f"покажет английский текст; тело {response.text}",
+                )
+                self.assertIn(str(minimum), body["detail"])
+                self.assertIn(str(maximum), body["detail"])
+                self.assertFalse(
+                    self.settings_path.exists(),
+                    "отклонённое значение не должно сохраняться",
+                )
+
+    async def test_the_bounds_themselves_are_still_accepted(self):
+        for field, value in (
+            ("top_k", 1),
+            ("top_k", 20),
+            ("retrieval_top_k", 1),
+            ("retrieval_top_k", 50),
+        ):
+            with self.subTest(field=field, value=value):
+                response = await self.client.put(SETTINGS, json={field: value})
+
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()[field], value)
+
 
 # --- Задача 5. Ollama лежит ---------------------------------------------
 
