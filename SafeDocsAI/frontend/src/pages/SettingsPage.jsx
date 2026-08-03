@@ -77,23 +77,33 @@ const BOOLEAN_FIELDS = ['enable_condense_query', 'contextual_embedding_enabled',
 // другое (Number(x) || 10), то есть показанное и отправленное расходились.
 const NUMBER_FIELDS = ['retrieval_top_k', 'top_k', 'chat_model_num_ctx', 'contextual_embedding_num_ctx'];
 
-// Границы окна контекста — те же, что проверяет сервер (MIN_NUM_CTX/MAX_NUM_CTX
-// в backend/app/shared/settings/runtime_settings.py). Держим их константами, а
-// не числами по месту: они попадают и в проверку, и в атрибуты min/max поля, и
+// Границы числовых полей — ЗЕРКАЛО серверных.
+//
+// Источник один и он на сервере: SETTING_LIMITS в
+// backend/app/shared/settings/runtime_settings.py. Оттуда их берут все три
+// серверных пути — строгая проверка при записи (_require_int_in_range),
+// снисходительный кламп при чтении (_clamp_on_read) и схема ответа
+// (RuntimeSettingsResponse в backend/app/api/endpoints/settings.py). Читать
+// python отсюда нечем, поэтому числа приходится повторять, — но повторение
+// проверяемое: backend/tests/test_settings_limits_single_source.py разбирает
+// объявления ниже и сверяет их с SETTING_LIMITS, то есть правка на сервере без
+// правки здесь (и наоборот) роняет тест, а не приезжает к пользователю формой,
+// которая предлагает значение, на котором сохранение упирается в отказ.
+//
+// Держим их именованными константами, а не числами по месту: одно и то же
+// число нужно и проверке (NUMBER_FIELD_RANGES), и атрибутам min/max поля, и
 // разъехаться этим двум нельзя.
+
+// Окно контекста: ограничение общее для обеих настроек — это память под
+// KV-кэш на том же железе.
 const MIN_NUM_CTX = 2048;
 const MAX_NUM_CTX = 32768;
 
-// Границы пула кандидатов — по той же причине константами. Взяты с сервера, а
-// не придуманы: _require_int_in_range(patch["retrieval_top_k"],
-// "retrieval_top_k", 1, 50) в backend/app/shared/settings/runtime_settings.py,
-// те же 1..50 объявлены в ответе (retrieval_top_k: int = Field(ge=1, le=50) в
-// backend/app/api/endpoints/settings.py). Разойдись они с клиентскими — поле
-// предлагало бы значение, на котором сохранение упирается в отказ.
+// Пул кандидатов.
 const MIN_RETRIEVAL_TOP_K = 1;
 const MAX_RETRIEVAL_TOP_K = 50;
 
-// Верхняя граница top_k — своя и меньшая (те же места на сервере: top_k 1..20).
+// Число фрагментов для модели: верхняя граница своя и меньшая.
 const MIN_TOP_K = 1;
 const MAX_TOP_K = 20;
 
@@ -105,9 +115,10 @@ const MAX_TOP_K = 20;
  * (settings.value_out_of_range), поэтому граница обязана быть и на клиенте —
  * иначе про неё узнают только после неудачного сохранения.
  *
- * Разойтись с сервером эти числа могут только вместе с правкой бэкенда: там
- * они названы в тех же местах, что и здесь (retrieval_top_k 1..50, top_k 1..20,
- * num_ctx MIN_NUM_CTX..MAX_NUM_CTX).
+ * Границы берутся константами выше, а числами здесь не пишутся: и сами
+ * константы, и состав этой таблицы сверяются с серверным SETTING_LIMITS в
+ * backend/tests/test_settings_limits_single_source.py — числом по месту эта
+ * сверка обходится молча.
  */
 const NUMBER_FIELD_RANGES = {
     retrieval_top_k: {

@@ -3,25 +3,45 @@
  *
  * Схемы тел с extra="forbid" (RuntimeSettingsUpdate, SettingsResetRequest в
  * backend/app/api/endpoints/settings.py) отвергают неизвестный ключ силами
- * Pydantic — то есть ещё до обработчика, который проставляет error_code.
- * Наружу уходит 422 с телом FastAPI
- * {"detail":[{"type":"extra_forbidden","loc":["body","<ключ>"],...}]} и БЕЗ
- * error_code вовсе: обработчика RequestValidationError в приложении нет.
+ * Pydantic. Наружу уходит 422 с массивом FastAPI
+ * {"detail":[{"type":"extra_forbidden","loc":["body","<ключ>"],...}]}, а с
+ * появлением обработчика RequestValidationError (backend/app/main.py) — ещё и
+ * с общим кодом валидации VALIDATION_FAILED_CODE рядом.
  *
- * Без опознавания здесь такой ответ проваливался бы в фолбэк «кода нет —
- * показываем detail» и печатал бы английское «Extra inputs are not permitted»
- * в трёхъязычном интерфейсе. Сообщение это к тому же адресовано автору
- * клиента, а не пользователю: что делать, из него не следует. Поэтому 422 с
- * extra_forbidden сводится к собственному коду, а перевод по нему называет
- * виноватые ключи и предлагает обновить страницу.
+ * Общего кода тут мало. «Неизвестный ключ» — это баг интерфейса, а не ошибка
+ * пользователя: правкой поля он не чинится, чинится обновлением страницы, и
+ * английское «Extra inputs are not permitted» адресовано автору клиента, а не
+ * тому, кто сидит перед экраном. Поэтому такой 422 сводится к собственному
+ * коду, а перевод по нему называет виноватые ключи.
+ *
+ * Отсюда порядок проверок в resolveErrorCode: extra_forbidden опознаётся
+ * РАНЬШЕ явного error_code, иначе общий код валидации перехватывал бы этот
+ * случай себе.
  */
 export const UNEXPECTED_FIELD_CODE = 'request.unexpected_field';
+
+/**
+ * Общий код Pydantic-валидации; его присылает бэкенд
+ * (backend/app/core/exceptions.py, RequestErrors.VALIDATION_FAILED).
+ *
+ * Обрабатывается особо — см. resolveValidationMessage и ветку в
+ * resolveApiErrorMessage. Правило файла «есть код — сырой detail не
+ * показываем» здесь применить нельзя буквально: массив detail у 422 и есть
+ * единственный источник конкретики (какое поле и какой предел), и общий текст
+ * вместо него был бы шагом назад по сравнению с ответом вовсе без кода.
+ */
+export const VALIDATION_FAILED_CODE = 'request.validation_failed';
 
 // Машинные коды ошибок бэкенда -> ключи i18n. Неизвестный код осознанно деградирует
 // в общее локализованное сообщение, поэтому новые коды не ломают интерфейс.
 const ERROR_CODE_KEYS = {
     // Единственный код не от бэкенда — см. UNEXPECTED_FIELD_CODE выше.
     [UNEXPECTED_FIELD_CODE]: 'errors.unexpectedField',
+    // VALIDATION_FAILED_CODE в таблице намеренно НЕТ. Его сообщение не
+    // выбирается одним ключом: оно собирается из разбора массива detail
+    // (resolveValidationMessage) и в зависимости от разбора берёт разные
+    // ключи. Одна запись здесь означала бы шаблон с незаполненным {fields}
+    // для всякого, кто позовёт resolveErrorCodeMessage напрямую.
     // Внутренние коды без префикса: их выводят DETAIL_CODE_PATTERNS и STATUS_CODE_KEYS,
     // когда бэкенд error_code не прислал (например, старый ответ или чужой прокси).
     unsupported_file_type: 'documents.errors.unsupportedFileType',
@@ -191,18 +211,83 @@ export const extractUnexpectedFields = (data) => {
         .filter(Boolean);
 };
 
+/**
+ * Служебные головы loc: они говорят, ОТКУДА поле, а не как оно называется.
+ * FastAPI кладёт путь целиком — ["body", "limit"], ["query", "limit"].
+ */
+const VALIDATION_LOC_ORIGINS = new Set(['body', 'query', 'path', 'header', 'cookie']);
+
+/**
+ * Разбор массива detail у 422 в подстановки для перевода.
+ *
+ * Возвращает две части, и обе могут оказаться пустыми:
+ *   fields  — имена непринятых полей через запятую. Берутся из loc: там имя
+ *             есть почти всегда, и это единственная часть ответа, которую
+ *             можно показать на языке интерфейса, ничего не переводя.
+ *             Числа из loc отбрасываются — это индексы элементов массива, а не
+ *             имена; служебные головы (body/query/...) тоже.
+ *   details — сцепка msg от Pydantic. Английская и непереводимая: msg
+ *             порождается открытым набором правил Pydantic, и таблица
+ *             переводов под неё расходилась бы с бэкендом молча, при первом же
+ *             обновлении библиотеки. Показывается как техническая цитата,
+ *             отдельным предложением — см. resolveValidationMessage.
+ */
+export const extractValidationReport = (data) => {
+    const detail = data?.detail;
+    if (!Array.isArray(detail)) return { fields: '', details: '' };
+
+    const names = [];
+    for (const item of detail) {
+        const location = Array.isArray(item?.loc) ? item.loc : [];
+        const named = location.filter(
+            (part) => typeof part === 'string' && part.trim() && !VALIDATION_LOC_ORIGINS.has(part),
+        );
+        // Хвост пути: у вложенного объекта это имя самого поля, а не контейнера.
+        const name = named[named.length - 1];
+        if (name && !names.includes(name)) names.push(name);
+    }
+
+    return { fields: names.join(', '), details: extractDetail(data) };
+};
+
+/**
+ * Сообщение по коду request.validation_failed: разбор detail, а не общий текст.
+ *
+ * Собирается из двух независимых кусков, чтобы ни один шаблон не отрендерился
+ * с пустой подстановкой:
+ *   1. что произошло — с перечнем полей, если он есть, и без него, если нет;
+ *   2. формулировка сервера — приписывается, только когда есть что приписать.
+ * Разбор, не давший ни полей, ни формулировки, оставляет один первый кусок:
+ * «сервер не принял отправленные данные» — не бог весть что, но это правда, и
+ * это лучше, чем предложение с висящим двоеточием.
+ */
+export const resolveValidationMessage = (data, t) => {
+    const { fields, details } = extractValidationReport(data);
+
+    const head = fields
+        ? t('errors.validationFailed', { fields })
+        : t('errors.validationFailedNoFields');
+
+    return details ? `${head} ${t('errors.validationServerWording', { details })}` : head;
+};
+
 export const resolveErrorCode = (error) => {
     const data = error?.response?.data;
+
+    // Раньше явного кода, и это не перестановка ради красоты. С обработчиком
+    // RequestValidationError на бэкенде 422 от extra="forbid" приходит ТОЖЕ с
+    // error_code (общий код валидации), и проверка после explicitCode
+    // перестала бы срабатывать вовсе: неизвестный ключ тела показывался бы как
+    // ошибка ввода, хотя чинить его пользователю нечем. Приоритет за
+    // «неизвестным ключом» — это баг клиента, и разговор с пользователем у
+    // него свой.
+    if (extractUnexpectedFields(data).length > 0) return UNEXPECTED_FIELD_CODE;
+
     const explicitCode = data?.error_code || data?.code;
     if (explicitCode) return String(explicitCode).trim().toLowerCase();
 
     // Ответа нет вовсе: сеть, CORS или таймаут.
     if (!error?.response) return 'network_error';
-
-    // Раньше кода: 422 от extra="forbid" приходит без error_code, и дальше по
-    // цепочке его опознать уже нечем — ни один шаблон detail и ни один статус
-    // на него не настроены.
-    if (extractUnexpectedFields(data).length > 0) return UNEXPECTED_FIELD_CODE;
 
     const detail = extractDetail(data);
     const matched = DETAIL_CODE_PATTERNS.find(([pattern]) => pattern.test(detail));
@@ -249,11 +334,19 @@ export const resolveErrorCodeMessage = (errorCode, t, params) => {
  */
 export const resolveApiErrorMessage = (error, t, fallbackKey) => {
     const code = resolveErrorCode(error);
+    const data = error?.response?.data;
 
-    // Единственный код с подстановкой: без перечня лишних ключей сообщение про
-    // «поле, которого сервер не ожидает» невозможно ни проверить, ни починить.
+    // Отказ Pydantic-валидации разбирается, а не переводится одной строкой.
+    // Правило файла «есть код — сырой detail не показываем» здесь дало бы
+    // регрессию: код появился бы и спрятал сообщения полей, и вместо «сервер
+    // не принял поле limit» пользователь получил бы «проверьте введённые
+    // данные» — хуже, чем было до кода.
+    if (code === VALIDATION_FAILED_CODE) return resolveValidationMessage(data, t);
+
+    // Код с подстановкой: без перечня лишних ключей сообщение про «поле,
+    // которого сервер не ожидает» невозможно ни проверить, ни починить.
     const params = code === UNEXPECTED_FIELD_CODE
-        ? { fields: extractUnexpectedFields(error?.response?.data).join(', ') }
+        ? { fields: extractUnexpectedFields(data).join(', ') }
         : undefined;
 
     const message = resolveErrorCodeMessage(code, t, params);
@@ -263,8 +356,9 @@ export const resolveApiErrorMessage = (error, t, fallbackKey) => {
     // позже фронта. Сырой detail в этом случае не показываем: он на одном языке и
     // описывает внутренности (пути, имена сервисов), а полный объект ошибки и так
     // уходит в console.error на месте вызова. Без кода detail остаётся единственной
-    // подсказкой — например, для 422, где его собирает FastAPI, а не наш обработчик.
-    const hasExplicitCode = Boolean(error?.response?.data?.error_code || error?.response?.data?.code);
+    // подсказкой — например, у ответа от чужого прокси или от старой версии API,
+    // ещё не знавшей ни про один из наших кодов.
+    const hasExplicitCode = Boolean(data?.error_code || data?.code);
     if (!code && !hasExplicitCode) {
         const detail = extractDetail(error?.response?.data);
         if (detail) return detail;

@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.core.exceptions import ExternalServiceError, SettingsError, SettingsErrors
 from app.shared.settings.config import settings
@@ -125,6 +125,53 @@ _MODEL_WORD_RE = re.compile(r"[^a-z0-9]+")
 # промпта, и модель отвечает обрывками.
 MIN_NUM_CTX = 2048
 MAX_NUM_CTX = 32768
+
+
+class IntRange(NamedTuple):
+    """Границы числовой настройки, включительно с обоих концов."""
+
+    min: int
+    max: int
+
+
+# Границы числовых настроек — из ОДНОГО места, как и умолчания в DEFAULTS.
+#
+# Каждая пара чисел была выписана трижды: строгой проверкой при записи
+# (_require_int_in_range), снисходительным клампом при чтении (_clamp_on_read) и
+# ещё раз в схеме ответа (Field(ge=..., le=...) в
+# app/api/endpoints/settings.py). Совпадали они только пока их не правили:
+# поправить одно место из трёх — значит развести запись с чтением, после чего
+# запись отвергает ровно то значение, которое чтение подставляет само, или
+# наоборот сохраняется величина, которую чтение тут же подрезает. Ни одной
+# ошибки при этом не возникает, и наружу выходит настройка, с которой система
+# не работает.
+#
+# Ключ — то же имя, под которым настройка лежит в файле настроек и в DEFAULTS,
+# поэтому опечатка в имени поля даёт KeyError, а не тихо разъехавшиеся границы
+# (см. setting_limits ниже). Обоснование самих чисел — там, где оно уместно:
+# для окна контекста в комментарии к MIN_NUM_CTX/MAX_NUM_CTX выше, для пула
+# кандидатов и числа фрагментов — в описании полей на экране настроек.
+#
+# Обе настройки окна контекста ссылаются на одни и те же константы, а не
+# повторяют числа: ограничение у них общее — это память под KV-кэш на том же
+# железе.
+SETTING_LIMITS: dict[str, IntRange] = {
+    "retrieval_top_k": IntRange(1, 50),
+    "top_k": IntRange(1, 20),
+    "chat_model_num_ctx": IntRange(MIN_NUM_CTX, MAX_NUM_CTX),
+    "contextual_embedding_num_ctx": IntRange(MIN_NUM_CTX, MAX_NUM_CTX),
+}
+
+
+def setting_limits(field: str) -> IntRange:
+    """Границы числовой настройки. Источник один — SETTING_LIMITS.
+
+    Незнакомое имя поля — KeyError, и это намеренно: числовое поле без границ
+    молча принимало бы что угодно, а «границы по умолчанию» здесь означали бы
+    выдуманные.
+    """
+    return SETTING_LIMITS[field]
+
 
 # Слова, которые считаются логическим значением. Общие у снисходительного
 # чтения и у строгой записи: разойдись они — файл, записанный через API, мог бы
@@ -461,12 +508,10 @@ class RuntimeSettingsService:
             merged.get("contextual_embedding_model") or ""
         ).strip()
         merged["chat_model_num_ctx"] = cls._normalize_num_ctx(
-            merged.get("chat_model_num_ctx"), cls.DEFAULTS["chat_model_num_ctx"], "chat_model_num_ctx"
+            merged.get("chat_model_num_ctx"), "chat_model_num_ctx"
         )
         merged["contextual_embedding_num_ctx"] = cls._normalize_num_ctx(
-            merged.get("contextual_embedding_num_ctx"),
-            cls.DEFAULTS["contextual_embedding_num_ctx"],
-            "contextual_embedding_num_ctx",
+            merged.get("contextual_embedding_num_ctx"), "contextual_embedding_num_ctx"
         )
         merged["reranker_enabled"] = cls._normalize_bool(
             merged.get("reranker_enabled"), default=False, field="reranker_enabled"
@@ -571,10 +616,10 @@ class RuntimeSettingsService:
             current["embedding_model"] = embedding_model
         if "retrieval_top_k" in patch:
             current["retrieval_top_k"] = cls._require_int_in_range(
-                patch["retrieval_top_k"], "retrieval_top_k", 1, 50
+                patch["retrieval_top_k"], "retrieval_top_k"
             )
         if "top_k" in patch:
-            current["top_k"] = cls._require_int_in_range(patch["top_k"], "top_k", 1, 20)
+            current["top_k"] = cls._require_int_in_range(patch["top_k"], "top_k")
         if "default_domain_profile" in patch:
             current["default_domain_profile"] = cls._require_domain_profile(
                 patch["default_domain_profile"]
@@ -829,22 +874,26 @@ class RuntimeSettingsService:
 
     @classmethod
     def _normalize_top_k(cls, value: Any) -> int:
-        return cls._clamp_on_read(value, cls.DEFAULTS["top_k"], 1, 20, "top_k")
+        return cls._clamp_on_read(value, "top_k")
 
     @classmethod
     def _normalize_retrieval_top_k(cls, value: Any) -> int:
-        return cls._clamp_on_read(
-            value, cls.DEFAULTS["retrieval_top_k"], 1, 50, "retrieval_top_k"
-        )
+        return cls._clamp_on_read(value, "retrieval_top_k")
 
     @classmethod
-    def _normalize_num_ctx(cls, value: Any, default: int, field: str = "num_ctx") -> int:
-        return cls._clamp_on_read(value, default, MIN_NUM_CTX, MAX_NUM_CTX, field)
+    def _normalize_num_ctx(cls, value: Any, field: str) -> int:
+        return cls._clamp_on_read(value, field)
 
     @classmethod
-    def _clamp_on_read(
-        cls, value: Any, default: int, minimum: int, maximum: int, field: str
-    ) -> int:
+    def _clamp_on_read(cls, value: Any, field: str) -> int:
+        """Подрезать значение поля в его границы; негодное — заменить умолчанием.
+
+        Границы и умолчание берутся по имени поля — из SETTING_LIMITS и
+        DEFAULTS соответственно. Передавались они раньше числами от вызывающего,
+        и это была вторая копия и тех, и других.
+        """
+        default = cls.DEFAULTS[field]
+        minimum, maximum = setting_limits(field)
         try:
             number = int(value)
         except (TypeError, ValueError):
@@ -937,7 +986,13 @@ class RuntimeSettingsService:
     # по-другому.
 
     @staticmethod
-    def _require_int_in_range(value: Any, field: str, minimum: int, maximum: int) -> int:
+    def _require_int_in_range(value: Any, field: str) -> int:
+        """Целое в границах поля; иначе отказ с машинным кодом.
+
+        Границы приходят не от вызывающего, а из SETTING_LIMITS по имени поля —
+        из того же места, откуда их берут кламп при чтении и схема ответа.
+        """
+        minimum, maximum = setting_limits(field)
         if isinstance(value, float) and not value.is_integer():
             raise SettingsError(
                 SettingsErrors.INVALID_NUMBER,
@@ -966,7 +1021,7 @@ class RuntimeSettingsService:
         окно втрое против выбранного, второе раздувает KV-кэш до размера, под
         который на этом железе нет памяти (см. MIN_NUM_CTX/MAX_NUM_CTX).
         """
-        return cls._require_int_in_range(value, field, MIN_NUM_CTX, MAX_NUM_CTX)
+        return cls._require_int_in_range(value, field)
 
     @classmethod
     def _require_domain_profile(cls, value: Any) -> str:

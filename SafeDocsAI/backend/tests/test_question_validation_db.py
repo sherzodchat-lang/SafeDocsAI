@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 
 from app.api import deps  # noqa: E402
-from app.core.exceptions import ChatErrors  # noqa: E402
+from app.core.exceptions import ChatErrors, RequestErrors  # noqa: E402
 from app.core.rate_limit import chat_limiter  # noqa: E402
 from app.modules.ask.schemas import AskResponse  # noqa: E402
 from app.modules.chat.schemas import (  # noqa: E402
@@ -253,19 +253,37 @@ class QuestionValidationTestCase(DatabaseBackedTestCase):
 
         Свой код про пустоту здесь был бы неправдой, поэтому валидатор
         пропускает не-строку дальше по цепочке.
+
+        Раньше проверялось «кода нет вовсе»: 422 от Pydantic уходил голым
+        телом FastAPI. Теперь код есть у любого отказа валидации
+        (RequestErrors.VALIDATION_FAILED, обработчик в app/main.py), и смысл
+        проверки в том, что он ОБЩИЙ, а не chat.question_required — вместе с
+        массивом detail, по которому клиент называет виноватое поле.
         """
         for value in (5, None, {"text": "вопрос"}):
             with self.subTest(value=value):
                 handler = self.patch_handler("app.api.endpoints.chat.handle_chat_request")
                 response = await self.client.post(CHAT, json={"question": value})
                 self.assertEqual(response.status_code, 422, response.text)
-                self.assertIsNone(response.json().get("error_code"))
+                body = response.json()
+                self.assertEqual(
+                    body.get("error_code"), RequestErrors.VALIDATION_FAILED
+                )
+                self.assertNotEqual(
+                    body.get("error_code"), ChatErrors.QUESTION_REQUIRED
+                )
+                self.assertIsInstance(body["detail"], list)
+                self.assertEqual(body["detail"][0]["loc"][-1], "question")
                 handler.assert_not_called()
 
     async def test_missing_question_field_is_rejected(self):
         handler = self.patch_handler("app.api.endpoints.chat.handle_chat_request")
         response = await self.client.post(CHAT, json={"notebook_id": None})
         self.assertEqual(response.status_code, 422, response.text)
+        body = response.json()
+        # Отсутствующее поле — тоже отказ Pydantic: общий код и имя поля в detail.
+        self.assertEqual(body.get("error_code"), RequestErrors.VALIDATION_FAILED)
+        self.assertEqual(body["detail"][0]["loc"][-1], "question")
         handler.assert_not_called()
 
 

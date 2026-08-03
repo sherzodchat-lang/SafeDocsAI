@@ -2,12 +2,19 @@ from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from app.core import security
 from app.core.config import settings
-from app.core.exceptions import ApiError, ExternalServiceError, InternalErrors
+from app.core.exceptions import (
+    ApiError,
+    ExternalServiceError,
+    InternalErrors,
+    RequestErrors,
+)
 from app.core.logging import setup_logging, get_logger
 
 # Setup logging
@@ -278,6 +285,48 @@ async def external_service_error_handler(
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.message, "service": exc.service},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """422 от Pydantic: прежний массив detail плюс машинный код.
+
+    Последний класс ответов, который уходил без кода. Тело таким ответам
+    собирал сам FastAPI (request_validation_exception_handler), и
+    `GET /api/v1/settings/users?limit=501` доезжал до интерфейса с языком по
+    умолчанию tg английским «Input should be less than or equal to 500».
+
+    Массив detail сохраняется в прежнем виде, а не сворачивается в строку, и
+    это не аккуратность, а условие правки. На нём держатся два разбора на
+    клиенте (frontend/src/lib/apiError.js): имя непринятого поля берётся из
+    loc, а 422 от схем с extra="forbid" опознаётся по type == extra_forbidden
+    и получает собственное сообщение. Свернуть detail значило бы обменять
+    «сервер не принял поле limit» на «проверьте введённые данные» — то есть
+    сделать хуже, чем было без кода вовсе.
+
+    Ни у ApiError, ни у HTTPException, ни у ExternalServiceError отобрать
+    ответ этот обработчик не может: приложение хранит обработчики словарём с
+    ключом-классом исключения, а выбирает их обходом __mro__ пойманного
+    исключения (starlette/_exception_handler.py). RequestValidationError
+    наследуется от ValidationException, а не от HTTPException, так что в его
+    __mro__ чужих ключей нет, а в чужих __mro__ нет этого. Регистрация здесь
+    вытесняет ровно одну запись — умолчание FastAPI по тому же ключу.
+
+    Логировать нечего: причина отказа целиком в ответе, а не в трейсбеке, и
+    ошибка ожидаемая — в отличие от обработчика Exception ниже.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        # jsonable_encoder — как в вытесняемом умолчании FastAPI: в ctx
+        # ошибок Pydantic попадаются объекты, которые json.dumps не берёт
+        # (само исключение у json_invalid, Decimal у числовых границ).
+        content={
+            "detail": jsonable_encoder(exc.errors()),
+            "error_code": RequestErrors.VALIDATION_FAILED,
+        },
     )
 
 

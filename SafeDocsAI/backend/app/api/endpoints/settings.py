@@ -14,7 +14,7 @@ from app.domain_profiles import list_domain_profiles
 from app.core.database import get_session
 from app.core.exceptions import ApiError, SettingsErrors
 from app.shared.models import User
-from app.shared.settings import RuntimeSettingsService
+from app.shared.settings import RuntimeSettingsService, setting_limits
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,23 @@ def _default(field: str) -> Any:
     return RuntimeSettingsService.DEFAULTS[field]
 
 
+# Границы числовых полей — тоже из ОДНОГО места, SETTING_LIMITS (см.
+# app/shared/settings/runtime_settings.py). Числа здесь были третьей копией: те
+# же пары стоят в строгой проверке при записи (_require_int_in_range) и в
+# снисходительном клампе при чтении (_clamp_on_read), и правка одной из трёх
+# разводила запись с чтением молча.
+#
+# В отличие от _default здесь помощник вызывается ОДИН раз — на импорте, при
+# разборе тела класса, — и иначе быть не может: ge/le обязаны попасть в
+# статическую схему, то есть в OpenAPI, где они и служат документацией
+# контракта. Поздней подстановки, как у умолчаний, тут нет и не нужно: границы
+# описывают не состояние сервера, а сам контракт.
+def _bounded(field: str) -> Any:
+    """Field(ge, le) с границами настройки из SETTING_LIMITS."""
+    limits = setting_limits(field)
+    return Field(ge=limits.min, le=limits.max)
+
+
 def _setting(values: dict[str, Any], field: str) -> Any:
     """Значение настройки из прочитанного файла, с откатом на её умолчание.
 
@@ -66,8 +83,8 @@ class RuntimeSettingsResponse(BaseModel):
     chat_model: str
     embedding_model: str
     enable_condense_query: bool
-    retrieval_top_k: int = Field(ge=1, le=50)
-    top_k: int = Field(ge=1, le=20)
+    retrieval_top_k: int = _bounded("retrieval_top_k")
+    top_k: int = _bounded("top_k")
     default_domain_profile: str
     available_models: list[str]
     available_chat_models: list[str]
@@ -115,7 +132,8 @@ class RuntimeSettingsUpdate(BaseModel):
     # 422 без машинного кода и с английским текстом («Input should be less than
     # or equal to 20»), а интерфейс переведён на три языка и показывает свой
     # перевод по error_code. Проверку держит RuntimeSettingsService и отвечает
-    # settings.value_out_of_range — см. _require_int_in_range.
+    # settings.value_out_of_range — см. _require_int_in_range; границы он берёт
+    # из SETTING_LIMITS, то есть ровно те, что объявлены выше в схеме ответа.
     #
     # Держать здесь два образца политики нельзя: следующий, кто добавит поле,
     # выберет наугад.
@@ -125,8 +143,8 @@ class RuntimeSettingsUpdate(BaseModel):
     contextual_embedding_enabled: bool | None = None
     contextual_embedding_model: str | None = None
     # У окна контекста та же политика, и объяснить админу нужно именно причину
-    # («столько KV-кэша на эту модель не влезет, предел 32768») — см.
-    # _require_num_ctx и MIN_NUM_CTX/MAX_NUM_CTX.
+    # («столько KV-кэша на эту модель не влезет, вот предел») — см.
+    # _require_num_ctx и SETTING_LIMITS (MIN_NUM_CTX/MAX_NUM_CTX).
     chat_model_num_ctx: int | None = None
     contextual_embedding_num_ctx: int | None = None
     reranker_enabled: bool | None = None
