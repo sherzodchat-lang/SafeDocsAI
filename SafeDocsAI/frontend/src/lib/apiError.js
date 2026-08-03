@@ -100,6 +100,10 @@ const ERROR_CODE_KEYS = {
     // уже работать, а сверить её не с чем. Тело запроса верное — повторяется
     // тот же запрос, когда каталог снова соберётся.
     'settings.model_catalog_unavailable': 'settings.errors.modelCatalogUnavailable',
+    // 503: модель эмбеддингов не задана вовсе. Умолчания у неё намеренно нет —
+    // молча подставленное значение уводит поиск в чужую пустую коллекцию, и это
+    // не деградация, а обнуление продукта. Поэтому отказ, а не тихий фолбэк.
+    'settings.embedding_model_unset': 'settings.errors.embeddingModelUnset',
     // 400: контекстное обогащение включают, а модель для него не выбрана.
     // Пустое значение здесь не «умолчание», а тихое отключение функции.
     'settings.contextual_model_required': 'settings.errors.contextualModelRequired',

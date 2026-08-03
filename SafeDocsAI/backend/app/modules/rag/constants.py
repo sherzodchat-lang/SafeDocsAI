@@ -13,7 +13,13 @@ from app.modules.rag.chunker_config import (  # noqa: F401  (re-export)
 
 
 DEFAULT_CHAT_MODEL = settings.OLLAMA_MODEL_CHAT
-DEFAULT_EMBEDDING_MODEL = settings.OLLAMA_MODEL_EMBEDDING
+# У embedding-модели умолчания нет: пусто здесь — это «не задана», и такой
+# ответ система обязана дать честно (SettingsErrors.EMBEDDING_MODEL_UNSET), а
+# не подставить имя, из которого выведется пустая коллекция ChromaDB. Само
+# разрешение (файл настроек -> переменная окружения) живёт в
+# RuntimeSettingsService, а не здесь: значение, прочитанное на импорте, не
+# переживает ни правку настроек, ни подмену переменной в тестах.
+DEFAULT_EMBEDDING_MODEL = ""
 MULTILINGUAL_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
 
 # Метрика расстояния коллекции ChromaDB. Это дефолт ChromaDB, и существующие

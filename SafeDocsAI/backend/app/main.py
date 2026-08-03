@@ -29,19 +29,29 @@ from app.api.endpoints import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Одна строка о том, чем система считает векторы и куда они легли:
+    # `embedding_model=X -> коллекция Y, векторов N`. Имя коллекции ChromaDB
+    # выводится из embedding-модели, поэтому её подмена (или её отсутствие) —
+    # это другая коллекция, то есть пустой поиск при полной базе. Пишется
+    # всегда, а не только в production: «как в README» поднимают именно
+    # development-стенд, и именно там эта строка нужнее всего.
+    from app.modules.rag.chroma_gateway import log_vector_store_state
+
+    chroma_error = log_vector_store_state()
+
     # В production стартуем только с живой ChromaDB. Иначе загрузка документов
     # «успешно» проходит, документ помечается indexed, а векторов нет —
     # это тише и хуже, чем отказ на старте.
-    if settings.ENVIRONMENT == "production":
-        from app.modules.rag.service import RAGService
-
-        rag = RAGService()
-        if rag.collection is None:
-            raise RuntimeError(
-                f"ChromaDB is unreachable at {settings.CHROMA_HOST}:{settings.CHROMA_PORT}: "
-                f"{rag.chroma_error}. Refusing to start."
-            )
-        logger.info("ChromaDB connection verified.")
+    #
+    # Незаданная embedding-модель старт НЕ роняет (log_vector_store_state
+    # вернёт None): выбирают её в админ-панели, и отказ на старте отобрал бы
+    # единственное место, где эту неисправность можно починить. Отвечают
+    # отказом сами RAG-операции — 503 settings.embedding_model_unset.
+    if settings.ENVIRONMENT == "production" and chroma_error is not None:
+        raise RuntimeError(
+            f"ChromaDB is unreachable at {settings.CHROMA_HOST}:{settings.CHROMA_PORT}: "
+            f"{chroma_error}. Refusing to start."
+        )
 
     from app.modules.jobs.worker import IndexingWorker
 

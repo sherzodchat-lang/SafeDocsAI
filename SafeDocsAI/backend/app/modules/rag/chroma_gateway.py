@@ -4,11 +4,12 @@ import re
 
 import chromadb
 
-from app.core.exceptions import ExternalServiceError
-from app.modules.rag.constants import (
-    COLLECTION_DISTANCE_SPACE,
-    DEFAULT_EMBEDDING_MODEL,
+from app.core.exceptions import (
+    EmbeddingModelNotConfigured,
+    ExternalServiceError,
+    SettingsErrors,
 )
+from app.modules.rag.constants import COLLECTION_DISTANCE_SPACE
 from app.modules.rag.model_manager import ModelManager
 from app.shared.settings.config import settings
 
@@ -72,17 +73,57 @@ class ChromaGateway:
     COLLECTION_PREFIX = "andozai_docs_"
 
     def __init__(self) -> None:
+        """Шлюз к активной коллекции ChromaDB.
+
+        Проверка «модель задана» стоит в КОНСТРУКТОРЕ, а не в add/query/delete:
+        через него проходит каждый путь к векторам без исключений — чат, поиск,
+        загрузка, удаление документа и блокнота, переиндексация, воркер,
+        скрипты в backend/*.py, — потому что имя коллекции выводится здесь и
+        больше нигде. Проверка в трёх методах пропустила бы четвёртый, а
+        добавленный завтра путь — тем более.
+
+        Отказ мягкий по объёму, а не по громкости: приложение стартует, раздел
+        настроек живёт (RuntimeSettingsService сюда не ходит), но всё, чему
+        нужна векторная база, отвечает 503 с кодом
+        settings.embedding_model_unset. Молча взять «какую-нибудь» модель
+        нельзя: get_or_create_collection на незнакомое имя создаёт ПУСТУЮ
+        коллекцию, и продукт превращается в пустой поиск при полной базе.
+        """
         from app.shared.settings.runtime_settings import RuntimeSettingsService
 
         self.model_manager = ModelManager()
-        runtime_settings = RuntimeSettingsService.get_settings()
+        # Разрешение целиком (файл настроек -> переменная окружения) сделано в
+        # RuntimeSettingsService; сюда приходит результат, и пусто здесь
+        # означает «не задана нигде».
         self.embedding_model = self.model_manager.resolve_embedding_model(
-            runtime_settings.get("embedding_model", DEFAULT_EMBEDDING_MODEL)
+            RuntimeSettingsService.embedding_model()
         )
+        if not self.embedding_model:
+            self._report_unset_model()
+            raise EmbeddingModelNotConfigured()
         self.chroma_client = None
         self.collection = None
         self.chroma_error: Exception | None = None
         self._init_chroma()
+
+    # Об отсутствующей модели жалуемся один раз за жизнь процесса: шлюз
+    # создаётся на каждый вопрос к ассистенту и на каждую проверку /ready, и
+    # без фильтра одна ненастроенная строка залила бы журнал. Состояние и так
+    # названо при старте (app/main.py) и приходит клиенту кодом на каждый
+    # отказ — вот там оно и считается.
+    _unset_model_reported = False
+
+    @classmethod
+    def _report_unset_model(cls) -> None:
+        if cls._unset_model_reported:
+            return
+        cls._unset_model_reported = True
+        logger.error(
+            "Embedding model is not set (neither in runtime_settings.json nor "
+            "in OLLAMA_MODEL_EMBEDDING): vector search, indexing and deletion "
+            "are refused with %s until a model is chosen in the admin panel.",
+            SettingsErrors.EMBEDDING_MODEL_UNSET,
+        )
 
     @classmethod
     def _collection_name(cls, embedding_model: str) -> str:
@@ -356,3 +397,65 @@ class ChromaGateway:
                 status_code=503,
                 cause=exc,
             ) from exc
+
+
+def log_vector_store_state() -> Exception | None:
+    """Записать в журнал одну строку о состоянии векторного хранилища.
+
+    Формат: `embedding_model=X -> коллекция Y, векторов N`. До неё связать
+    «поиск ничего не находит при полной базе» с настройкой было нечем: имя
+    коллекции выводится из embedding-модели, а сама модель нигде не
+    называлась — ни при старте, ни в ответах.
+
+    Возвращает отказ ChromaDB, если она недоступна, и None во всех остальных
+    случаях — включая незаданную модель. Так и задумано: незаданная модель
+    старт не роняет (иначе некуда прийти и выбрать её), она отвечает 503 на
+    RAG-операциях. Число векторов — сетевой запрос в ChromaDB: его отказ
+    только меняет строку, но никогда не поднимается наверх.
+    """
+    from app.shared.settings.runtime_settings import RuntimeSettingsService
+
+    embedding_model = RuntimeSettingsService.embedding_model()
+    if not embedding_model:
+        logger.error(
+            "embedding_model не задан -> коллекции нет, векторов нет. "
+            "Задайте модель в админ-панели (PUT /api/v1/settings/) или в "
+            "переменной окружения OLLAMA_MODEL_EMBEDDING; до этого поиск, "
+            "чат, индексация и удаление векторов отвечают 503 (%s).",
+            SettingsErrors.EMBEDDING_MODEL_UNSET,
+        )
+        return None
+
+    collection_name = ChromaGateway._collection_name(embedding_model)
+    gateway = ChromaGateway()
+    if gateway.collection is None:
+        logger.error(
+            "embedding_model=%s -> коллекция %s, векторов неизвестно: "
+            "ChromaDB недоступна (%s)",
+            embedding_model,
+            collection_name,
+            gateway.chroma_error,
+        )
+        return gateway.chroma_error or RuntimeError("ChromaDB is unavailable")
+
+    try:
+        count = gateway.collection.count()
+    except Exception as exc:
+        # Коллекция открылась, а счёт не сошёлся: ChromaDB отвалилась ровно
+        # сейчас. Ронять старт из-за строки в журнале нельзя.
+        logger.warning(
+            "embedding_model=%s -> коллекция %s, векторов неизвестно: "
+            "запрос в ChromaDB не удался (%s)",
+            embedding_model,
+            collection_name,
+            exc,
+        )
+        return None
+
+    logger.info(
+        "embedding_model=%s -> коллекция %s, векторов %s",
+        embedding_model,
+        collection_name,
+        count,
+    )
+    return None

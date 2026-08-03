@@ -35,7 +35,9 @@
 
 Какие модели Ollama нужны проекту
 - `gemma3n:e4b` для чата
-- `nomic-embed-text` для эмбеддингов
+- модель эмбеддингов — обязательный выбор без умолчания; на стенде это `qwen3-embedding:8b`
+  (имя коллекции ChromaDB выводится из названия модели, поэтому «какая-нибудь» модель
+  здесь означает пустой поиск при полной базе — см. `OLLAMA_MODEL_EMBEDDING` ниже)
 
 Рекомендуемый вариант локального запуска
 Рекомендуется запускать локально так:
@@ -70,7 +72,7 @@
 
 Скачать обязательные модели:
 `ollama pull gemma3n:e4b`
-`ollama pull nomic-embed-text`
+`ollama pull qwen3-embedding:8b`
 
 Проверка:
 `ollama list`
@@ -84,7 +86,7 @@
 При необходимости можно также задать:
 `export OLLAMA_API_BASE=http://host.docker.internal:11434`
 `export OLLAMA_MODEL_CHAT=gemma3n:e4b`
-`export OLLAMA_MODEL_EMBEDDING=nomic-embed-text`
+`export OLLAMA_MODEL_EMBEDDING=qwen3-embedding:8b`
 
 5. Собрать и поднять контейнеры
 Команда:
@@ -164,7 +166,7 @@ Readiness check:
 `curl -fsSL https://ollama.com/install.sh | sh`
 `ollama serve`
 `ollama pull gemma3n:e4b`
-`ollama pull nomic-embed-text`
+`ollama pull qwen3-embedding:8b`
 
 Важно:
 - `ollama serve` лучше запускать в отдельном терминале;
@@ -187,7 +189,9 @@ Readiness check:
 В `.env` должны быть корректно заполнены как минимум такие параметры:
 - `OLLAMA_API_BASE=http://localhost:11434`
 - `OLLAMA_MODEL_CHAT=gemma3n:e4b`
-- `OLLAMA_MODEL_EMBEDDING=nomic-embed-text`
+- `OLLAMA_MODEL_EMBEDDING=qwen3-embedding:8b` (умолчания нет: без этой переменной и без
+  выбора модели в админ-панели чат, поиск и индексация отвечают 503
+  `settings.embedding_model_unset`, а бэкенд стартует и админ-панель открывается)
 - `POSTGRES_USER=andozai_user`
 - `POSTGRES_PASSWORD=your_secure_password_here`
 - `POSTGRES_SERVER=localhost`
@@ -251,7 +255,7 @@ Readiness check:
 
 Минимальный чек-лист для локального запуска
 1. Установлены `Node.js`, `Python`, `PostgreSQL`, `Ollama`, `Tesseract`, `Poppler`
-2. Скачаны модели `gemma3n:e4b` и `nomic-embed-text`
+2. Скачаны модели `gemma3n:e4b` и `qwen3-embedding:8b`
 3. Создан и заполнен файл `backend/.env`
 4. Создана база `andozai_db`
 5. Выполнена инициализация таблиц
@@ -269,4 +273,4 @@ Readiness check:
 - Ready: `http://localhost:8001/ready`
 
 Краткий вывод
-Для локального запуска с нуля проекту нужны Node.js, Python 3.12, PostgreSQL, Ollama, Tesseract OCR и Poppler Utils. Самый простой и повторяемый способ запуска локально: поднять `SafeDocsAI/docker-compose.yml`, отдельно установить Ollama на хост и скачать модели `gemma3n:e4b` и `nomic-embed-text`.
+Для локального запуска с нуля проекту нужны Node.js, Python 3.12, PostgreSQL, Ollama, Tesseract OCR и Poppler Utils. Самый простой и повторяемый способ запуска локально: поднять `SafeDocsAI/docker-compose.yml`, отдельно установить Ollama на хост и скачать модели `gemma3n:e4b` и `qwen3-embedding:8b`.

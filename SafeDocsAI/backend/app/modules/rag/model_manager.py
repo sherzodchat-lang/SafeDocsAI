@@ -5,8 +5,8 @@ from urllib.parse import urljoin
 
 import ollama
 
-from app.core.exceptions import ExternalServiceError
-from app.modules.rag.constants import DEFAULT_CHAT_MODEL, DEFAULT_EMBEDDING_MODEL
+from app.core.exceptions import EmbeddingModelNotConfigured, ExternalServiceError
+from app.modules.rag.constants import DEFAULT_CHAT_MODEL
 from app.shared.settings.config import settings
 
 
@@ -47,8 +47,18 @@ class ModelManager:
 
     @staticmethod
     def resolve_embedding_model(model: str | None = None) -> str:
+        """Имя embedding-модели; "" означает «не задана».
+
+        Умолчания в коде нет намеренно (см. OLLAMA_MODEL_EMBEDDING в
+        app/shared/settings/config.py): неверно угаданное имя выводит имя
+        коллекции ChromaDB и молча уводит поиск в пустоту. Переменная
+        окружения читается на каждый вызов, а не берётся из константы
+        модуля: константа замерзает на импорте.
+        """
         selected = (model or "").strip()
-        return selected or DEFAULT_EMBEDDING_MODEL
+        if selected:
+            return selected
+        return str(settings.OLLAMA_MODEL_EMBEDDING or "").strip()
 
     @staticmethod
     def _wrap_provider_error(service: str, exc: Exception) -> ExternalServiceError:
@@ -199,6 +209,11 @@ class ModelManager:
         self, texts: Sequence[str], model: str | None = None
     ) -> list[list[float]]:
         resolved_model = self.resolve_embedding_model(model)
+        if not resolved_model:
+            # Второй рубеж после ChromaGateway: без имени модели Ollama
+            # ответила бы 400 на каждый чанк, и в журнале осталась бы жалоба
+            # на Ollama вместо настоящей причины.
+            raise EmbeddingModelNotConfigured()
         try:
             response = self._ollama_client.embed(
                 model=resolved_model,

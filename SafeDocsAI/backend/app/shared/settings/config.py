@@ -117,7 +117,23 @@ class Settings(BaseSettings):
     OLLAMA_API_BASE: str = "http://localhost:11434"
     OLLAMA_TIMEOUT_SECONDS: float = 120.0
     OLLAMA_MODEL_CHAT: str = "gemma3n:e4b"
-    OLLAMA_MODEL_EMBEDDING: str = "nomic-embed-text"
+    # Умолчания нет намеренно, и пустая строка здесь — не забывчивость.
+    #
+    # Имя коллекции ChromaDB выводится из embedding-модели
+    # (ChromaGateway._collection_name), а get_or_create_collection на
+    # незнакомое имя не отказывает, а СОЗДАЁТ пустую коллекцию. Здесь стояло
+    # "nomic-embed-text", и любой процесс, стартовавший без
+    # OLLAMA_MODEL_EMBEDDING (а стенд работает на qwen3-embedding:8b, который
+    # выставляет скрипт запуска), заводил себе рядом пустую
+    # andozai_docs_nomic_embed_text и отвечал на поиск пустотой при полной
+    # базе — без единой ошибки в логах. Такое видели живьём.
+    #
+    # Embedding-модель — не порт и не таймаут: неверное тихое умолчание здесь
+    # не деградация, а обнуление продукта. Поэтому порядок разрешения теперь
+    # честный: runtime_settings.json -> эта переменная -> отказ
+    # (SettingsErrors.EMBEDDING_MODEL_UNSET, 503). Приложение при этом
+    # стартует и раздел настроек открывается — иначе модель негде выбрать.
+    OLLAMA_MODEL_EMBEDDING: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",

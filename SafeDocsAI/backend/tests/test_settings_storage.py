@@ -43,6 +43,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.core.exceptions import SettingsError, SettingsErrors  # noqa: E402
+from app.shared.settings.config import settings as app_settings  # noqa: E402
 from app.shared.settings import runtime_settings as runtime_settings_module  # noqa: E402
 from app.shared.settings.runtime_settings import RuntimeSettingsService  # noqa: E402
 
@@ -50,9 +51,13 @@ from app.shared.settings.runtime_settings import RuntimeSettingsService  # noqa:
 LOGGER_NAME = "app.shared.settings.runtime_settings"
 
 CHAT_MODEL = "gemma4:26b"
-# Умолчание должно оставаться выбираемым: иначе к нему нельзя вернуться ни
-# сбросом, ни руками.
-DEFAULT_EMBEDDING = RuntimeSettingsService.DEFAULTS["embedding_model"]
+# Модель из ПЕРЕМЕННОЙ ОКРУЖЕНИЯ, а не из DEFAULTS: умолчания у embedding-модели
+# в коде больше нет (оно уводило поиск в пустую коллекцию ChromaDB), и второй
+# шаг разрешения — OLLAMA_MODEL_EMBEDDING. Значение подменяется в
+# set_up_settings_file, иначе тесты зависели бы от окружения машины.
+# Оно должно оставаться выбираемым: иначе к нему нельзя вернуться ни сбросом,
+# ни руками.
+DEFAULT_EMBEDDING = "qwen3-embedding:8b"
 OTHER_EMBEDDING = "bge-m3"
 
 FAKE_CATALOG = {
@@ -68,6 +73,15 @@ class SettingsFileMixin:
     """Файл настроек во временном каталоге и каталог моделей без Ollama."""
 
     def set_up_settings_file(self) -> None:
+        # Переменная окружения — второй шаг разрешения embedding-модели
+        # (файл настроек -> переменная -> отказ). Подменяем её, чтобы проверки
+        # не зависели от того, что выставлено на машине разработчика.
+        env_patcher = patch.object(
+            app_settings, "OLLAMA_MODEL_EMBEDDING", DEFAULT_EMBEDDING
+        )
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
         self._dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._dir.cleanup)
         self.settings_path = Path(self._dir.name) / "runtime_settings.json"
@@ -225,12 +239,10 @@ class SettingsReadLoggingTests(SettingsFileMixin, unittest.TestCase):
         self.assertIn(str(self.settings_path), message)
         self.assertIn("JSONDecodeError", message)
         # Тихий откат и был опасен тем, что менял embedding-модель, поэтому она
-        # названа в сообщении прямо.
-        self.assertIn(RuntimeSettingsService.DEFAULTS["embedding_model"], message)
-        self.assertEqual(
-            values["embedding_model"],
-            RuntimeSettingsService.DEFAULTS["embedding_model"],
-        )
+        # названа в сообщении прямо — и это то, к чему приведёт разрешение без
+        # файла настроек, то есть значение OLLAMA_MODEL_EMBEDDING.
+        self.assertIn(DEFAULT_EMBEDDING, message)
+        self.assertEqual(values["embedding_model"], DEFAULT_EMBEDDING)
 
     def test_a_file_that_is_not_an_object_is_reported_too(self):
         """JSON разобрался, но настройками не является — тот же откат."""
@@ -360,10 +372,7 @@ class ResetSettingsTests(SettingsFileMixin, unittest.IsolatedAsyncioTestCase):
 
         restored = await RuntimeSettingsService.reset_settings(confirm_reindex=True)
 
-        self.assertEqual(
-            restored["embedding_model"],
-            RuntimeSettingsService.DEFAULTS["embedding_model"],
-        )
+        self.assertEqual(restored["embedding_model"], DEFAULT_EMBEDDING)
         self.assertTrue(restored["reindex_required"])
 
     async def test_reset_without_a_model_change_does_not_ask_for_confirmation(self):
@@ -394,7 +403,7 @@ class ResetSettingsTests(SettingsFileMixin, unittest.IsolatedAsyncioTestCase):
         # переиндексация всё ещё не выполнена.
         await RuntimeSettingsService.update_settings_locked(
             {
-                "embedding_model": RuntimeSettingsService.DEFAULTS["embedding_model"],
+                "embedding_model": DEFAULT_EMBEDDING,
                 "confirm_reindex": True,
             }
         )

@@ -44,6 +44,7 @@ from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 
 from app.core.exceptions import SettingsErrors  # noqa: E402
 from app.modules.documents import DocumentModuleService  # noqa: E402
+from app.shared.settings.config import settings as app_settings  # noqa: E402
 from app.shared.settings.runtime_settings import RuntimeSettingsService  # noqa: E402
 
 
@@ -52,7 +53,12 @@ RESET = "/api/v1/settings/reset"
 REINDEX = "/api/v1/documents/reindex"
 
 CHAT_MODEL = "gemma4:26b"
-DEFAULT_EMBEDDING = RuntimeSettingsService.DEFAULTS["embedding_model"]
+# Исходная модель приходит из ПЕРЕМЕННОЙ ОКРУЖЕНИЯ: умолчания у embedding-модели
+# в коде больше нет, порядок разрешения — файл настроек ->
+# OLLAMA_MODEL_EMBEDDING -> отказ. Переменная подменяется в asyncSetUp, иначе
+# проверки зависели бы от окружения машины, а на чистой машине (модель не
+# задана нигде) менять было бы не с чего — и guard проверять стало бы не на чем.
+DEFAULT_EMBEDDING = "qwen3-embedding:8b"
 OTHER_EMBEDDING = "bge-m3"
 
 FAKE_CATALOG = {
@@ -70,6 +76,12 @@ class SettingsApiTestCase(DatabaseBackedTestCase):
 
         self.admin = await self.make_user("root", "admin")
         self.as_user(self.admin)
+
+        env_patcher = patch.object(
+            app_settings, "OLLAMA_MODEL_EMBEDDING", DEFAULT_EMBEDDING
+        )
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
 
         self._settings_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._settings_dir.cleanup)

@@ -12,7 +12,7 @@ import json
 import logging
 
 from app.core.database import session_context
-from app.core.exceptions import SourceErrors
+from app.core.exceptions import SettingsErrors, SourceErrors
 from app.models.models import Document
 from app.modules.documents.service import (
     DocumentIndexingError,
@@ -42,6 +42,12 @@ STOP_TIMEOUT_SECONDS = 30.0
 # долбили бы в цикле, сжигая бюджет попыток за секунды.
 CLEANUP_RETRY_SECONDS = 60.0
 
+# Как часто напоминать в журнале, что очередь стоит из-за незаданной
+# embedding-модели. Не на каждом опросе (это раз в POLL_INTERVAL_SECONDS —
+# журнал стал бы нечитаемым), но и не однократно: остановленная очередь —
+# состояние, о котором надо помнить, пока оно длится.
+UNSET_MODEL_LOG_INTERVAL_SECONDS = 300.0
+
 # error_text уходит в API, а traceback туда не нужен
 _MAX_ERROR_TEXT = 500
 
@@ -53,6 +59,10 @@ class IndexingWorker:
         self._poll_interval = poll_interval
         self._task: asyncio.Task | None = None
         self._cleanup_retry_after = 0.0
+        # Момент, до которого о незаданной embedding-модели уже сказано.
+        # Отрицательная бесконечность, а не 0.0: первое же обнаружение обязано
+        # попасть в журнал, каким бы ни было loop.time() на старте.
+        self._unset_model_logged_at = float("-inf")
 
     # -- жизненный цикл --------------------------------------------------
     def start(self) -> None:
@@ -119,7 +129,49 @@ class IndexingWorker:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(wakeup.wait(), timeout=self._poll_interval)
 
+    def _embedding_model_is_set(self) -> bool:
+        """Есть ли чем считать векторы. Иначе задачи не берём вовсе.
+
+        Почему не «взять и провалить». Воркеру некому ответить 503: он не
+        HTTP. Провалить задачу значило бы перевести документы в status='error'
+        — за пару секунд опроса вся очередь, включая всё, что загрузили,
+        пока модель выбирали, — и вернуть их могла бы только повторная
+        загрузка. Причина при этом не в файле и не в пользователе, а в одной
+        ненастроенной строке, которую админ исправит за минуту.
+
+        Почему не «вернуть в очередь» (requeue). Бюджет попыток у задачи
+        конечен, а опрос идёт раз в POLL_INTERVAL_SECONDS: попытки сгорели бы
+        за секунды и привели ровно к тому же 'error', только окольным путём.
+
+        Поэтому задача просто не захватывается: она остаётся 'queued',
+        документ — 'pending' («ждёт очереди», его честное состояние), и
+        очередь трогается сама, как только модель выбрали. Это тот же ответ
+        по смыслу, что и 503 на HTTP: «верный запрос, повторим позже».
+        reconcile() такие документы не тронет — у них есть живая задача в
+        очереди, а признаком аварии там служит её отсутствие.
+        """
+        from app.shared.settings.runtime_settings import RuntimeSettingsService
+
+        if RuntimeSettingsService.embedding_model():
+            return True
+        now = asyncio.get_running_loop().time()
+        if now - self._unset_model_logged_at >= UNSET_MODEL_LOG_INTERVAL_SECONDS:
+            self._unset_model_logged_at = now
+            logger.error(
+                "Indexing queue is paused: embedding model is not set (%s). "
+                "Documents stay 'pending' and vector cleanup waits; pick a "
+                "model in the admin panel or set OLLAMA_MODEL_EMBEDDING.",
+                SettingsErrors.EMBEDDING_MODEL_UNSET,
+            )
+        return False
+
     async def _claim_and_process(self) -> bool:
+        # Ни индексация, ни очистка векторов без embedding-модели невозможны:
+        # имя коллекции ChromaDB выводится из неё. Проверка стоит до захвата
+        # задачи — захваченная и тут же брошенная задача стоила бы документу
+        # статуса.
+        if not self._embedding_model_is_set():
+            return False
         # Очистка векторов идёт вперёд индексации: она короткая, а висячие
         # векторы до неё видны в поиске как цитаты из удалённых документов.
         if await self._claim_and_process_cleanup():

@@ -157,6 +157,22 @@ class SettingsErrors:
     # прилетевшего из RuntimeSettingsService мимо SettingsError.
     INVALID_VALUE = "settings.invalid_value"
 
+    # --- Embedding-модель не задана (HTTP 503) ---
+    # 503: ни в runtime_settings.json, ни в переменной окружения
+    # OLLAMA_MODEL_EMBEDDING нет embedding-модели, а имя коллекции ChromaDB
+    # выводится ровно из неё. Умолчания в коде нет намеренно: подставленное
+    # молча имя уводило поиск в коллекцию, которую никто не заполнял, —
+    # ноль найденных фрагментов при полной базе и ни одной ошибки в журнале.
+    #
+    # Отказ мягкий: приложение стартует, раздел настроек открывается и
+    # сохраняется (иначе модель негде выбрать), а всё, чему нужна векторная
+    # база — поиск, чат, индексация, удаление векторов, — отвечает этим кодом.
+    # 503, а не 400: тело запроса верное, повторять его надо как есть, когда
+    # админ выберет модель. Раздел settings., а не source.: чинится это в
+    # админ-панели, и подсказка пользователю здесь та же, что у остальных
+    # ненастроенных моделей.
+    EMBEDDING_MODEL_UNSET = "settings.embedding_model_unset"
+
 
 class ChatErrors:
     """Машинные коды раздела вопросов к ассистенту.
@@ -220,6 +236,34 @@ class ApiError(HTTPException):
     ) -> None:
         super().__init__(status_code=status_code, detail=detail, headers=headers)
         self.error_code = error_code
+
+
+class EmbeddingModelNotConfigured(ApiError):
+    """Операция требует векторной базы, а embedding-модель не задана.
+
+    ApiError, а не SettingsError: бросает это ЛЮБОЙ путь к ChromaDB (чат,
+    поиск, загрузка, удаление, переиндексация), а не раздел настроек, — и
+    таблица кодов из app/api/endpoints/settings.py до них не дотягивается.
+    Обработчик ApiError в app/main.py отдаёт наружу
+    {"detail": ..., "error_code": ...} с нужным статусом на всех путях сразу,
+    включая те, которые заведут завтра.
+
+    За HTTP этот же объект работает как обычное исключение: воркер индексации
+    (app/modules/jobs/worker.py) до него не доходит вовсе — он не берёт задачи,
+    пока модель не выбрана, — а скрипты вне API получают внятный текст.
+    """
+
+    MESSAGE = (
+        "Embedding model is not configured: set it in the admin panel "
+        "(PUT /api/v1/settings/, field embedding_model) or in the "
+        "OLLAMA_MODEL_EMBEDDING environment variable. Vector search, indexing "
+        "and deletion are unavailable until then."
+    )
+
+    def __init__(self, detail: str | None = None) -> None:
+        super().__init__(
+            503, SettingsErrors.EMBEDDING_MODEL_UNSET, detail or self.MESSAGE
+        )
 
 
 class SettingsError(ValueError):

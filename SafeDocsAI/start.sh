@@ -9,7 +9,26 @@ POSTGRES_HOST="${POSTGRES_SERVER:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 OLLAMA_API_BASE="${OLLAMA_API_BASE:-http://localhost:11434}"
 OLLAMA_MODEL_CHAT="${OLLAMA_MODEL_CHAT:-gemma3n:e4b}"
-OLLAMA_MODEL_EMBEDDING="${OLLAMA_MODEL_EMBEDDING:-nomic-embed-text}"
+
+# Умолчания у модели эмбеддингов НЕТ намеренно.
+#
+# Здесь стояло "${OLLAMA_MODEL_EMBEDDING:-nomic-embed-text}". Имя коллекции
+# ChromaDB выводится из этого значения, а на незнакомое имя ChromaDB заводит
+# пустую коллекцию вместо отказа: запуск без переменной уводил поиск в
+# andozai_docs_nomic_embed_text — ноль найденного при полной базе и ни одной
+# ошибки в логах. Ровно это и наблюдали на стенде, работающем на
+# qwen3-embedding:8b.
+#
+# Пустое значение проходит дальше как есть: бэкенд стартует, админ-панель
+# открывается, а RAG-операции отвечают 503 settings.embedding_model_unset,
+# пока модель не выбрана здесь или в админ-панели. Пример (подставьте свою):
+#   export OLLAMA_MODEL_EMBEDDING=qwen3-embedding:8b
+#
+# Переменная НЕ экспортируется (как и OLLAMA_MODEL_CHAT): она нужна только
+# скачиванию модели ниже. Экспорт пустого значения был бы хуже отсутствия —
+# он перекрыл бы OLLAMA_MODEL_EMBEDDING из backend/.env, потому что для
+# pydantic-settings пустая переменная окружения — это заданная переменная.
+OLLAMA_MODEL_EMBEDDING="${OLLAMA_MODEL_EMBEDDING:-}"
 
 check_postgres() {
     if command -v pg_isready >/dev/null 2>&1; then
@@ -98,6 +117,13 @@ else
 
         ensure_ollama_model "$OLLAMA_MODEL_CHAT"
         ensure_ollama_model "$OLLAMA_MODEL_EMBEDDING"
+
+        if [ -z "$OLLAMA_MODEL_EMBEDDING" ]; then
+            echo "⚠️  Модель эмбеддингов не задана (OLLAMA_MODEL_EMBEDDING)."
+            echo "   Поиск, чат и индексация будут отвечать 503, пока модель"
+            echo "   не выбрана в админ-панели или не задана переменной:"
+            echo "   export OLLAMA_MODEL_EMBEDDING=qwen3-embedding:8b"
+        fi
     fi
 fi
 

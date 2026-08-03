@@ -136,7 +136,18 @@ _FALSE_WORDS = frozenset({"0", "false", "no", "off"})
 class RuntimeSettingsService:
     DEFAULTS: dict[str, Any] = {
         "chat_model": settings.OLLAMA_MODEL_CHAT,
-        "embedding_model": settings.OLLAMA_MODEL_EMBEDDING,
+        # Пусто — «модель не задана», как и у contextual_embedding_model.
+        #
+        # Умолчания у embedding-модели нет ни здесь, ни в config.py: имя
+        # коллекции ChromaDB выводится из неё, и подставленное молча значение
+        # уводит поиск в пустую коллекцию (см. комментарий к
+        # OLLAMA_MODEL_EMBEDDING). Порядок разрешения — файл настроек ->
+        # переменная окружения -> отказ, и второй шаг делает не эта строка, а
+        # get_settings через env_embedding_model(): значение переменной,
+        # прочитанное здесь на импорте, замерзало бы в модуле и — что хуже —
+        # попадало бы в файл при сбросе настроек, то есть переживало бы саму
+        # переменную.
+        "embedding_model": "",
         "retrieval_top_k": 20,
         "top_k": 5,
         "default_domain_profile": "tax",
@@ -203,6 +214,28 @@ class RuntimeSettingsService:
         path = backend_dir / "data" / "runtime_settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
+
+    # --- Embedding-модель: файл настроек -> переменная окружения -> отказ ---
+
+    @classmethod
+    def env_embedding_model(cls) -> str:
+        """Embedding-модель из окружения (OLLAMA_MODEL_EMBEDDING) или "".
+
+        Читается на каждый вызов, а не на импорте: значение переменной — это
+        второй шаг разрешения, и замораживать его в модуле незачем.
+        """
+        return str(settings.OLLAMA_MODEL_EMBEDDING or "").strip()
+
+    @classmethod
+    def embedding_model(cls) -> str:
+        """Действующая embedding-модель; "" означает «не задана».
+
+        Единственный ответ на вопрос «какой моделью считать векторы» — им
+        пользуются шлюз ChromaDB, воркер индексации и строка о состоянии в
+        журнале при старте. Отдельные прочтения настроек в этих трёх местах
+        разъехались бы на первой же правке порядка разрешения.
+        """
+        return str(cls.get_settings().get("embedding_model") or "")
 
     @classmethod
     def available_models(cls) -> list[str]:
@@ -372,13 +405,14 @@ class RuntimeSettingsService:
                 # ValueError накрывает json.JSONDecodeError и UnicodeDecodeError.
                 logger.error(
                     "Runtime settings file %s is unreadable (%s: %s). Falling "
-                    "back to DEFAULTS — including embedding_model=%s, то есть "
-                    "другую коллекцию ChromaDB: поиск будет отвечать пустотой, "
-                    "пока файл не починят.",
+                    "back to DEFAULTS — including embedding_model=%r (из "
+                    "OLLAMA_MODEL_EMBEDDING), то есть другую коллекцию "
+                    "ChromaDB: поиск будет отвечать пустотой, пока файл не "
+                    "починят.",
                     path,
                     type(exc).__name__,
                     exc,
-                    cls.DEFAULTS["embedding_model"],
+                    cls.env_embedding_model(),
                 )
 
         if data and not isinstance(data, dict):
@@ -427,7 +461,13 @@ class RuntimeSettingsService:
         if not merged["chat_model"]:
             merged["chat_model"] = cls.DEFAULTS["chat_model"]
         if not merged["embedding_model"]:
-            merged["embedding_model"] = cls.DEFAULTS["embedding_model"]
+            # Второй шаг разрешения: в файле модели нет — берём из окружения.
+            # Третьего шага (умолчания в коде) нет: пустая строка доезжает до
+            # вызывающего как есть и означает «не задана». Отвечает на неё
+            # отказом шлюз ChromaDB (EmbeddingModelNotConfigured, 503), а не
+            # это чтение: get_settings обязан работать всегда — им открывается
+            # в том числе экран, на котором модель и выбирают.
+            merged["embedding_model"] = cls.env_embedding_model()
         # "model" — устаревшее имя chat_model: под ним ключ лежит в старых
         # runtime_settings.json и его же читают чат и ask
         # (`.get("chat_model") or .get("model")`). Всегда выводим из
@@ -653,15 +693,19 @@ class RuntimeSettingsService:
         async with cls._lock():
             current = cls.get_settings()
             old_embedding = current.get("embedding_model", "")
-            new_embedding = cls.DEFAULTS["embedding_model"]
+            # Сброс возвращает не «умолчание из кода» (его нет), а то, что
+            # даёт разрешение без файла настроек, — значение переменной
+            # окружения. Пустое означает, что после сброса модель окажется не
+            # задана вовсе, и подтверждение здесь тем более обязательно.
+            new_embedding = cls.env_embedding_model()
             embedding_changes = bool(old_embedding) and old_embedding != new_embedding
             if embedding_changes and not confirm_reindex:
                 raise SettingsError(
                     SettingsErrors.REINDEX_CONFIRMATION_REQUIRED,
                     f"Resetting settings returns the embedding model to "
-                    f"{new_embedding} ({old_embedding} -> {new_embedding}) and "
-                    f"requires a full reindex. Repeat the request with "
-                    f"confirm_reindex=true.",
+                    f"{new_embedding or 'unset'} ({old_embedding} -> "
+                    f"{new_embedding or 'unset'}) and requires a full reindex. "
+                    f"Repeat the request with confirm_reindex=true.",
                 )
 
             restored = dict(cls.DEFAULTS)
@@ -673,7 +717,7 @@ class RuntimeSettingsService:
             )
             cls._write_settings(restored)
             logger.info(
-                "Runtime settings reset to defaults (embedding_model %s -> %s, "
+                "Runtime settings reset to defaults (embedding_model %r -> %r, "
                 "reindex_required=%s)",
                 old_embedding,
                 new_embedding,

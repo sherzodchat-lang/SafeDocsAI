@@ -375,9 +375,11 @@ class RagServiceHelpersTests(unittest.TestCase):
         self.assertEqual(fused[0]["retrieval_method"], "lexical+vector")
         self.assertGreater(fused[0]["rrf_score"], fused[1]["rrf_score"])
 
-    @patch("app.services.rag_service.RAGService._init_chroma")
-    def test_boost_article_chunks_reorders(self, mock_init):
-        rag = RAGService()
+    def test_boost_article_chunks_reorders(self):
+        # Экземпляр RAGService здесь не нужен: проверяется статический метод.
+        # Раньше он всё же создавался (и заодно патчился _init_chroma) — и
+        # тянул за собой ChromaDB, Ollama и настроенную embedding-модель,
+        # которой у чистой машины нет: без неё шлюз честно отказывает.
         results = {
             "documents": [
                 [
@@ -412,10 +414,9 @@ class RagServiceHelpersTests(unittest.TestCase):
         self.assertIsNotNone(ref)
         self.assertEqual(ref, "пункт 10")
 
-    @patch("app.services.rag_service.RAGService._init_chroma")
-    def test_boost_list_item_by_line_number(self, mock_init):
+    def test_boost_list_item_by_line_number(self):
         """Chunk starting with '243.' should be boosted for ref 'закон 243'."""
-        rag = RAGService()
+        # Как и выше: метод статический, экземпляр не нужен.
         results = {
             "documents": [
                 [

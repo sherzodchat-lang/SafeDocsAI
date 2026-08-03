@@ -48,6 +48,14 @@ from app.modules.jobs.service import (  # noqa: E402
 )
 from app.modules.jobs.worker import IndexingWorker  # noqa: E402
 from app.shared.models import Chunk, Document, Job, Notebook  # noqa: E402
+from app.shared.settings.config import settings as app_settings  # noqa: E402
+
+
+# Воркер не берёт задачи, пока не задана embedding-модель: имя коллекции
+# ChromaDB выводится из неё, и без модели ни очистка векторов, ни индексация
+# невозможны (см. IndexingWorker._embedding_model_is_set). Здесь проверяется
+# не это, поэтому модель задана переменной окружения — как на рабочем стенде.
+EMBEDDING_MODEL = "qwen3-embedding:8b"
 
 
 class VectorCleanupTestCase(DatabaseBackedTestCase):
@@ -65,6 +73,12 @@ class VectorCleanupTestCase(DatabaseBackedTestCase):
         self.rag_cls = rag_patcher.start()
         self.addCleanup(rag_patcher.stop)
         self.rag_delete = self.rag_cls.return_value.delete_documents
+
+        env_patcher = patch.object(
+            app_settings, "OLLAMA_MODEL_EMBEDDING", EMBEDDING_MODEL
+        )
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
 
     async def make_notebook(self, name: str = "Блокнот") -> Notebook:
         return await self.seed(
