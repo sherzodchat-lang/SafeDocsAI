@@ -122,8 +122,15 @@ async def handle_ask_request(
         await session.refresh(log_entry)
         return AskResponse(answer=answer, citations=[], log_id=log_entry.id)
 
-    article_ref = rag_service._detect_article_reference(normalized_question)
-    search_query = normalized_question if article_ref else normalized_question
+    # Конденсации здесь нет намеренно, в отличие от чата и /chat/retrieve.
+    # /ask — разовый запрос: история диалога не читается, в generate_answer
+    # ниже уходит chat_history=[]. Конденсация переписывает follow-up с
+    # местоимениями («а какая у него ставка?») по истории, и на пустой истории
+    # condense_query возвращает запрос как есть — то есть добавить её сюда
+    # значило бы тратить вызов модели на каждый запрос ради того же самого
+    # текста. По той же причине не читается и enable_condense_query:
+    # выключателю нечего выключать.
+    search_query = normalized_question
 
     selected_chunks: list[dict] = []
     selected_chunks = await run_retrieval(

@@ -292,6 +292,26 @@ curl -s -o /dev/null -w 'public=%{http_code}\n' --max-time 20 https://<uuid>-80.
 - оба 404 → nginx не поднят: `sudo nginx -t && sudo nginx`.
 - сайт открылся, но запросы в UI падают → uuid в `CORS_ORIGINS` не тот. Поправить `~/scripts/start_backend.sh`, `pkill -f run.py`, перезапустить.
 
+**В системе не осталось админов (break-glass).** Через API не чинится по устройству: `PUT /api/v1/settings/users/{id}/role` сам требует роль admin, создания пользователя в API нет, регистрация жёстко ставит `role="user"` и по умолчанию выключена. Каскадом встаёт миграция владельцев в `init_db`: бэкфилл `owner_id` и `SET NOT NULL` идут под условием «в базе есть админ» и молча пропускаются — в логе бэкенда `NOT NULL on notebook.owner_id is postponed`.
+
+Сначала убедиться, что дело в этом:
+```bash
+sudo -u postgres psql -d andozai_db -c \
+  "SELECT id, username, role FROM \"user\" ORDER BY id;"
+```
+
+Вернуть доступ — тем же `create_admin.py`, что и при развёртывании, но с `ADMIN_PROMOTE=1`: существующему пользователю выдаётся роль admin, пароль не меняется.
+```bash
+ssh tnr-0 "cd ~/Aigov/SafeDocsAI/backend && \
+  POSTGRES_SERVER=localhost POSTGRES_USER=andozai_user \
+  POSTGRES_PASSWORD=andozai_password POSTGRES_DB=andozai_db \
+  ADMIN_USERNAME=123 ADMIN_PROMOTE=1 ./venv/bin/python create_admin.py"
+# Promoted user '123': user -> admin. Password left unchanged.
+```
+Без `ADMIN_PROMOTE=1` скрипт существующего пользователя не трогает (повторный прогон деплоя не должен менять ничьи права) и печатает подсказку. Если имени в базе нет вовсе, он, как и раньше, заводит нового админа с `ADMIN_PASSWORD` — см. «Admin + проверка» в волне 4. Бэкенд перезапускать не нужно (роль читается из БД на каждом запросе), но после возврата админа это стоит сделать один раз: на старте доедут отложенные `SET NOT NULL` — `pkill -f run.py`, затем `~/scripts/start_backend.sh`.
+
+Дойти до нуля админов штатным путём больше нельзя: снятие роли у последнего админа отвергается (400 `settings.last_admin`), а параллельное взаимное понижение двух админов — 409 `settings.role_change_conflict` у второго. Остаются правка роли руками в БД и база, поднятая до первого `create_admin.py`.
+
 **Модель висит в `Stopping...` и держит VRAM** — `ollama stop` не помогает:
 ```bash
 ssh tnr-0 "pkill -f 'ollama serve'; pkill -f 'ollama runner'; sleep 4"

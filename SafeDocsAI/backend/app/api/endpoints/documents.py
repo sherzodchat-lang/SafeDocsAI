@@ -22,6 +22,7 @@ from app.core.rate_limit import RateLimiter, check_rate_limit
 from app.models.models import User, Document, Chunk, as_utc
 from app.modules.documents import DocumentModuleService
 from app.services.document_service import DocumentService
+from app.shared.settings import RuntimeSettingsService
 
 router = APIRouter()
 
@@ -256,7 +257,34 @@ async def reindex_all_documents(
     current_user: User = Depends(deps.get_current_active_superuser),
     session: AsyncSession = Depends(deps.get_session),
 ) -> Any:
-    return await DocumentModuleService.reindex_all_documents(session=session)
+    """Перестроить весь индекс и, если получилось, погасить долг за смену модели.
+
+    Флаг reindex_required (см. RuntimeSettingsService) ставится при смене
+    embedding_model и до сих пор не снимался ничем: снять его может только
+    переиндексация, а она о нём не знала.
+
+    Успехом считается ровно status == "ok". _reindex_all возвращает "partial",
+    если хотя бы один документ не переиндексировался (файла нет на диске, текст
+    не извлёкся, упала индексация): его чанки удалены из БД и из ChromaDB, а
+    новых векторов нет — в активной коллекции документ отсутствует целиком.
+    Долг за сменой модели в этом случае не погашен, и гасить флаг нельзя:
+    он — единственное, что напоминает админу о неполном индексе, а по ответу
+    одного запроса этого потом не восстановить. Пустая база ("No documents to
+    reindex") — тоже "ok" и тоже честный успех: устаревших векторов не
+    осталось, потому что их нет вовсе.
+
+    Флаг возвращается в ответе, чтобы клиент обновил предупреждение в
+    интерфейсе, не перечитывая настройки отдельным запросом.
+    """
+    result = await DocumentModuleService.reindex_all_documents(session=session)
+    if result.get("status") == "ok":
+        reindex_required = await RuntimeSettingsService.clear_reindex_required()
+    else:
+        reindex_required = bool(
+            RuntimeSettingsService.get_settings().get("reindex_required")
+        )
+    result["reindex_required"] = reindex_required
+    return result
 
 
 MIME_MAP = {

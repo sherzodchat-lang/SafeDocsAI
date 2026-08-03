@@ -65,6 +65,11 @@ class OllamaEmbeddingFunction:
 
 class ChromaGateway:
     ADD_BATCH_SIZE = 20
+    # Общий префикс всех наших коллекций: имя коллекции выводится из
+    # embedding-модели, поэтому их в одном ChromaDB столько, сколько моделей
+    # успели побывать в настройках. По префиксу они и находятся — см.
+    # _stale_collections.
+    COLLECTION_PREFIX = "andozai_docs_"
 
     def __init__(self) -> None:
         from app.shared.settings.runtime_settings import RuntimeSettingsService
@@ -82,7 +87,7 @@ class ChromaGateway:
     @classmethod
     def _collection_name(cls, embedding_model: str) -> str:
         suffix = re.sub(r"[^a-z0-9]+", "_", embedding_model.lower()).strip("_")
-        return f"andozai_docs_{suffix or 'default'}"
+        return f"{cls.COLLECTION_PREFIX}{suffix or 'default'}"
 
     def get_embedding_function(self):
         return OllamaEmbeddingFunction(self.model_manager, self.embedding_model)
@@ -227,7 +232,74 @@ class ChromaGateway:
                 cause=exc,
             ) from exc
 
+    @staticmethod
+    def _collection_names(client) -> list[str]:
+        """Имена коллекций клиента.
+
+        list_collections отдаёт объекты Collection в chromadb 1.x и голые
+        строки в 0.6.x — здесь и там из ответа берётся имя.
+        """
+        names: list[str] = []
+        for item in client.list_collections() or []:
+            name = item if isinstance(item, str) else getattr(item, "name", None)
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    def _stale_collections(self) -> list:
+        """Коллекции прежних embedding-моделей, кроме активной.
+
+        Отказ list_collections сюда не поднимается: он означает, что ChromaDB
+        недоступна целиком, и удаление из активной коллекции упадёт следом уже
+        с ExternalServiceError. Молчать про сам список нельзя — предупреждение
+        в лог остаётся.
+        """
+        client = self.chroma_client
+        if client is None:
+            return []
+        active_name = self._collection_name(self.embedding_model)
+        try:
+            names = [
+                name
+                for name in self._collection_names(client)
+                if name.startswith(self.COLLECTION_PREFIX) and name != active_name
+            ]
+        except Exception as exc:
+            logger.warning("Could not list ChromaDB collections: %s", exc)
+            return []
+        # embedding_function на удалении по id не используется (ничего не
+        # считается), но без него chromadb подставляет свою дефолтную и тянет
+        # onnxruntime.
+        ef = self.get_embedding_function()
+        collections = []
+        for name in names:
+            try:
+                collections.append(
+                    client.get_collection(name=name, embedding_function=ef)
+                )
+            except Exception as exc:
+                raise ExternalServiceError(
+                    "ChromaDB request failed",
+                    service="ChromaDB",
+                    status_code=503,
+                    cause=exc,
+                ) from exc
+        return collections
+
     def delete_documents(self, ids: list[str]) -> None:
+        """Убрать векторы из ВСЕХ наших коллекций, а не только из активной.
+
+        Имя коллекции выводится из embedding-модели, а модель меняется в
+        настройках на живой системе. Удаление только из активной коллекции
+        после такой смены — no-op: документ индексировался в другую, и его
+        векторы оставались там навсегда. Вернув настройку назад, админ снова
+        находил в поиске цитаты из давно удалённых документов — зомби,
+        переживающий откат.
+        Чистка по id безопасна: id вектора — это Chunk.id из PostgreSQL, он
+        глобально уникален, поэтому в чужой коллекции такого id либо нет
+        (delete по несуществующему id у ChromaDB — no-op), либо это ровно тот
+        же чанк, записанный другой моделью.
+        """
         self._init_chroma()
         if self.collection is None:
             raise ExternalServiceError(
@@ -236,10 +308,16 @@ class ChromaGateway:
                 status_code=503,
                 cause=self.chroma_error,
             )
-        if ids:
+        if not ids:
+            return
+        for collection in [self.collection, *self._stale_collections()]:
             try:
-                self.collection.delete(ids=ids)
+                collection.delete(ids=ids)
             except Exception as exc:
+                # Отказ не проглатываем и на неактивной коллекции: тихо
+                # оставленные векторы — это и есть исходный дефект. Вызывающие
+                # уже умеют с этим жить (удаление блокнота ставит задачу
+                # cleanup_embeddings, удаление документа отвечает 503).
                 raise ExternalServiceError(
                     "ChromaDB request failed",
                     service="ChromaDB",

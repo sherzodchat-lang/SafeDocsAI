@@ -15,6 +15,7 @@ import NotebookOverviewPage from './pages/NotebookOverviewPage';
 import SettingsPage from './pages/SettingsPage';
 
 import RegisterPage from './pages/RegisterPage';
+import RequireAdmin from './components/auth/RequireAdmin';
 import { hasActiveSession } from './services/api';
 
 // Токены лежат в httpOnly-куках и из JS не читаются, поэтому признаком входа
@@ -66,8 +67,14 @@ function App() {
               </Route>
               <Route path="admin/sources" element={<AdminSourcesPage />} />
               <Route path="admin/documents" element={<Navigate to="/admin/sources" replace />} />
-              <Route path="admin/logs" element={<AdminLogsPage />} />
-              <Route path="settings" element={<SettingsPage />} />
+              {/* Журнал и настройки бэкенд отдаёт только админу
+                  (deps.get_current_active_superuser). Проверка здесь ничего не
+                  разрешает — она лишь заменяет заведомо неработающую страницу
+                  на честную заглушку. */}
+              <Route element={<RequireAdmin />}>
+                <Route path="admin/logs" element={<AdminLogsPage />} />
+                <Route path="settings" element={<SettingsPage />} />
+              </Route>
             </Route>
           </Route>
 

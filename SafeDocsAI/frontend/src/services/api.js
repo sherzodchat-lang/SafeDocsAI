@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { resolveErrorCode } from '../lib/apiError';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 
@@ -11,6 +12,22 @@ export const CSRF_HEADER_NAME = 'X-CSRF-Token';
 // Несекретные остатки сессии: имя нужно шапке и ключам истории чата, токенов
 // здесь нет и быть не должно.
 const USERNAME_STORAGE_KEY = 'knowledgeai.username';
+
+// Роль владельца сессии — подсказка интерфейсу, а не право доступа: решение
+// «можно или нельзя» принимает сервер, здесь она нужна лишь для того, чтобы не
+// показывать разделы, которые всё равно ответят 403. Поэтому хранится вместе
+// со сроком годности: бессрочная копия роли в localStorage хуже её отсутствия —
+// разжалованный пользователь носил бы её до следующего входа.
+const ROLE_STORAGE_KEY = 'knowledgeai.role';
+
+// Событие, по которому подписчики перечитывают роль: 403 от сервера и новый
+// вход должны убирать и возвращать пункты меню сразу, а не после перезагрузки.
+export const SESSION_ROLE_EVENT = 'knowledgeai:session-role';
+
+// Отказ по нехватке прав. Владение ресурсом бэкенд отдаёт как 404 (см.
+// app/api/deps.py), поэтому 403 с этими кодами означает ровно одно: роль
+// сессии не та, за которую её принимал клиент.
+const FORBIDDEN_ROLE_CODES = ['auth.forbidden', 'forbidden'];
 
 // Ключи прошлой схемы хранения. Их надо стереть у тех, кто уже вошёл: иначе
 // мёртвые токены так и останутся лежать в браузере.
@@ -75,6 +92,65 @@ export const hasActiveSession = () => Boolean(getCsrfToken());
 
 export const getSessionUsername = () => localStorage.getItem(USERNAME_STORAGE_KEY) || '';
 
+const notifySessionRoleChange = () => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new Event(SESSION_ROLE_EVENT));
+};
+
+/** Подписка на изменения роли; возвращает функцию отписки. */
+export const subscribeSessionRole = (listener) => {
+    if (typeof window === 'undefined') return () => {};
+
+    window.addEventListener(SESSION_ROLE_EVENT, listener);
+    return () => window.removeEventListener(SESSION_ROLE_EVENT, listener);
+};
+
+export const clearSessionRole = () => {
+    localStorage.removeItem(ROLE_STORAGE_KEY);
+    notifySessionRoleChange();
+};
+
+/**
+ * Запомнить роль ровно на срок жизни access-токена: `expires_in` из того же
+ * ответа. Дальше подсказка считается протухшей и добывается заново обменом
+ * токенов — то есть у сервера, а не из памяти браузера.
+ */
+export const storeSessionRole = (role, expiresInSeconds) => {
+    const normalized = typeof role === 'string' ? role.trim() : '';
+    if (!normalized) {
+        clearSessionRole();
+        return '';
+    }
+
+    const ttlSeconds = Number(expiresInSeconds);
+    const expiresAt = Date.now() + (Number.isFinite(ttlSeconds) && ttlSeconds > 0 ? ttlSeconds * 1000 : 0);
+
+    localStorage.setItem(ROLE_STORAGE_KEY, JSON.stringify({ role: normalized, expiresAt }));
+    notifySessionRoleChange();
+    return normalized;
+};
+
+/** Роль сессии, пока она не протухла. Пустая строка — «неизвестно». */
+export const getSessionRole = () => {
+    const raw = localStorage.getItem(ROLE_STORAGE_KEY);
+    if (!raw) return '';
+
+    let stored = null;
+    try {
+        stored = JSON.parse(raw);
+    } catch {
+        localStorage.removeItem(ROLE_STORAGE_KEY);
+        return '';
+    }
+
+    if (!stored?.role || !(Number(stored.expiresAt) > Date.now())) {
+        localStorage.removeItem(ROLE_STORAGE_KEY);
+        return '';
+    }
+
+    return String(stored.role);
+};
+
 const purgeLegacyTokenStorage = () => {
     LEGACY_TOKEN_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key));
 };
@@ -105,6 +181,7 @@ export const storeAuthSession = (username) => {
 export const clearAuthSession = () => {
     purgeLegacyTokenStorage();
     localStorage.removeItem(USERNAME_STORAGE_KEY);
+    clearSessionRole();
 
     if (typeof document !== 'undefined') {
         document.cookie = `${CSRF_COOKIE_NAME}=; path=/; max-age=0`;
@@ -139,7 +216,10 @@ const requestNewSession = async () => {
 
     // Тело пустое: refresh-токен бэкенд возьмёт из куки, а CSRF-заголовок
     // приложит перехватчик authApi.
-    await authApi.post('/auth/refresh', {});
+    const { data } = await authApi.post('/auth/refresh', {});
+    // Роль читаем при каждом обмене: если её сменили, пока пользователь сидел
+    // на странице, обмен — первый момент, когда об этом можно узнать честно.
+    storeSessionRole(data?.role, data?.expires_in);
     return true;
 };
 
@@ -165,6 +245,22 @@ export const refreshSession = () => {
     }
 
     return refreshPromise;
+};
+
+/**
+ * Роль текущей сессии: сохранённая, пока не истёк её срок, иначе — свежая, из
+ * ответа на обмен токенов. Пустая строка означает «сервер не подтвердил роль»,
+ * и трактовать её надо как отсутствие прав: интерфейс ничего не разрешает, он
+ * только скрывает заведомо недоступное.
+ */
+export const ensureSessionRole = async () => {
+    if (!hasActiveSession()) return '';
+
+    const cached = getSessionRole();
+    if (cached) return cached;
+
+    await refreshSession();
+    return getSessionRole();
 };
 
 /**
@@ -207,6 +303,15 @@ api.interceptors.response.use(
     (response) => response,
     async (error) => {
         const config = error?.config;
+
+        // 403 по нехватке прав — это ответ сервера «роль не та». Он же
+        // единственный достоверный признак того, что пользователя разжаловали
+        // прямо сейчас: сбрасываем подсказку, и разделы, которых больше нет,
+        // пропадают из интерфейса, не дожидаясь перезагрузки страницы.
+        if (error?.response?.status === 403 && FORBIDDEN_ROLE_CODES.includes(resolveErrorCode(error))) {
+            clearSessionRole();
+            return Promise.reject(error);
+        }
 
         if (error?.response?.status !== 401 || !config || isNonRetryableAuthRequest(config.url)) {
             return Promise.reject(error);

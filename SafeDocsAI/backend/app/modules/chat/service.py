@@ -77,17 +77,57 @@ class StreamChatPreparation:
     immediate_answer: str | None = None
 
 
+# Runtime-настройки, от которых зависит выдача поиска. В ключ кэша идёт их
+# общий хэш, а не перечисление флагов по одному: следующая настройка ретривала
+# попадёт в ключ вместе со строчкой в этом кортеже, без отдельного напоминания
+# заглянуть сюда.
+#
+#   embedding_model  — задаёт имя коллекции в ChromaDB
+#                      (ChromaGateway._collection_name), то есть меняет сам
+#                      индекс, по которому идёт векторная часть поиска;
+#   reranker_enabled — расширяет пул кандидатов до RERANKER_CANDIDATE_POOL и
+#                      включает cross-encoder, который и режет пул до
+#                      final_top_k (см. run_hybrid_retrieval);
+#   reranker_model   — сегодня уходит только в лог: модель зашита в
+#                      reranker_service. В ключе он тем не менее нужен, потому
+#                      что цена ошибки несимметрична: лишнее — один пересчёт
+#                      выдачи после правки поля, недостающее — те же пять
+#                      минут, в которые админ-панель показывает прежнюю выдачу
+#                      и настройка выглядит сломанной.
+#
+# retrieval_top_k и top_k сюда НЕ входят: в ключе уже есть limits, и это те же
+# значения после resolve_retrieval_limits — с учётом переопределения из
+# запроса, которого в самих настройках не видно.
+_RETRIEVAL_SETTING_KEYS = ("embedding_model", "reranker_enabled", "reranker_model")
+
+
+def _retrieval_settings_digest(runtime_settings: dict[str, Any] | None) -> str:
+    snapshot = runtime_settings or {}
+    payload = json.dumps(
+        {key: snapshot.get(key) for key in _RETRIEVAL_SETTING_KEYS},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha1(payload.encode()).hexdigest()[:16]
+
+
 def _retrieval_cache_key(
     notebook_id: int | None,
     query: str,
     allowed_doc_ids: set[int] | None = None,
     limits: tuple[int, int] | None = None,
     language: str = "",
+    runtime_settings: dict[str, Any] | None = None,
+    profile_name: str = "",
 ) -> str:
     # Набор доступных документов входит в ключ: без блокнота он зависит от
     # пользователя, и общий ключ отдавал бы одному пользователю чужие чанки
     # из кэша другого. Лимиты и язык — потому что от них зависит сам результат:
     # язык выбирает варианты запроса у профиля, top-k — длину выдачи.
+    # Профиль — потому что он даёт варианты запроса (expand_search_queries) и
+    # свой rerank_results, а запрошен может быть любой, вне зависимости от
+    # блокнота. Настройки — хэшем, см. _RETRIEVAL_SETTING_KEYS.
     if allowed_doc_ids is None:
         scope = "all"
     else:
@@ -96,7 +136,8 @@ def _retrieval_cache_key(
         ).hexdigest()[:16]
     limits_part = f"{limits[0]}:{limits[1]}" if limits else "default"
     return (
-        f"{notebook_id or 0}:{scope}:{limits_part}:{language}:"
+        f"{notebook_id or 0}:{scope}:{limits_part}:{language}:{profile_name}:"
+        f"{_retrieval_settings_digest(runtime_settings)}:"
         f"{RAGService.normalize_query(query)}"
     )
 
@@ -974,6 +1015,9 @@ async def run_hybrid_retrieval(
     final_top_k: int,
     notebook_id: int | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
+    # Настройки читаются до обращения к кэшу: они входят в ключ, иначе
+    # переключение реранкера следующие пять минут не меняло бы выдачу.
+    runtime_settings = RuntimeSettingsService.get_settings()
     # Check cache
     cache_key = _retrieval_cache_key(
         notebook_id,
@@ -981,6 +1025,8 @@ async def run_hybrid_retrieval(
         allowed_doc_ids,
         limits=(retrieval_top_k, final_top_k),
         language=language,
+        runtime_settings=runtime_settings,
+        profile_name=profile.name,
     )
     cached = _retrieval_cache_get(cache_key)
     if cached is not None:
@@ -1059,7 +1105,6 @@ async def run_hybrid_retrieval(
 
     fused_candidates = fuse_candidates_with_rrf(vector_candidates, lexical_candidates)
 
-    runtime_settings = RuntimeSettingsService.get_settings()
     reranker_enabled = bool(runtime_settings.get("reranker_enabled"))
     # С включённым cross-encoder'ом эвристика работает как фильтр грубой очистки
     # и отдаёт ему расширенный пул: если срезать список до final_top_k здесь,
@@ -1270,6 +1315,11 @@ async def retrieve_chunks(
         requested_top_k=retrieval_request.top_k,
         requested_retrieval_top_k=retrieval_request.retrieval_top_k,
     )
+    # Флаг читается и здесь, хотя это отладочная ручка: /chat/retrieve — панель
+    # разбора запроса, то есть ровно тот инструмент, которым проверяют, что
+    # настройка работает. Безусловная конденсация показывала бы в search_query
+    # переписанный запрос при выключенном флаге, то есть врала бы проверяющему.
+    enable_condense_query = bool(runtime_settings.get("enable_condense_query", True))
     model = runtime_settings.get("chat_model") or runtime_settings.get(
         "model", DEFAULT_CHAT_MODEL
     )
@@ -1298,8 +1348,9 @@ async def retrieve_chunks(
         chat_history.append({"role": "assistant", "content": log.answer})
 
     article_ref = rag_service._detect_article_reference(normalized_question)
-    if article_ref:
+    if article_ref or not enable_condense_query:
         search_query = normalized_question
+        logger.debug("Skipping condensation for search query")
     else:
         search_query = await rag_service.condense_query(
             normalized_question, chat_history, model=model

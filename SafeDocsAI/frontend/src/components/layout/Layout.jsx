@@ -21,6 +21,7 @@ import { cn } from '../../lib/utils';
 import { NotebookHeaderContext } from './NotebookHeaderContext';
 import LocaleSwitcher from '../i18n/LocaleSwitcher';
 import { useLocale } from '../../i18n';
+import { useSessionRole } from '../../hooks/useSessionRole';
 
 const resolvePageMeta = (pathname, t) => {
     if (pathname === '/' || pathname.startsWith('/chat')) {
@@ -63,13 +64,17 @@ const Layout = () => {
     const navigate = useNavigate();
     const [searchParams, setSearchParams] = useSearchParams();
     const { t } = useLocale();
+    const { isAdmin } = useSessionRole();
+    // Журнал и настройки бэкенд отдаёт только админу, поэтому остальным они и
+    // не показываются: пункт меню, ведущий на заглушку «нет доступа», — не
+    // защита, а лишний тупик. Сама защита остаётся на сервере.
     const navItems = useMemo(() => ([
         { name: t('layout.nav.sources'), href: '/sources', icon: FileText },
         { name: t('layout.nav.notebooks'), href: '/notebooks', icon: Bookmark },
         { name: t('layout.nav.chat'), href: '/chat', icon: MessageSquare },
-        { name: t('layout.nav.logs'), href: '/admin/logs', icon: ChartNoAxesCombined },
-        { name: t('layout.nav.settings'), href: '/settings', icon: Settings },
-    ]), [t]);
+        { name: t('layout.nav.logs'), href: '/admin/logs', icon: ChartNoAxesCombined, adminOnly: true },
+        { name: t('layout.nav.settings'), href: '/settings', icon: Settings, adminOnly: true },
+    ].filter((item) => !item.adminOnly || isAdmin)), [t, isAdmin]);
 
     // Имя больше не достать из JWT: access-токен лежит в httpOnly-куке. Берём
     // несекретное имя, запомненное при входе.

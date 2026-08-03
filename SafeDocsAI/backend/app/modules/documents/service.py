@@ -579,6 +579,11 @@ class DocumentModuleService:
         chunk_ids = [str(chunk.id) for chunk in chunks if chunk.id is not None]
         rag_service = RAGService()
         try:
+            # Чистит все коллекции andozai_docs_*, а не только активную:
+            # документ мог быть проиндексирован ДО смены embedding-модели, и
+            # его векторы лежат в коллекции той, прежней модели
+            # (ChromaGateway.delete_documents). Отказ по-прежнему отменяет
+            # удаление целиком — документ должен исчезнуть вместе с векторами.
             rag_service.delete_documents(chunk_ids)
         except Exception as exc:
             raise ApiError(
@@ -643,9 +648,22 @@ class DocumentModuleService:
         old_chunk_ids = [str(c.id) for c in all_chunks if c.id is not None]
         if old_chunk_ids:
             try:
+                # Переиндексация чаще всего и запускается после смены
+                # embedding-модели, то есть старые векторы лежат в коллекции
+                # ПРЕЖНЕЙ модели, а не в активной. delete_documents проходит по
+                # всем коллекциям andozai_docs_* — иначе прежняя оставалась бы
+                # полной копией всей базы и оживала при откате настройки.
                 rag_service.delete_documents(old_chunk_ids)
-            except Exception:
-                logger.warning("Could not delete old chunks from ChromaDB")
+            except Exception as exc:
+                # Не отменяет переиндексацию: id всё равно будут перезаписаны в
+                # активной коллекции. Причину пишем — по «Could not delete old
+                # chunks» без неё нельзя было отличить лежащую ChromaDB от
+                # недоступной коллекции прежней модели.
+                logger.warning(
+                    "Could not delete old chunks from ChromaDB (%d ids): %s",
+                    len(old_chunk_ids),
+                    exc,
+                )
         for chunk in all_chunks:
             await session.delete(chunk)
         await session.flush()

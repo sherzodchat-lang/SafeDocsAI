@@ -73,6 +73,91 @@ class AuthErrors:
     WEAK_PASSWORD = "auth.weak_password"
 
 
+class SettingsErrors:
+    """Машинные коды раздела настроек (админ-панель).
+
+    Раздел выпал из общей схемы целиком: все отказы уходили голым
+    HTTPException без кода, и трёхъязычный интерфейс показывал английский
+    `detail` как есть. Коды стабильны — менять их нельзя без синхронной правки
+    словарей фронта.
+    """
+
+    # --- Смена роли (HTTP) ---
+    # Строки дословно те, что временно жили в app/api/endpoints/settings.py.
+    USER_NOT_FOUND = "settings.user_not_found"
+    # 400: админ и правда последний. Повторять запрос бессмысленно — сначала
+    # нужно кого-то назначить.
+    LAST_ADMIN = "settings.last_admin"
+    # 409: админов было больше, но пока запрос ждал блокировки, их снял
+    # кто-то ещё. Список у клиента устарел.
+    ROLE_CHANGE_CONFLICT = "settings.role_change_conflict"
+
+    # --- Выбор модели (HTTP) ---
+    # Три разных исхода, а не один «модель не подходит»: админу нужно разное
+    # действие, и слить их в один код значит показать ему подсказку наугад.
+    #
+    # 400: поле модели пришло пустым. Лечится вводом значения.
+    MODEL_REQUIRED = "settings.model_required"
+    # 400: такой модели в Ollama нет. Лечится `ollama pull <модель>` —
+    # выбирать из списка нечего, нужного там просто не будет.
+    MODEL_NOT_INSTALLED = "settings.model_not_installed"
+    # 400: модель установлена, но не того вида — embedding-модель в поле чата
+    # или чат-модель в поле эмбеддингов. Лечится выбором другой модели из
+    # списка available_chat_models / available_embedding_models; `ollama pull`
+    # здесь не поможет, модель уже стоит.
+    MODEL_WRONG_KIND = "settings.model_wrong_kind"
+    # 503: список установленных моделей собрать не удалось — Ollama лежит, в
+    # OLLAMA_API_BASE опечатка, клиент не импортируется. Сверять выбранную
+    # модель не с чем, и отвечать MODEL_NOT_INSTALLED нельзя: модель может
+    # стоять на месте и уже быть настроенной, а админ пошёл бы её «доставлять».
+    # Тело запроса менять не нужно — повторить его как есть, когда каталог
+    # снова соберётся.
+    MODEL_CATALOG_UNAVAILABLE = "settings.model_catalog_unavailable"
+
+    # --- Контекстное обогащение (HTTP) ---
+    # 400: обогащение включают (или уже включено и правят модель), а модель для
+    # него не выбрана. Пустое значение здесь не «умолчание», а тихое отключение
+    # функции: индексация читает `if _ctx_enabled and _ctx_model`
+    # (app/modules/documents/service.py) и без модели просто ничего не делает —
+    # то есть переключатель стоял бы во «включено», не делая ничего.
+    CONTEXTUAL_MODEL_REQUIRED = "settings.contextual_model_required"
+
+    # --- Значения полей при ЗАПИСИ (HTTP) ---
+    # Общее правило раздела: на чтении настройки чинятся (иначе испорченный
+    # файл гасит и тот экран, на котором его чинят), при записи — отвергаются.
+    # Тихая подмена при записи означала бы 200 OK на значение, которое админ не
+    # выбирал: он видит успех, а работает система по-другому.
+    #
+    # 400: профиль домена не зарегистрирован. Свой код, а не
+    # source.unsupported_domain_profile: тот про профиль блокнота, а перевод и
+    # подсказка («выберите из available_domain_profiles») здесь свои.
+    UNSUPPORTED_DOMAIN_PROFILE = "settings.unsupported_domain_profile"
+    # 400: в числовом поле не целое число.
+    INVALID_NUMBER = "settings.invalid_number"
+    # 400: целое число вне допустимого диапазона поля. Границы названы в
+    # `detail`; клиент показывает свой перевод и подставляет их из подсказки
+    # поля.
+    VALUE_OUT_OF_RANGE = "settings.value_out_of_range"
+    # 400: в логическом поле значение, которое не является ни истиной, ни
+    # ложью. `bool("banana")` — это True, и переключатель включался бы от
+    # любого мусора.
+    INVALID_BOOLEAN = "settings.invalid_boolean"
+
+    # --- Смена embedding-модели (HTTP) ---
+    # 409: запрос меняет embedding_model, но подтверждения в теле нет. Имя
+    # коллекции ChromaDB выводится из embedding-модели, поэтому смена мгновенно
+    # уводит поиск в другую (пустую) коллекцию — со стороны выглядит как
+    # «все документы пропали». Тело валидно, менять в нём нечего: клиент
+    # повторяет тот же запрос с confirm_reindex=true, объяснив последствия
+    # пользователю. Тем же кодом отвечает сброс настроек, если он возвращает
+    # embedding_model к умолчанию.
+    REINDEX_CONFIRMATION_REQUIRED = "settings.reindex_confirmation_required"
+
+    # 400: отказ уровня настроек без своего кода. Фолбэк для ValueError,
+    # прилетевшего из RuntimeSettingsService мимо SettingsError.
+    INVALID_VALUE = "settings.invalid_value"
+
+
 class ChatErrors:
     """Машинные коды раздела вопросов к ассистенту.
 
@@ -134,6 +219,28 @@ class ApiError(HTTPException):
         headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.error_code = error_code
+
+
+class SettingsError(ValueError):
+    """Отказ уровня настроек: машинный код без HTTP-семантики.
+
+    Не ApiError намеренно. RuntimeSettingsService — слой настроек, а не HTTP:
+    его зовут и мимо запроса (backend/reindex_documents.py, воркер индексации),
+    где status_code некому прочитать, а поднять HTTPException значило бы
+    протащить FastAPI в модуль, которому он не нужен. Код же — не HTTP: это
+    ключ словаря переводов, общий у сервера и клиента.
+
+    Статус выбирает HTTP-слой (app/api/endpoints/settings.py), сопоставляя код
+    с таблицей: одна ошибка настроек — 409, остальные — 400.
+
+    Наследник ValueError, а не Exception: `update_settings` испокон веку
+    бросал ValueError, и вызывающие (в том числе скрипты вне API) ловят
+    именно его. Код добавлен рядом, договор не сломан.
+    """
+
+    def __init__(self, error_code: str, message: str) -> None:
+        super().__init__(message)
         self.error_code = error_code
 
 

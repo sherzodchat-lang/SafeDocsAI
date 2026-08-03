@@ -248,11 +248,17 @@ class ModelManager:
         return self._extract_embeddings(response)
 
     def list_ollama_models(self) -> list[str]:
-        discovery_client = ollama.Client(
-            host=settings.OLLAMA_API_BASE,
-            timeout=min(self._timeout, 5.0),
-        )
+        # Клиент создаётся ВНУТРИ try: ollama.Client разбирает адрес из
+        # OLLAMA_API_BASE и на негодном значении бросает сам, ещё до запроса.
+        # Мимо обёртки этот отказ уходил наверх голым и превращался в 500 на
+        # GET /api/v1/settings/ — то есть гасил экран, на котором адрес и
+        # правят. Отсюда же должен приходить обычный ExternalServiceError,
+        # который вызывающие уже умеют показывать.
         try:
+            discovery_client = ollama.Client(
+                host=settings.OLLAMA_API_BASE,
+                timeout=min(self._timeout, 5.0),
+            )
             response = discovery_client.list()
         except Exception as exc:
             raise self._wrap_provider_error("Ollama", exc) from exc

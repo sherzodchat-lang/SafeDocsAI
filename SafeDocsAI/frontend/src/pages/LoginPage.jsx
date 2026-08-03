@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { Eye, EyeOff, Lock, Shield, User } from 'lucide-react';
-import api, { SESSION_EXPIRED_PARAM, SESSION_EXPIRED_VALUE, clearAuthSession, storeAuthSession } from '../services/api';
+import api, { SESSION_EXPIRED_PARAM, SESSION_EXPIRED_VALUE, clearAuthSession, storeAuthSession, storeSessionRole } from '../services/api';
 import { Button } from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import { Card, CardContent, CardFooter, CardHeader } from '../components/ui/Card';
@@ -39,12 +39,17 @@ const LoginPage = () => {
             formData.append('password', data.password);
 
             // Токены приходят в httpOnly-куках, тело ответа их дублирует только
-            // для совместимости — читать и сохранять их незачем.
-            await api.post('/auth/login/access-token', formData, {
+            // для совместимости — читать и сохранять их незачем. Роль оттуда,
+            // наоборот, нужна: по ней интерфейс решает, показывать ли админские
+            // разделы. Права она не даёт — их проверяет сервер на каждом запросе.
+            const response = await api.post('/auth/login/access-token', formData, {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             });
 
             storeAuthSession(data.username);
+            // Срок годности подсказки — срок жизни access-токена: дальше роль
+            // спрашивается у сервера заново.
+            storeSessionRole(response.data?.role, response.data?.expires_in);
             navigate('/');
         } catch (err) {
             console.error(err);
