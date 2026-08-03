@@ -4,12 +4,18 @@ import { FileSearch, Sparkles } from 'lucide-react';
 import { askService } from '../services/askService';
 import { Button } from '../components/ui/Button';
 import Input from '../components/ui/Input';
+import { useLocale } from '../i18n';
+import { resolveApiErrorMessage } from '../lib/apiError';
 
 
 const ACTIVE_NOTEBOOK_STORAGE_KEY = 'knowledgeai.activeNotebookId';
+// Тот же предел, что у чата и у бэкенда (QUESTION_MAX_LENGTH в
+// backend/app/api/deps.py): вопрос уходит в то же окно контекста модели.
+const MAX_QUESTION_LENGTH = 2000;
 
 
 const AskPage = () => {
+  const { t } = useLocale();
   const [question, setQuestion] = useState('');
   const [result, setResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -29,7 +35,7 @@ const AskPage = () => {
       setResult(response.data);
     } catch (requestError) {
       console.error('Ask request failed', requestError);
-      setError(requestError.response?.data?.detail || 'Не удалось выполнить Ask запрос.');
+      setError(resolveApiErrorMessage(requestError, t, 'askPage.requestFailed'));
     } finally {
       setIsLoading(false);
     }
@@ -43,8 +49,8 @@ const AskPage = () => {
             <Sparkles className="h-5 w-5" />
           </div>
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">Ask</h2>
-            <p className="text-sm text-slate-500">One-shot анализ по текущему notebook с автоматическим retrieval.</p>
+            <h2 className="text-lg font-semibold text-slate-900">{t('askPage.title')}</h2>
+            <p className="text-sm text-slate-500">{t('askPage.description')}</p>
           </div>
         </div>
 
@@ -52,31 +58,47 @@ const AskPage = () => {
           <Input
             value={question}
             onChange={(event) => setQuestion(event.target.value)}
-            placeholder="Сформулируйте вопрос по выбранному notebook..."
+            placeholder={t('askPage.questionPlaceholder')}
+            maxLength={MAX_QUESTION_LENGTH}
             className="h-12"
           />
+          {/* Ввод по maxLength обрывается молча — объясняем предел на месте.
+              Ключ общий с чатом: правило и формулировка там те же. */}
+          {question.length >= MAX_QUESTION_LENGTH ? (
+            <p className="text-xs font-medium text-amber-600">
+              {t('chat.questionLimitReached', { max: MAX_QUESTION_LENGTH })}
+            </p>
+          ) : null}
           <div className="flex items-center justify-between gap-3">
-            <div className="text-sm text-slate-500">
-              Активный notebook: <span className="font-semibold text-slate-700">{activeNotebookId || 'default'}</span>
+            {/* Строку собирает словарь целиком: порядок слов и знак после метки в ru и tg разный. */}
+            <div className="text-sm font-semibold text-slate-600">
+              {t('askPage.activeNotebook', { value: activeNotebookId || t('askPage.notebookNotSelected') })}
             </div>
-            <Button type="submit" isLoading={isLoading}>
+            {/* disabled рядом с isLoading: их объединяет сам Button. Пустой
+                вопрос отправлять нечего — он не дойдёт даже до поиска. */}
+            <Button type="submit" isLoading={isLoading} disabled={!question.trim()}>
               <FileSearch className="h-4 w-4" />
-              Ask
+              {t('askPage.submit')}
             </Button>
           </div>
+          {/* Активный блокнот больше не проставляется сам при заходе в блокнот, поэтому
+              «не выбран» — обычное состояние. Объясняем, что будет и как выбрать. */}
+          {!activeNotebookId ? (
+            <p className="text-sm text-slate-500">{t('askPage.notebookHint')}</p>
+          ) : null}
         </form>
 
-        {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
+        {error ? <p role="alert" className="mt-3 text-sm text-red-600">{error}</p> : null}
       </section>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h3 className="text-base font-semibold text-slate-900">Result</h3>
-          {result?.log_id ? <span className="text-xs font-semibold text-slate-500">log #{result.log_id}</span> : null}
+          <h3 className="text-base font-semibold text-slate-900">{t('askPage.resultTitle')}</h3>
+          {result?.log_id ? <span className="text-xs font-semibold text-slate-500">{t('askPage.logId', { id: result.log_id })}</span> : null}
         </div>
 
         {!result ? (
-          <p className="text-sm text-slate-500">Здесь появится структурированный результат Ask запроса.</p>
+          <p className="text-sm text-slate-500">{t('askPage.emptyResult')}</p>
         ) : (
           <div className="space-y-5">
             <div className="rounded-xl bg-slate-50 p-4 text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
@@ -84,21 +106,23 @@ const AskPage = () => {
             </div>
 
             <div>
-              <h4 className="mb-2 text-sm font-semibold text-slate-900">Citations</h4>
+              <h4 className="mb-2 text-sm font-semibold text-slate-900">{t('askPage.citations')}</h4>
               {Array.isArray(result.citations) && result.citations.length > 0 ? (
                 <div className="space-y-2">
                   {result.citations.map((citation, index) => (
                     <div key={citation.chunk_id || index} className="rounded-lg border border-slate-200 bg-white p-3 text-sm text-slate-600">
-                      <div className="font-semibold text-slate-800">
-                        {citation.source_name || `Source #${citation.source_id ?? 'N/A'}`}
-                        {citation.page ? `, page ${citation.page}` : ''}
+                      {/* Подпись источника и номер страницы берём из тех же ключей, что и чат:
+                          формулировка и знаки препинания у них в ru и tg уже согласованы. */}
+                      <div className="break-words font-semibold text-slate-800">
+                        {citation.source_name || t('chat.sourceFallback', { id: citation.source_id ?? 'N/A' })}
+                        {citation.page ? t('chat.sourcePage', { page: citation.page }) : ''}
                       </div>
-                      {citation.quote ? <div className="mt-1">{citation.quote}</div> : null}
+                      {citation.quote ? <div className="mt-1 break-words">{citation.quote}</div> : null}
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-slate-500">Нет citations для этого ответа.</p>
+                <p className="text-sm text-slate-500">{t('askPage.noCitations')}</p>
               )}
             </div>
           </div>

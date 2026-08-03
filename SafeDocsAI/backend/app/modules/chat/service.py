@@ -13,6 +13,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.deps import assert_owns_notebook
 from app.core.database import session_context
+from app.core.exceptions import ApiError, AuthErrors
 from app.models.models import Chunk, Document, Log, Notebook, User
 from app.modules.chat.schemas import (
     ChatRequest,
@@ -132,6 +133,32 @@ def stream_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def require_log_author(current_user: User) -> int:
+    """id автора новой записи журнала. Без автора запись не создаётся.
+
+    log.user_id остаётся nullable осознанно: журнал — запись о событии, и
+    «у события нет автора» бывает правдой. Такие строки в колонке уже есть
+    (legacy), их никто не переписывает и не удаляет, поэтому NOT NULL на
+    колонку не ставится — он запретил бы и их.
+
+    Но сегодня безавторского писателя нет ни одного: журнал пишут только
+    chat_request, chat_request_stream и handle_ask_request, то есть
+    обработчики HTTP-запроса аутентифицированного пользователя. Фоновый
+    воркер индексации (app/modules/jobs/worker.py) в журнал не пишет вовсе.
+    Значит, новая строка без user_id — не системное событие, а потерянный
+    автор, и ловить её надо здесь, до вставки, а не разбираться потом,
+    почему у записи нет владельца.
+
+    Если системный писатель когда-нибудь появится, он не должен звать эту
+    функцию: он создаёт Log с user_id=None осознанно, и правило «ничьи
+    записи видит только админ» (deps.user_owns) уже его накрывает.
+    """
+    user_id = current_user.id
+    if user_id is None:
+        raise ApiError(401, AuthErrors.INVALID_TOKEN, "Could not validate credentials")
+    return user_id
+
+
 async def persist_chat_log_short_lived(
     *,
     question: str,
@@ -205,6 +232,54 @@ async def expand_with_neighbors(
     expanded = [item["text"] for item in selected_chunks]
     expanded.extend(neighbor_texts.values())
     return expanded
+
+
+async def load_chunk_texts(
+    session: AsyncSession, candidates: list[dict[str, Any]]
+) -> dict[str, str]:
+    """Тексты чанков из PostgreSQL по chunk_id кандидатов, одним запросом.
+
+    Текст кандидата векторного поиска приходит из ChromaDB, а туда он попадает
+    обогащённым: _build_embedding_text (app/modules/documents/service.py)
+    приписывает к чанку «[имя документа | раздел | стр. N] » ради качества
+    поиска. Для показа такой текст не годится, поэтому цитата берётся из
+    таблицы chunk — источника истины. Срезать префикс регулярным выражением
+    нельзя: его формат задаётся индексацией и меняется вместе с ней, а чистка
+    сломалась бы молча и служебная строка снова уехала бы в ответ.
+
+    Выборка одна на всю выдачу, а не по SELECT на цитату: кандидатов в ответе
+    до retrieval_top_k на каждый список, и запрос на каждого — тот самый N+1,
+    от которого lexical_retrieve_chunks_batch уходит одним проходом.
+    """
+    chunk_ids: set[int] = set()
+    for item in candidates:
+        # chunk_id кандидата — строка: идентификатором вектора в ChromaDB
+        # служит str(chunk.id), и лексический поиск отдаёт его в том же виде.
+        try:
+            chunk_ids.add(int(item.get("chunk_id")))
+        except (TypeError, ValueError):
+            continue
+    if not chunk_ids:
+        return {}
+    result = await session.exec(select(Chunk).where(Chunk.id.in_(chunk_ids)))
+    return {str(chunk.id): chunk.text for chunk in result.all()}
+
+
+def build_quote(chunk_id: Any, chunk_texts: dict[str, str]) -> str | None:
+    """Цитата для ответа: начало chunk.text, а не текста из индекса.
+
+    Строки в chunk_texts может не оказаться: между поиском и отрисовкой чанк
+    успели удалить — та же гонка, ради которой существует
+    drop_deleted_document_candidates. Тогда цитаты нет (None), но источник из
+    ответа не выбрасывается: doc_id, имя документа и страница у него уже есть,
+    и ссылка по ним работает. Подставлять сюда текст кандидата как запасной
+    вариант нельзя — это вернуло бы служебный префикс в ответ, молча и только
+    на редком пути, где этого никто не заметит.
+    """
+    quote = (chunk_texts.get(str(chunk_id)) or "").strip().replace("\n", " ")
+    if len(quote) > 240:
+        quote = quote[:240].rstrip() + "..."
+    return quote or None
 
 
 def is_greeting(text: str) -> bool:
@@ -313,6 +388,58 @@ def collect_chunk_candidates(
             }
         )
     return candidates
+
+
+async def drop_deleted_document_candidates(
+    session: AsyncSession,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Выбросить из выдачи ChromaDB чанки документов, которых нет в БД.
+
+    Нужно там, где allowed_doc_ids = None, то есть «без фильтра» (админ без
+    блокнота): у всех остальных множество построено запросом к document, и
+    висячий вектор отсекается ещё в collect_chunk_candidates. Коллекция и
+    таблица chunk расходятся, если удаление векторов не прошло (см. задачу
+    cleanup_embeddings), и тогда админ получает цитату из документа, которого
+    больше нет.
+
+    Проверяем существование найденных документов, а не подставляем все id в
+    where-фильтр Chroma: у админа список доступных документов — это вся
+    коллекция, такой $in ничего не отсекает, но растёт вместе с базой и уходит
+    в каждый запрос. Кандидатов же не больше retrieval_top_k на вариант
+    запроса, поэтому проверка — один короткий SELECT по первичному ключу.
+    Фильтр в chroma_doc_filter при этом не трогаем: для блокнота и обычного
+    пользователя предварительный отбор по doc_id по-прежнему обязателен.
+    """
+    doc_ids = {
+        candidate["metadata"].get("doc_id")
+        for candidate in candidates
+        if isinstance(candidate.get("metadata"), dict)
+    }
+    doc_ids = {doc_id for doc_id in doc_ids if isinstance(doc_id, int)}
+    if not doc_ids:
+        return candidates
+    result = await session.exec(select(Document.id).where(Document.id.in_(doc_ids)))
+    existing = {doc_id for doc_id in result.all() if doc_id is not None}
+    missing = doc_ids - existing
+    if not missing:
+        return candidates
+    kept = [
+        candidate
+        for candidate in candidates
+        if not (
+            isinstance(candidate.get("metadata"), dict)
+            and candidate["metadata"].get("doc_id") in missing
+        )
+    ]
+    logger.warning(
+        "Dropped %d chunk(s) of %d deleted document(s) %s from vector results: "
+        "ChromaDB still holds their vectors, run reconcile_chroma.py",
+        len(candidates) - len(kept),
+        len(missing),
+        sorted(missing),
+    )
+    return kept
 
 
 def rank_vector_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -894,6 +1021,14 @@ async def run_hybrid_retrieval(
             item["retrieval_method"] = "vector"
         pooled_vector_candidates.extend(query_candidates)
 
+    # Без allowed_doc_ids пост-фильтр в collect_chunk_candidates выключен, и
+    # висячие векторы удалённых документов доходят до ответа как цитаты.
+    # Проверяем их существование по БД (см. drop_deleted_document_candidates).
+    if allowed_doc_ids is None and pooled_vector_candidates:
+        pooled_vector_candidates = await drop_deleted_document_candidates(
+            session, pooled_vector_candidates
+        )
+
     # Lexical retrieval: single pass with merged tokens from all query variants
     pooled_lexical_candidates = await lexical_retrieve_chunks_batch(
         session=session,
@@ -967,6 +1102,10 @@ async def run_hybrid_retrieval(
             )
             for item in final_chunks:
                 item["retrieval_method"] = "fallback"
+            if allowed_doc_ids is None and final_chunks:
+                final_chunks = await drop_deleted_document_candidates(
+                    session, final_chunks
+                )
             logger.warning(
                 "run_hybrid_retrieval: fallback returned %d chunks", len(final_chunks)
             )
@@ -1180,14 +1319,15 @@ async def retrieve_chunks(
     )
     selected_chunks = retrieval_result["final_chunks"]
 
+    reported_items = [
+        *retrieval_result["vector_candidates"],
+        *retrieval_result["lexical_candidates"],
+        *retrieval_result["fused_candidates"],
+        *selected_chunks,
+    ]
     doc_id_set = {
         item["metadata"].get("doc_id")
-        for item in [
-            *retrieval_result["vector_candidates"],
-            *retrieval_result["lexical_candidates"],
-            *retrieval_result["fused_candidates"],
-            *selected_chunks,
-        ]
+        for item in reported_items
         if item["metadata"].get("doc_id") is not None
     }
     doc_name_map: dict[int, str] = {}
@@ -1197,14 +1337,13 @@ async def retrieve_chunks(
         )
         for doc in docs_result.all():
             doc_name_map[doc.id] = doc.name
+    # Один запрос на все четыре списка сразу: кандидаты в них по большей части
+    # одни и те же, и отдельная выборка на список била бы по базе впустую.
+    chunk_texts = await load_chunk_texts(session, reported_items)
 
     def to_retrieval_chunk_item(item: dict[str, Any]) -> RetrievalChunkItem:
-        chunk_text = item["text"]
         metadata = item["metadata"]
         doc_id = metadata.get("doc_id")
-        quote = (chunk_text or "").strip().replace("\n", " ")
-        if len(quote) > 240:
-            quote = quote[:240].rstrip() + "..."
         return RetrievalChunkItem(
             rank=item.get("rank"),
             retrieval_method=item.get("retrieval_method"),
@@ -1212,7 +1351,7 @@ async def retrieve_chunks(
             doc_name=metadata.get("doc_name") or doc_name_map.get(doc_id),
             page=metadata.get("page"),
             chunk_id=item.get("chunk_id"),
-            quote=quote or None,
+            quote=build_quote(item.get("chunk_id"), chunk_texts),
             distance=item.get("distance"),
             lexical_score=item.get("lexical_score"),
             rrf_score=item.get("rrf_score"),
@@ -1248,6 +1387,7 @@ async def chat_request(
     session: AsyncSession,
 ) -> ChatResponse:
     started = perf_counter()
+    author_id = require_log_author(current_user)
     rag_service = RAGService()
     normalized_question = rag_service.normalize_query(chat_request.question)
     language = rag_service.detect_language(normalized_question)
@@ -1277,7 +1417,7 @@ async def chat_request(
                 [item.model_dump() for item in empty_sources], ensure_ascii=False
             ),
             time_ms=int((perf_counter() - started) * 1000),
-            user_id=current_user.id,
+            user_id=author_id,
             notebook_id=notebook.id if notebook else None,
             domain_profile=profile.name,
         )
@@ -1298,7 +1438,7 @@ async def chat_request(
                 [item.model_dump() for item in empty_sources], ensure_ascii=False
             ),
             time_ms=int((perf_counter() - started) * 1000),
-            user_id=current_user.id,
+            user_id=author_id,
             notebook_id=notebook.id if notebook else None,
             domain_profile=profile.name,
         )
@@ -1356,7 +1496,7 @@ async def chat_request(
                 [item.model_dump() for item in empty_sources], ensure_ascii=False
             ),
             time_ms=int((perf_counter() - started) * 1000),
-            user_id=current_user.id,
+            user_id=author_id,
             notebook_id=notebook.id if notebook else None,
             domain_profile=profile.name,
         )
@@ -1379,6 +1519,7 @@ async def chat_request(
         )
         for doc in docs_result.all():
             doc_name_map[doc.id] = doc.name
+    chunk_texts = await load_chunk_texts(session, selected_chunks)
 
     sources: list[SourceItem] = []
     expanded_context = await expand_with_neighbors(selected_chunks, session)
@@ -1403,9 +1544,8 @@ async def chat_request(
         doc_name = meta.get("doc_name") or doc_name_map.get(doc_id)
         page = meta.get("page")
         chunk_id = item["chunk_id"]
-        quote = (chunk_text or "").strip().replace("\n", " ")
-        if len(quote) > 240:
-            quote = quote[:240].rstrip() + "..."
+        # В контекст для модели идёт текст кандидата (обогащённый в индексе), в
+        # цитату — chunk.text: первое помогает генерации, второе видит человек.
         if chunk_text not in filtered_context:
             filtered_context.append(chunk_text)
             context_metadata.append({"doc_name": doc_name, "page": page})
@@ -1416,7 +1556,7 @@ async def chat_request(
                 doc_name=doc_name,
                 page=page,
                 chunk_id=chunk_id,
-                quote=quote or None,
+                quote=build_quote(chunk_id, chunk_texts),
             )
         )
 
@@ -1438,7 +1578,7 @@ async def chat_request(
         answer=answer,
         sources=json.dumps([item.model_dump() for item in sources], ensure_ascii=False),
         time_ms=int((perf_counter() - started) * 1000),
-        user_id=current_user.id,
+        user_id=author_id,
         notebook_id=notebook.id if notebook else None,
         domain_profile=profile.name,
     )
@@ -1462,6 +1602,9 @@ async def chat_request_stream(
     model = runtime_settings.get("chat_model") or runtime_settings.get(
         "model", DEFAULT_CHAT_MODEL
     )
+    # То же правило, что в require_log_author («новая запись журнала всегда с
+    # автором»), но своей веткой: генератор уже отдан StreamingResponse, и
+    # исключение отсюда клиент увидел бы оборванным потоком, а не отказом.
     user_id = current_user.id
     if user_id is None:
         yield stream_event(
@@ -1576,6 +1719,7 @@ async def chat_request_stream(
                         )
                         for doc in docs_result.all():
                             doc_name_map[doc.id] = doc.name
+                    chunk_texts = await load_chunk_texts(session, selected_chunks)
 
                     sources: list[SourceItem] = []
                     expanded_context = await expand_with_neighbors(
@@ -1602,9 +1746,6 @@ async def chat_request_stream(
                         doc_name = meta.get("doc_name") or doc_name_map.get(doc_id)
                         page = meta.get("page")
                         chunk_id = item["chunk_id"]
-                        quote = (chunk_text or "").strip().replace("\n", " ")
-                        if len(quote) > 240:
-                            quote = quote[:240].rstrip() + "..."
                         if chunk_text not in filtered_context:
                             filtered_context.append(chunk_text)
                             context_metadata.append(
@@ -1617,7 +1758,7 @@ async def chat_request_stream(
                                 doc_name=doc_name,
                                 page=page,
                                 chunk_id=chunk_id,
-                                quote=quote or None,
+                                quote=build_quote(chunk_id, chunk_texts),
                             )
                         )
 

@@ -8,6 +8,7 @@ import Input from '../components/ui/Input';
 import { Card, CardContent, CardFooter, CardHeader } from '../components/ui/Card';
 import LocaleSwitcher from '../components/i18n/LocaleSwitcher';
 import { useLocale } from '../i18n';
+import { resolveApiErrorMessage } from '../lib/apiError';
 
 const RegisterPage = () => {
     const navigate = useNavigate();
@@ -34,7 +35,7 @@ const RegisterPage = () => {
             navigate('/login');
         } catch (err) {
             console.error(err);
-            setError(err.response?.data?.detail || t('auth.register.failed'));
+            setError(resolveApiErrorMessage(err, t, 'auth.register.failed'));
         } finally {
             setIsLoading(false);
         }

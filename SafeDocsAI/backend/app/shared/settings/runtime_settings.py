@@ -63,14 +63,22 @@ class RuntimeSettingsService:
 
     @classmethod
     def get_settings(cls) -> dict[str, Any]:
-        path = cls._settings_path()
-        if not path.exists():
-            return dict(cls.DEFAULTS)
+        """Настройки, дополненные умолчаниями и приведённые к нужным типам.
 
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return dict(cls.DEFAULTS)
+        Отсутствующий или испорченный файл — не отдельная ветка с коротким
+        `return dict(DEFAULTS)`: тот возвращал словарь БЕЗ ключа "model", и
+        обработчик GET /api/v1/settings/ падал на нём с KeyError, то есть
+        админ-панель не открывалась ни разу до первого сохранения настроек.
+        Пустой словарь вместо содержимого файла проходит тот же путь, и набор
+        ключей на выходе один и тот же при любом состоянии диска.
+        """
+        path = cls._settings_path()
+        data: Any = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
 
         merged = dict(cls.DEFAULTS)
         merged.update(data if isinstance(data, dict) else {})
@@ -98,6 +106,12 @@ class RuntimeSettingsService:
             merged["chat_model"] = cls.DEFAULTS["chat_model"]
         if not merged["embedding_model"]:
             merged["embedding_model"] = cls.DEFAULTS["embedding_model"]
+        # "model" — устаревшее имя chat_model: под ним ключ лежит в старых
+        # runtime_settings.json и его же читают чат и ask
+        # (`.get("chat_model") or .get("model")`). Всегда выводим из
+        # chat_model, а не храним в DEFAULTS отдельной строкой: два
+        # независимых умолчания одного и того же значения разъедутся, и
+        # админ-панель показывала бы модель, с которой никто не работает.
         merged["model"] = merged["chat_model"]
         merged["default_domain_profile"] = cls._normalize_domain_profile(
             merged.get("default_domain_profile")

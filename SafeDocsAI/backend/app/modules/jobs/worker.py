@@ -8,6 +8,7 @@ HTTP-обработчик upload только кладёт задачу в та�
 
 import asyncio
 import contextlib
+import json
 import logging
 
 from app.core.database import session_context
@@ -16,14 +17,18 @@ from app.models.models import Document
 from app.modules.documents.service import (
     DocumentIndexingError,
     DocumentModuleService,
+    redact_server_paths,
     _INDEXING_SEMAPHORE,
 )
 from app.modules.jobs.service import (
+    CLEANUP_MAX_ATTEMPTS,
     HEARTBEAT_SECONDS,
+    JOB_CLEANUP_EMBEDDINGS,
     JOB_INDEX_DOCUMENT,
     JobsService,
     queue_wakeup,
 )
+from app.modules.rag.service import RAGService
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,11 @@ POLL_INTERVAL_SECONDS = 2.0
 RECONCILE_INTERVAL_SECONDS = 30.0
 ERROR_BACKOFF_SECONDS = 5.0
 STOP_TIMEOUT_SECONDS = 30.0
+
+# Пауза перед следующей попыткой очистки векторов. Задача возвращается в
+# очередь сразу и будит воркер, поэтому без паузы недоступную ChromaDB
+# долбили бы в цикле, сжигая бюджет попыток за секунды.
+CLEANUP_RETRY_SECONDS = 60.0
 
 # error_text уходит в API, а traceback туда не нужен
 _MAX_ERROR_TEXT = 500
@@ -42,6 +52,7 @@ class IndexingWorker:
     def __init__(self, poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
         self._poll_interval = poll_interval
         self._task: asyncio.Task | None = None
+        self._cleanup_retry_after = 0.0
 
     # -- жизненный цикл --------------------------------------------------
     def start(self) -> None:
@@ -109,6 +120,10 @@ class IndexingWorker:
                 await asyncio.wait_for(wakeup.wait(), timeout=self._poll_interval)
 
     async def _claim_and_process(self) -> bool:
+        # Очистка векторов идёт вперёд индексации: она короткая, а висячие
+        # векторы до неё видны в поиске как цитаты из удалённых документов.
+        if await self._claim_and_process_cleanup():
+            return True
         # Семафор берём до захвата задачи: иначе задача уже числилась бы
         # 'running', пока воркер стоит в очереди за семафором.
         async with _INDEXING_SEMAPHORE:
@@ -119,6 +134,71 @@ class IndexingWorker:
                 job_id, doc_id = job.id, job.source_id
             await self._process(job_id, doc_id)
         return True
+
+    # -- отложенная очистка векторов --------------------------------------
+    async def _claim_and_process_cleanup(self) -> bool:
+        """Дочистить векторы, осиротевшие после удаления блокнота.
+
+        Семафор индексации здесь не нужен: задача удаляет из ChromaDB
+        перечисленные в payload id уже несуществующих чанков и с индексацией
+        новых документов не пересекается.
+        """
+        loop = asyncio.get_running_loop()
+        if loop.time() < self._cleanup_retry_after:
+            return False
+        async with session_context() as session:
+            job = await JobsService.claim_next(session, JOB_CLEANUP_EMBEDDINGS)
+            if job is None:
+                return False
+            job_id, payload_json = job.id, job.payload_json
+        await self._process_cleanup(job_id, payload_json)
+        return True
+
+    async def _process_cleanup(self, job_id: int, payload_json: str | None) -> None:
+        try:
+            payload = json.loads(payload_json or "{}")
+            chunk_ids = [str(chunk_id) for chunk_id in payload.get("chunk_ids") or []]
+        except (AttributeError, TypeError, ValueError) as exc:
+            # Список id восстановить неоткуда, повтор ничего не изменит:
+            # закрываем задачу как failed, остальное — за reconcile_chroma.py.
+            logger.error("Vector cleanup job %s has unusable payload: %s", job_id, exc)
+            async with session_context() as session:
+                await JobsService.finish(
+                    session, job_id, error_text=f"Некорректный payload: {exc}"
+                )
+            return
+
+        try:
+            RAGService().delete_documents(chunk_ids)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"[:_MAX_ERROR_TEXT]
+            self._cleanup_retry_after = (
+                asyncio.get_running_loop().time() + CLEANUP_RETRY_SECONDS
+            )
+            async with session_context() as session:
+                status = await JobsService.requeue(
+                    session,
+                    job_id,
+                    error_text=message,
+                    max_attempts=CLEANUP_MAX_ATTEMPTS,
+                )
+            log = logger.error if status == "failed" else logger.warning
+            log(
+                "Vector cleanup job %s failed (%d ids, status=%s): %s",
+                job_id,
+                len(chunk_ids),
+                status,
+                message,
+            )
+            return
+
+        async with session_context() as session:
+            await JobsService.finish(
+                session, job_id, result={"deleted_chunks": len(chunk_ids)}
+            )
+        logger.info(
+            "Vector cleanup job %s removed %d orphan vectors", job_id, len(chunk_ids)
+        )
 
     async def _process(self, job_id: int, doc_id: int | None) -> None:
         heartbeat = asyncio.create_task(self._heartbeat(job_id))
@@ -211,7 +291,9 @@ class IndexingWorker:
             message = str(exc)
         else:
             message = f"{type(exc).__name__}: {exc}"
-        message = message[:_MAX_ERROR_TEXT]
+        # Путь к файлу на сервере убираем: error_text уходит клиенту в
+        # GET /sources/. Полный текст уже записан логом в _process (exc_info).
+        message = redact_server_paths(message)[:_MAX_ERROR_TEXT]
         # Код известен только для ожидаемых отказов; всё остальное для клиента
         # неразличимо и переводится одной строкой «ошибка индексации».
         error_code = getattr(exc, "error_code", SourceErrors.INDEXING_FAILED)

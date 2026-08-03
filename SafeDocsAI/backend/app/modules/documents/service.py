@@ -42,6 +42,33 @@ class DocumentIndexingError(Exception):
 
 _YEAR_RE = re.compile(r'((?:19|20)\d{2})')
 
+# Путь к файлу на сервере внутри текста ошибки. Библиотеки разбора подставляют
+# его охотно — PyMuPDF отвечает «FileDataError: Failed to open file
+# 'data/uploads/<uuid>_QA_broken.pdf' as type pdf», — а document.error_text
+# уходит клиенту в GET /sources/ и показывается подсказкой при наведении.
+# Наружу нужна причина отказа, а не устройство диска: имя документа клиент и
+# так знает, полный текст остаётся в логе.
+#
+# Две ветки: путь от корня или с буквой диска — по ведущему разделителю;
+# относительный (`data/uploads/файл.pdf`) — по двум и более разделителям.
+# Ведущий просмотр назад обязателен для обеих: без него «и/или» и «20 MB/s»
+# тоже считались бы путём, потому что начать матч можно прямо с косой черты.
+# Пробелы в элемент пути не пускаем сознательно: с ними выражение слизывало бы
+# соседние слова предложения, а цель — убрать каталоги, и они здесь всегда без
+# пробелов. Имя файла с пробелом теряет только начало — путь всё равно уходит.
+_FS_PATH_RE = re.compile(
+    r"(?<![\w.+-])(?:"
+    r"(?:[A-Za-z]:[\\/]|[\\/])[\w.+-]+(?:[\\/][\w.+-]+)*"
+    r"|(?:[\w.+-]+[\\/]){2,}[\w.+-]*"
+    r")"
+)
+_REDACTED_PATH = "<файл>"
+
+
+def redact_server_paths(message: str) -> str:
+    """Убрать серверные пути из текста, который увидит клиент."""
+    return _FS_PATH_RE.sub(_REDACTED_PATH, message or "")
+
 
 def _build_embedding_text(
     chunk_text: str,
@@ -197,7 +224,10 @@ class DocumentModuleService:
             actual_size = 0
 
         doc = Document(
-            name=file.filename,
+            # Не file.filename как есть: имя уходит в список источников и в
+            # Content-Disposition превью, а клиент волен прислать туда
+            # `../../../../etc/passwd.txt` или строку в килобайт.
+            name=SourceService.sanitize_display_name(file.filename),
             path=file_path,
             size=actual_size,
             status="pending",
@@ -693,9 +723,22 @@ class DocumentModuleService:
                     f"Reindexed doc {doc.id} ({doc.name}): {len(chunk_results)} chunks"
                 )
             except Exception as exc:
-                errors.append(f"Error reindexing doc {doc.id} ({doc.name}): {str(exc)}")
+                # Оба текста уходят по API (error_text — всем, errors — админу
+                # в ответе POST /reindex), поэтому путь к файлу из них убираем;
+                # в логе ниже он остаётся полностью.
+                errors.append(
+                    redact_server_paths(
+                        f"Error reindexing doc {doc.id} ({doc.name}): {exc}"
+                    )
+                )
+                logger.warning(
+                    "Reindex of doc %s (%s) failed: %s", doc.id, doc.name, exc,
+                    exc_info=True,
+                )
                 doc.status = "error"
-                doc.error_text = f"{type(exc).__name__}: {exc}"[:500]
+                doc.error_text = redact_server_paths(
+                    f"{type(exc).__name__}: {exc}"
+                )[:500]
                 doc.error_code = getattr(
                     exc, "error_code", SourceErrors.INDEXING_FAILED
                 )

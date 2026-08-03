@@ -6,11 +6,12 @@ then chunked with HybridChunker. No more dual-path agentic/semantic branching.
 """
 
 import contextlib
+import errno
 import logging
 import os
 import re
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List
 
 import fitz  # PyMuPDF
@@ -29,9 +30,24 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # Читаем загрузку кусками: файл в 50 МБ не должен оказаться в памяти целиком.
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 
+# Предел длины ОДНОГО элемента пути (NAME_MAX), а не пути целиком: 255 байт у
+# ext4, tmpfs и большинства файловых систем Linux. Тем же числом ограничиваем
+# document.name — колонка под btree-индексом, и строка в тысячи байт роняет
+# INSERT по размеру индексной записи (та же причина, что у deps.TITLE_MAX_LENGTH).
+MAX_NAME_BYTES = 255
+
+# uuid4().hex (32 символа) + "_" перед именем: префикс съедает 33 байта из
+# лимита, и пользователю остаётся 222. Ровно на этой границе загрузка и падала
+# с OSError [Errno 36] вместо осмысленного отказа.
+STORED_NAME_PREFIX_BYTES = 33
+
 # Управляющие символы, которых в текстовом файле быть не должно (\t \n \r \f \v
 # разрешены). По ним отличаем текст от бинарника, переименованного в .txt.
 _BINARY_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
+
+# Управляющие символы в имени файла: RFC 7578 имя ничем не ограничивает, а
+# уходит оно и в список источников, и в заголовок Content-Disposition.
+_CONTROL_CHARS_IN_NAME = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class UploadValidationError(ValueError):
@@ -69,6 +85,49 @@ class DocumentService:
     @staticmethod
     def get_extension(filename: str) -> str:
         return Path(filename).suffix.lower()
+
+    @staticmethod
+    def truncate_name_bytes(name: str, max_bytes: int) -> str:
+        """Обрезать имя до max_bytes в UTF-8, сохранив расширение.
+
+        Считаем байты, а не символы: NAME_MAX измеряется в байтах, кириллица
+        занимает по два, и «255 символов» упёрлись бы в тот же ENAMETOOLONG.
+        errors="ignore" на обратном декодировании отбрасывает многобайтовую
+        последовательность, разрубленную срезом посередине.
+        """
+        if len(name.encode("utf-8")) <= max_bytes:
+            return name
+
+        suffix = Path(name).suffix
+        suffix_bytes = suffix.encode("utf-8")
+        # Расширение сохраняем, но не ценой всего имени: если оно само длиннее
+        # лимита, сохранять уже нечего и режем строку как есть.
+        if len(suffix_bytes) >= max_bytes:
+            return name.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+        stem_bytes = name[: len(name) - len(suffix)].encode("utf-8")
+        head = stem_bytes[: max_bytes - len(suffix_bytes)]
+        return head.decode("utf-8", errors="ignore") + suffix
+
+    @classmethod
+    def sanitize_display_name(cls, filename: str | None) -> str:
+        """Имя источника для БД и API: без каталогов и управляющих символов.
+
+        На путь записи не влияет — файл всё равно ложится под собственным
+        uuid-именем (см. save_upload_file), и выхода за каталог загрузок не
+        было. Чистим ради того, что уходит наружу: name показывается в списке
+        источников и подставляется в Content-Disposition у GET /{id}/preview.
+        Строка вида `../../../../etc/passwd.txt` там не значит ничего, кроме
+        путаницы, а `..` и `.` именами файлов не являются вовсе.
+
+        Обратные слэши приводим к прямым до разбора пути: клиент на Windows
+        присылает filename с ними, а PurePosixPath разделителем их не считает.
+        """
+        name = _CONTROL_CHARS_IN_NAME.sub("", filename or "").replace("\\", "/")
+        name = PurePosixPath(name).name.strip()
+        if not name or set(name) == {"."}:
+            return "document"
+        return cls.truncate_name_bytes(name, MAX_NAME_BYTES)
 
     @staticmethod
     def _normalize_media_type(content_type: str | None) -> str:
@@ -119,25 +178,46 @@ class DocumentService:
 
     @classmethod
     async def save_upload_file(cls, upload_file: UploadFile) -> str:
-        safe_name = Path(upload_file.filename or "document").name
-        file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{safe_name}")
+        # Имя на диске обязано уместиться в NAME_MAX вместе с uuid-префиксом.
+        # Обрезаем, а не отказываем: 222 байта — предел файловой системы, а не
+        # осмысленное ограничение для пользователя, и его файл действительно
+        # может так называться. Уникальность держит префикс, а не имя, поэтому
+        # обрезка ничего не ломает; полное имя остаётся в document.name.
+        stored_name = cls.truncate_name_bytes(
+            cls.sanitize_display_name(upload_file.filename),
+            MAX_NAME_BYTES - STORED_NAME_PREFIX_BYTES,
+        )
+        file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{stored_name}")
         max_bytes = settings.MAX_UPLOAD_SIZE_BYTES
         written = 0
         try:
-            with open(file_path, "wb") as buffer:
-                while True:
-                    chunk = await upload_file.read(UPLOAD_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    # Считаем по мере чтения, а не по Content-Length: заголовок
-                    # клиента ничем не подтверждён, а чтобы узнать размер иначе,
-                    # пришлось бы принять весь файл.
-                    if written > max_bytes:
-                        raise UploadValidationError(
-                            cls._too_large_message(), SourceErrors.TOO_LARGE
-                        )
-                    buffer.write(chunk)
+            try:
+                with open(file_path, "wb") as buffer:
+                    while True:
+                        chunk = await upload_file.read(UPLOAD_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        # Считаем по мере чтения, а не по Content-Length: заголовок
+                        # клиента ничем не подтверждён, а чтобы узнать размер иначе,
+                        # пришлось бы принять весь файл.
+                        if written > max_bytes:
+                            raise UploadValidationError(
+                                cls._too_large_message(), SourceErrors.TOO_LARGE
+                            )
+                        buffer.write(chunk)
+            except OSError as exc:
+                # ENAMETOOLONG после обрезки означает файловую систему со
+                # своим, более строгим NAME_MAX (eCryptfs — 143 байта). Это
+                # отказ из-за имени, и клиенту о нём надо сказать кодом, а не
+                # пустым 500. Остальные OSError (нет места, нет прав, сбой
+                # диска) — отказ сервера, и выдавать их за 400 нельзя.
+                if exc.errno != errno.ENAMETOOLONG:
+                    raise
+                raise UploadValidationError(
+                    "Имя файла слишком длинное для файловой системы сервера",
+                    SourceErrors.FILENAME_TOO_LONG,
+                ) from exc
         except BaseException:
             # Записанный хвост убирать больше некому: документа в БД ещё нет,
             # и путь к файлу нигде не сохранён.

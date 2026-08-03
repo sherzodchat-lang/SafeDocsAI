@@ -25,10 +25,38 @@ from app.modules.chat.service import (
 router = APIRouter()
 
 
+class ChatRequestIn(ChatRequest):
+    """ChatRequest с проверкой вопроса.
+
+    Ограничение стоит на слое HTTP, а не в модуле, по тому же доводу, что и у
+    AskRequestIn: модуль чата описывает запрос, а границы входных значений
+    живут в одном месте на весь API (app/api/deps.py).
+
+    Проверка на слое схемы, а не в теле обработчика, — не стилистика.
+    Пустой вопрос до неё проходил поиск и генерацию целиком, то есть занимал
+    GPU ровно как настоящий. Валидация тела запроса срабатывает раньше, чем
+    обработчик получает управление: до check_rate_limit, до обращения к
+    ChromaDB и до StreamingResponse у /stream — поэтому отказ приходит
+    обычным 422 с телом JSON, а не событием error внутри уже начатого SSE.
+    """
+
+    question: deps.QuestionStr
+
+
+class RetrievalRequestIn(RetrievalRequest):
+    """RetrievalRequest с той же проверкой вопроса.
+
+    Разбор поиска не доходит до генерации, но эмбеддинг запроса и обращение к
+    ChromaDB делает — на пустой строке это работа впустую.
+    """
+
+    question: deps.QuestionStr
+
+
 @router.post("/", response_model=ChatResponse)
 async def chat(
     request: Request,
-    chat_request: ChatRequest,
+    chat_request: ChatRequestIn,
     current_user: User = Depends(deps.get_current_user),
     session: AsyncSession = Depends(deps.get_session),
 ) -> Any:
@@ -43,7 +71,7 @@ async def chat(
 @router.post("/stream")
 async def chat_stream(
     request: Request,
-    chat_request: ChatRequest,
+    chat_request: ChatRequestIn,
     current_user: User = Depends(deps.get_current_user_short_lived),
 ) -> StreamingResponse:
     await check_rate_limit(request, chat_limiter)
@@ -64,7 +92,7 @@ async def chat_stream(
 @router.post("/retrieve", response_model=RetrievalResponse)
 async def retrieve(
     request: Request,
-    retrieval_request: RetrievalRequest,
+    retrieval_request: RetrievalRequestIn,
     current_user: User = Depends(deps.get_current_user),
     session: AsyncSession = Depends(deps.get_session),
 ) -> Any:
@@ -78,6 +106,8 @@ async def retrieve(
 
 __all__ = [
     "ChatRequest",
+    "ChatRequestIn",
+    "RetrievalRequestIn",
     "ChatResponse",
     "RetrievalRequest",
     "RetrievalResponse",

@@ -7,9 +7,12 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.models.models import Chunk, Document, Log, User
 from app.modules.ask.schemas import AskRequest, AskResponse, CitationItem
 from app.modules.chat.service import (
+    build_quote,
     expand_with_neighbors,
     is_greeting,
     is_no_data_answer,
+    load_chunk_texts,
+    require_log_author,
     resolve_notebook_scope,
     resolve_retrieval_limits,
     run_retrieval,
@@ -65,6 +68,7 @@ async def handle_ask_request(
     session: AsyncSession,
 ) -> AskResponse:
     started = perf_counter()
+    author_id = require_log_author(current_user)
     rag_service = RAGService()
     normalized_question = rag_service.normalize_query(ask_request.question)
     language = rag_service.detect_language(normalized_question)
@@ -93,7 +97,7 @@ async def handle_ask_request(
             answer=answer,
             sources="[]",
             time_ms=int((perf_counter() - started) * 1000),
-            user_id=current_user.id,
+            user_id=author_id,
             notebook_id=notebook.id if notebook else None,
             domain_profile=profile.name,
         )
@@ -109,7 +113,7 @@ async def handle_ask_request(
             answer=answer,
             sources="[]",
             time_ms=int((perf_counter() - started) * 1000),
-            user_id=current_user.id,
+            user_id=author_id,
             notebook_id=notebook.id if notebook else None,
             domain_profile=profile.name,
         )
@@ -141,7 +145,7 @@ async def handle_ask_request(
             answer=answer,
             sources="[]",
             time_ms=int((perf_counter() - started) * 1000),
-            user_id=current_user.id,
+            user_id=author_id,
             notebook_id=notebook.id if notebook else None,
             domain_profile=profile.name,
         )
@@ -186,24 +190,23 @@ async def handle_ask_request(
         else:
             context_metadata.append(neighbor_metadata.get(text, {}))
 
+    # Цитата — из chunk.text, а не из текста кандидата: в индексе он обогащён
+    # служебным префиксом (см. load_chunk_texts).
+    chunk_texts = await load_chunk_texts(session, selected_chunks)
     citations: list[CitationItem] = []
     for item in selected_chunks:
-        chunk_text = item["text"]
         meta = item["metadata"]
         source_id = meta.get("doc_id")
         source_name = meta.get("doc_name") or doc_name_map.get(source_id)
         page = meta.get("page")
         chunk_id = item["chunk_id"]
-        quote = (chunk_text or "").strip().replace("\n", " ")
-        if len(quote) > 240:
-            quote = quote[:240].rstrip() + "..."
         citations.append(
             CitationItem(
                 source_id=source_id,
                 source_name=source_name,
                 page=page,
                 chunk_id=chunk_id,
-                quote=quote or None,
+                quote=build_quote(chunk_id, chunk_texts),
             )
         )
 
@@ -228,7 +231,7 @@ async def handle_ask_request(
             [item.model_dump() for item in citations], ensure_ascii=False
         ),
         time_ms=int((perf_counter() - started) * 1000),
-        user_id=current_user.id,
+        user_id=author_id,
         notebook_id=notebook.id if notebook else None,
         domain_profile=profile.name,
     )

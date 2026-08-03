@@ -71,7 +71,8 @@ tar xzf tnr.tar.gz && ./tnr --version
 ## Волна 1. Репозиторий + пакеты
 
 ```bash
-ssh tnr-0 "git clone -q https://github.com/sherzod4033/Aigov.git ~/Aigov"   # пропустить, если ~/Aigov уже есть
+ssh tnr-0 "git clone -q https://github.com/sherzodchat-lang/SafeDocsAI.git ~/SafeDocsAI"   # пропустить, если ~/SafeDocsAI уже есть
+# Дальше по тексту пути вида ~/Aigov/SafeDocsAI/... читаются как ~/SafeDocsAI/SafeDocsAI/...
 
 ssh tnr-0 "sudo apt-get update -q >/dev/null 2>&1 && \
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
@@ -218,7 +219,10 @@ server {
         proxy_read_timeout 300s;
         proxy_connect_timeout 75s;
         proxy_send_timeout 300s;
-        client_max_body_size 50M;
+        # Выше лимита бэкенда (50 МБ): nginx считает тело вместе с multipart-
+        # обвязкой, и при равных значениях файл ровно на границе отсекался бы
+        # здесь — HTML-страницей без error_code вместо ответа API.
+        client_max_body_size 52M;
     }
 }
 EOF

@@ -1,11 +1,13 @@
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.datastructures import MutableHeaders
 from app.core import security
 from app.core.config import settings
-from app.core.exceptions import ApiError, ExternalServiceError
+from app.core.exceptions import ApiError, ExternalServiceError, InternalErrors
 from app.core.logging import setup_logging, get_logger
 
 # Setup logging
@@ -146,6 +148,50 @@ class CSRFMiddleware:
 app.add_middleware(CSRFMiddleware)
 
 
+# --- Идентификатор запроса ----------------------------------------------
+
+REQUEST_ID_HEADER = "X-Request-ID"
+
+
+class RequestIDMiddleware:
+    """Присваивает каждому запросу идентификатор.
+
+    Заведён ради обработчика непойманных исключений: наружу оттуда уходит
+    только код ошибки, а трейсбек остаётся в логе, и связать жалобу
+    пользователя с нужной строкой лога больше нечем.
+
+    Как и CSRFMiddleware, написан ASGI-слоем, а не через @app.middleware:
+    BaseHTTPMiddleware прогоняет ответ через собственный поток, а здесь
+    проходит и SSE-стрим чата.
+
+    Идентификатор всегда свой, входящий X-Request-ID не подхватывается:
+    заголовок задаёт клиент, и в лог уходила бы произвольная строка от него.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        request_id = uuid4().hex
+        # Кладём в scope, а не в contextvar: обработчик исключений вызывается
+        # слоем снаружи этого (ServerErrorMiddleware), уже после раскрутки
+        # стека, и scope — единственное, что доезжает до него неизменным.
+        scope.setdefault("state", {})["request_id"] = request_id
+
+        async def send_with_request_id(message):
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message).append(REQUEST_ID_HEADER, request_id)
+            await send(message)
+
+        await self.app(scope, receive, send_with_request_id)
+
+
+app.add_middleware(RequestIDMiddleware)
+
+
 # CORS Middleware
 # In production, set CORS_ORIGINS to specific domains
 #
@@ -163,7 +209,9 @@ app.add_middleware(
     allow_headers=["*", security.CSRF_HEADER_NAME],
     # Без expose_headers браузер не отдаёт X-Total-Count скрипту страницы,
     # и пагинация списка источников остаётся без общего числа записей.
-    expose_headers=["X-Total-Count"],
+    # X-Request-ID по той же причине: иначе клиент не сможет показать
+    # пользователю идентификатор, по которому в логе ищется трейсбек.
+    expose_headers=["X-Total-Count", REQUEST_ID_HEADER],
 )
 
 # Include Routers
@@ -220,6 +268,63 @@ async def external_service_error_handler(
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.message, "service": exc.service},
+    )
+
+
+def _request_id(request: Request) -> str:
+    """Идентификатор запроса, выданный RequestIDMiddleware.
+
+    Фолбэк на случай, когда до обработчика дошёл запрос мимо слоя (например,
+    приложение вызвали напрямую в тесте): ответ без идентификатора лишился бы
+    единственной зацепки к строке лога.
+    """
+    return getattr(request.state, "request_id", None) or uuid4().hex
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Последний рубеж: всё, что не разобрали обработчики выше.
+
+    Без него непойманное исключение уходило клиенту голым 500 без тела —
+    ни JSON, ни error_code, и показать пользователю было нечего. Так живьём
+    выглядели KeyError в настройках и OSError на длинном имени файла.
+
+    Подменить осмысленные ответы этот обработчик не может: Starlette отдаёт
+    обработчик на Exception самому внешнему слою (ServerErrorMiddleware), а
+    HTTPException, RequestValidationError, ApiError и ExternalServiceError
+    разбираются слоем внутри (ExceptionMiddleware) и сюда просто не доходят.
+
+    Наружу — только код и request_id. Текст исключения не отдаём никогда:
+    в нём попадаются пути на сервере, куски SQL и строки подключения.
+    Трейсбек целиком уходит в лог под тем же request_id.
+    """
+    request_id = _request_id(request)
+    logger.error(
+        "Unhandled exception on %s %s; request_id=%s",
+        request.method,
+        request.url.path,
+        request_id,
+        # exc_info=exc, а не logger.exception(): обработчик вызывается из
+        # чужого except, и опираться на текущий sys.exc_info() незачем, когда
+        # нужное исключение уже передано аргументом.
+        exc_info=exc,
+    )
+    content = {
+        "detail": "Internal server error",
+        "error_code": InternalErrors.INTERNAL_ERROR,
+        "request_id": request_id,
+    }
+    if settings.ENVIRONMENT != "production":
+        # Вне production прячем меньше, иначе обработчик замаскирует свежий
+        # баг под безликую пятисотку и найти его станет труднее, чем было до
+        # него. Но только имя класса: ни текста, ни трейсбека — форма ответа
+        # обязана совпадать с production, иначе клиент и тесты начнут
+        # расходиться по режимам. Всё остальное разработчик берёт из лога.
+        content["exception"] = type(exc).__name__
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content=content
     )
 
 

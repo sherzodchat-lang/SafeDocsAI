@@ -34,7 +34,11 @@ class NotebookBase(SQLModel):
 
 class Notebook(NotebookBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    owner_id: Optional[int] = Field(default=None, foreign_key="user.id", nullable=True)
+    # Владелец обязателен. Блокнот без владельца был legacy-состоянием
+    # (колонка появилась позже первых блокнотов) и вынуждал каждую проверку
+    # владения помнить про особый случай «ничей — значит админский». Старые
+    # строки бэкфиллит init_db, там же на колонку ставится NOT NULL.
+    owner_id: int = Field(foreign_key="user.id")
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -97,9 +101,13 @@ class Document(DocumentBase, table=True):
     # Владелец хранится на документе, а не выводится из блокнота: notebook_id
     # nullable, и у документа, загруженного вне блокнота, иначе не было бы
     # владельца вообще.
-    owner_id: Optional[int] = Field(
-        default=None, foreign_key="user.id", nullable=True, index=True
-    )
+    #
+    # Владелец обязателен. Документ без владельца был legacy-состоянием
+    # (колонка появилась позже первых документов) и вынуждал каждую проверку
+    # владения помнить про особый случай «ничей — значит админский». Старые
+    # строки бэкфиллит init_db (документ наследует владельца своего блокнота,
+    # иначе достаётся старейшему админу), там же на колонку ставится NOT NULL.
+    owner_id: int = Field(foreign_key="user.id", index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 

@@ -138,6 +138,10 @@ async def init_db():
 
             # Бэкфилл: блокноты без владельца отдаём старейшему админу, иначе
             # после включения проверок они станут недоступны вообще никому.
+            # Старейший (минимальный id) выбран как детерминированное правило:
+            # результат не должен зависеть от порядка строк в таблице, а самый
+            # ранний админ — это тот, кто и заводил эти блокноты до появления
+            # колонки владельца.
             await conn.execute(
                 text(
                     """
@@ -245,15 +249,59 @@ async def init_db():
                 )
             )
 
+            # Блокнот-заглушка для источников, оставшихся без notebook_id.
+            # Владелец — тот же старейший админ, что и в бэкфилле выше:
+            # notebook.owner_id больше не может быть NULL. Без админа заглушку
+            # не создаём вовсе — назначить владельца некому, а мигрировать на
+            # такой базе всё равно нечего (документы там тоже ничьи).
             await conn.execute(
                 text(
                     """
                     INSERT INTO notebook (name, description, domain_profile, owner_id, created_at)
-                    SELECT 'Imported Tax Notebook', 'Migrated default notebook for existing sources', 'tax', NULL, NOW()
+                    SELECT 'Imported Tax Notebook', 'Migrated default notebook for existing sources', 'tax',
+                           (SELECT id FROM "user" WHERE role = 'admin' ORDER BY id LIMIT 1), NOW()
                     WHERE NOT EXISTS (SELECT 1 FROM notebook)
+                      AND EXISTS (SELECT 1 FROM "user" WHERE role = 'admin')
                     """
                 )
             )
+
+            # notebook.owner_id: NOT NULL вместо особого случая в коде.
+            #
+            # Ставится последним из шагов, затрагивающих notebook, и только
+            # после того, как бэкфилл выше отработал: ограничение на колонке с
+            # оставшимися NULL уронило бы старт приложения на живой базе.
+            #
+            # Если админа в базе нет (чистая установка до create_admin.py или
+            # админа удалили), бэкфиллу некого назначить владельцем. Тогда шаг
+            # пропускается с предупреждением, а не падает: приложение должно
+            # подниматься, чтобы админа вообще можно было завести. Поведение
+            # при этом не меняется — блокноты без владельца и сейчас доступны
+            # только админу (deps.user_owns), — а ограничение доедет на первом
+            # же старте после появления админа.
+            orphan_notebooks = (
+                await conn.execute(
+                    text("SELECT COUNT(*) FROM notebook WHERE owner_id IS NULL")
+                )
+            ).scalar_one()
+            if orphan_notebooks:
+                logger.warning(
+                    "Notebooks without an owner: %s. NOT NULL on notebook.owner_id "
+                    "is postponed: no admin to inherit them. Run create_admin.py "
+                    "and restart.",
+                    orphan_notebooks,
+                )
+            else:
+                # SET NOT NULL на уже помеченной колонке — no-op, поэтому шаг
+                # безопасно повторяется на каждом старте.
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS notebook
+                        ALTER COLUMN owner_id SET NOT NULL
+                        """
+                    )
+                )
 
             await conn.execute(
                 text(
@@ -267,6 +315,48 @@ async def init_db():
                     """
                 )
             )
+
+            # document.owner_id: NOT NULL, ровно по той же причине, что и у
+            # блокнота — особый случай «ничей документ виден только админу»
+            # уходит из кода в схему.
+            #
+            # Шаг идёт последним из затрагивающих document и обязательно после
+            # notebook: бэкфилл документа наследует владельца своего блокнота,
+            # а тот сам проставляется бэкфиллом блокнотов выше. В обратном
+            # порядке документ блокнота, у которого владелец ещё NULL, ушёл бы
+            # админу вместо настоящего хозяина.
+            #
+            # Без админа в базе (чистая установка до create_admin.py или админа
+            # удалили) назначать владельца некому: документы вне блокнотов и
+            # документы блокнотов, тоже оставшихся без владельца, остаются с
+            # NULL. Тогда шаг пропускается с предупреждением, а не падает —
+            # приложение должно подниматься, иначе админа не завести. Поведение
+            # не меняется: документ без владельца и сейчас доступен только
+            # админу (deps.user_owns), — а ограничение доедет на первом же
+            # старте после появления админа.
+            orphan_documents = (
+                await conn.execute(
+                    text("SELECT COUNT(*) FROM document WHERE owner_id IS NULL")
+                )
+            ).scalar_one()
+            if orphan_documents:
+                logger.warning(
+                    "Documents without an owner: %s. NOT NULL on document.owner_id "
+                    "is postponed: no admin to inherit them. Run create_admin.py "
+                    "and restart.",
+                    orphan_documents,
+                )
+            else:
+                # SET NOT NULL на уже помеченной колонке — no-op, поэтому шаг
+                # безопасно повторяется на каждом старте.
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS document
+                        ALTER COLUMN owner_id SET NOT NULL
+                        """
+                    )
+                )
 
             await conn.execute(
                 text(

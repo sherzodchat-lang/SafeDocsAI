@@ -18,28 +18,47 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import update
+from sqlmodel import delete, or_, select
 from sqlalchemy.sql import operators
+from sqlalchemy.sql.dml import Delete, Insert, Update
 from sqlalchemy.sql.elements import (
     BinaryExpression,
     BindParameter,
     BooleanClauseList,
+    Grouping,
     Null,
     UnaryExpression,
 )
 
 from app.api import deps
 from app.core.database import get_session
+from app.core.exceptions import SourceErrors
 from app.main import app
 from app.modules.chat.service import resolve_notebook_scope
-from app.shared.models import Chunk, Document, Log, Notebook, User
+from app.shared.models import (
+    Chunk,
+    Document,
+    Insight,
+    Job,
+    Log,
+    Note,
+    Notebook,
+    User,
+)
 
 
 # --- Заглушка асинхронной сессии ----------------------------------------
 #
 # Достаточно интерпретировать те формы запросов, которые реально встречаются
 # в проверяемых эндпоинтах: конъюнкция сравнений (=, IS, IN) плюс
-# order_by/offset/limit. Всё остальное поднимает NotImplementedError, чтобы
-# тест падал громко, а не «проходил» на молча пропущенном фильтре.
+# order_by/offset/limit, а также DELETE ... WHERE с теми же условиями. Всё
+# остальное поднимает NotImplementedError, чтобы тест падал громко, а не
+# «проходил» на молча пропущенном фильтре.
+#
+# DML заглушка понимает намеренно: приложение удаляет связанные строки пачками
+# (app/api/endpoints/notebooks.py, _delete_rows), и заглушка, умеющая только
+# SELECT, вынуждала бы держать в продовом коде отдельную ветку ради теста.
 
 
 _COMPARATORS = {
@@ -70,6 +89,10 @@ def _literal_value(expression):
 def _clause_matches(clause, obj) -> bool:
     if clause is None:
         return True
+    # Скобки вокруг OR внутри AND: .where(or_(...)).where(...) даёт Grouping,
+    # а не голый BooleanClauseList. Для интерпретации скобки прозрачны.
+    if isinstance(clause, Grouping):
+        return _clause_matches(clause.element, obj)
     if isinstance(clause, BooleanClauseList):
         matches = [_clause_matches(item, obj) for item in clause.clauses]
         if clause.operator is operators.and_:
@@ -103,8 +126,11 @@ def _sort_rows(rows, order_by_clauses):
 
 
 class FakeResult:
-    def __init__(self, rows):
+    def __init__(self, rows, rowcount=None):
         self._rows = list(rows)
+        # У настоящего результата DELETE строк нет, но есть rowcount. Держим
+        # оба, чтобы результат DML и результат выборки были взаимозаменяемы.
+        self.rowcount = len(self._rows) if rowcount is None else rowcount
 
     def all(self):
         return list(self._rows)
@@ -125,6 +151,9 @@ class FakeAsyncSession:
     def __init__(self, rows=()):
         self.store: dict[type, dict[int, object]] = {}
         self.committed = 0
+        # Сколько строк снесено через DELETE ... WHERE. По нему видно, что
+        # приложение действительно пошло путём DML, а не поштучным удалением.
+        self.deleted_by_dml = 0
         for row in rows:
             self.seed(row)
 
@@ -141,6 +170,18 @@ class FakeAsyncSession:
         return self.store.get(model, {}).get(primary_key)
 
     async def exec(self, statement):
+        # DML (DELETE ... WHERE) приходит сюда наравне с выборками: код
+        # приложения удаляет пачки строк одним запросом, а не по объекту
+        # (app/api/endpoints/notebooks.py, _delete_rows). Заглушка обязана
+        # понимать и это — иначе приложению пришлось бы держать отдельную
+        # ветку «а вдруг сессия ненастоящая».
+        if isinstance(statement, Delete):
+            return self._execute_delete(statement)
+        if isinstance(statement, (Insert, Update)):
+            raise NotImplementedError(
+                f"Statement is not supported by the stub: {statement!r}"
+            )
+
         descriptions = statement.column_descriptions
         if not descriptions:
             raise NotImplementedError("Statement without column descriptions")
@@ -171,6 +212,37 @@ class FakeAsyncSession:
                 projected.append(values[0] if len(values) == 1 else values)
             rows = projected
         return FakeResult(rows)
+
+    async def execute(self, statement):
+        """Тот же разбор, что и у exec().
+
+        Существует не для симметрии: настоящая AsyncSession отличается от
+        заглушки в том числе наличием execute(), и код, который попробует
+        отличить одно от другого по hasattr, не должен получить повода
+        разойтись в поведении.
+        """
+        return await self.exec(statement)
+
+    def _execute_delete(self, statement):
+        """DELETE ... WHERE по in-memory хранилищу.
+
+        Разбирается тем же _clause_matches, что и WHERE выборок, поэтому
+        поддержаны те же формы условий: сравнения, IN, IS, AND/OR. Неизвестная
+        форма поднимает NotImplementedError — «удалить ничего» на непонятом
+        условии было бы худшим исходом: тест бы позеленел на неудалённых
+        строках.
+        """
+        entity = statement.entity_description["entity"]
+        bucket = self.store.get(entity, {})
+        doomed = [
+            key
+            for key, obj in bucket.items()
+            if _clause_matches(statement.whereclause, obj)
+        ]
+        for key in doomed:
+            del bucket[key]
+        self.deleted_by_dml += len(doomed)
+        return FakeResult([], rowcount=len(doomed))
 
     def add(self, obj):
         if getattr(obj, "id", None) is None:
@@ -239,6 +311,12 @@ class OwnershipFixture:
             id=NOTEBOOK_B_ID, name="B notebook", domain_profile="general",
             owner_id=USER_B_ID, created_at=base + timedelta(minutes=1),
         )
+        # Блокнот без владельца — состояние, которого в базе больше не бывает:
+        # notebook.owner_id объявлен NOT NULL (app/core/database.py, init_db),
+        # и заглушка сессии здесь просто не знает про ограничения схемы.
+        # Проверки на нём оставлены защитой в глубину: если ограничение когда-то
+        # снимут, правило «ничей — значит админский» должно устоять. Настоящее
+        # состояние схемы проверяет tests/test_notebook_owner_migration_db.py.
         self.notebook_orphan = Notebook(
             id=NOTEBOOK_ORPHAN_ID, name="Legacy notebook", domain_profile="general",
             owner_id=None, created_at=base + timedelta(minutes=2),
@@ -326,6 +404,91 @@ class OwnershipApiTestCase(unittest.TestCase):
 
     def as_user(self, user: User) -> None:
         self.current_user = user
+
+
+# --- Сама заглушка ------------------------------------------------------
+
+
+class FakeAsyncSessionDmlTests(unittest.IsolatedAsyncioTestCase):
+    """Заглушка обязана выполнять DELETE ... WHERE, а не делать вид.
+
+    Тесты владения через неё проверяют удаление блокнота со всем содержимым;
+    если DML тихо не выполнялся бы, эти проверки «зеленели» бы на любом коде.
+    """
+
+    def setUp(self):
+        self.session = FakeAsyncSession(
+            [
+                Chunk(id=1, text="A", page=1, doc_id=10),
+                Chunk(id=2, text="B", page=1, doc_id=10),
+                Chunk(id=3, text="C", page=1, doc_id=20),
+                Note(id=1, title="Своя", notebook_id=100),
+                Note(id=2, title="Чужая", notebook_id=200),
+            ]
+        )
+
+    def chunk_ids(self):
+        return sorted(chunk.id for chunk in self.session.rows(Chunk))
+
+    async def test_delete_by_equality_removes_only_matching_rows(self):
+        result = await self.session.exec(delete(Chunk).where(Chunk.doc_id == 10))
+
+        self.assertEqual(result.rowcount, 2)
+        self.assertEqual(self.chunk_ids(), [3])
+
+    async def test_delete_by_in_clause_removes_every_listed_row(self):
+        result = await self.session.exec(
+            delete(Chunk).where(Chunk.id.in_([1, 3, 999]))
+        )
+
+        self.assertEqual(result.rowcount, 2)
+        self.assertEqual(self.chunk_ids(), [2])
+
+    async def test_delete_with_or_clause_covers_both_branches(self):
+        await self.session.exec(
+            delete(Chunk).where(or_(Chunk.doc_id == 20, Chunk.id.in_([1])))
+        )
+
+        self.assertEqual(self.chunk_ids(), [2])
+
+    async def test_delete_does_not_touch_other_tables(self):
+        await self.session.exec(delete(Chunk).where(Chunk.doc_id == 10))
+
+        self.assertEqual(sorted(note.id for note in self.session.rows(Note)), [1, 2])
+
+    async def test_delete_matching_nothing_is_a_no_op(self):
+        result = await self.session.exec(delete(Chunk).where(Chunk.doc_id == 999))
+
+        self.assertEqual(result.rowcount, 0)
+        self.assertEqual(self.chunk_ids(), [1, 2, 3])
+
+    async def test_delete_counter_tracks_removed_rows(self):
+        await self.session.exec(delete(Chunk).where(Chunk.doc_id == 10))
+        await self.session.exec(delete(Note).where(Note.notebook_id == 100))
+
+        self.assertEqual(self.session.deleted_by_dml, 3)
+
+    async def test_execute_is_the_same_interpreter_as_exec(self):
+        """Настоящая сессия отвечает на оба имени — заглушка тоже."""
+        result = await self.session.execute(delete(Chunk).where(Chunk.doc_id == 10))
+
+        self.assertEqual(result.rowcount, 2)
+        self.assertEqual(self.chunk_ids(), [3])
+
+        rows = await self.session.execute(select(Chunk).where(Chunk.doc_id == 20))
+        self.assertEqual([chunk.id for chunk in rows.all()], [3])
+
+    async def test_unsupported_condition_fails_loudly(self):
+        """Молча удалить не то (или ничего) хуже, чем упасть."""
+        with self.assertRaises(NotImplementedError):
+            await self.session.exec(delete(Chunk).where(Chunk.text.like("%A%")))
+        self.assertEqual(self.chunk_ids(), [1, 2, 3])
+
+    async def test_unsupported_statement_fails_loudly(self):
+        with self.assertRaises(NotImplementedError):
+            await self.session.exec(
+                update(Chunk).where(Chunk.id == 1).values(text="Z")
+            )
 
 
 # --- Правило владения ---------------------------------------------------
@@ -532,12 +695,62 @@ class SourceListOwnershipTests(OwnershipApiTestCase):
             [DOC_A_ID, DOC_B_ID, DOC_ORPHAN_ID],
         )
 
-    def test_list_filtered_by_foreign_notebook_is_empty(self):
+    def test_list_filtered_by_foreign_notebook_returns_404(self):
+        """Фильтр по чужому блокноту — 404, как у /notes/ и /insights/.
+
+        Пустой список здесь означал бы «блокнот есть, источников нет», и один
+        экран блокнота отвечал бы на три запроса по-разному.
+        """
         response = self.client.get(
             "/api/v1/sources/", params={"notebook_id": NOTEBOOK_B_ID}
         )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(
+            response.json().get("error_code"), SourceErrors.NOTEBOOK_NOT_FOUND
+        )
+        self.assertNotIn("b-secret.txt", response.text)
+
+    def test_foreign_and_missing_notebook_filters_are_indistinguishable(self):
+        """Оракула не возникает: оба случая отвечают одинаково.
+
+        Именно на этом держится право отвечать 404 вместо пустого списка.
+        """
+        foreign = self.client.get(
+            "/api/v1/sources/", params={"notebook_id": NOTEBOOK_B_ID}
+        )
+        missing = self.client.get(
+            "/api/v1/sources/", params={"notebook_id": 999999}
+        )
+        self.assertEqual(foreign.status_code, missing.status_code)
+        self.assertEqual(foreign.json(), missing.json())
+
+    def test_list_filtered_by_orphan_notebook_returns_404(self):
+        response = self.client.get(
+            "/api/v1/sources/", params={"notebook_id": NOTEBOOK_ORPHAN_ID}
+        )
+        self.assertEqual(response.status_code, 404)
+
+        self.as_user(self.fixture.admin)
+        response = self.client.get(
+            "/api/v1/sources/", params={"notebook_id": NOTEBOOK_ORPHAN_ID}
+        )
         self.assertEqual(response.status_code, 200)
+
+    def test_own_notebook_without_sources_returns_empty_list(self):
+        """Пустой массив остался ответом ровно на один случай."""
+        empty_notebook = Notebook(
+            id=40, name="Свой пустой", domain_profile="general",
+            owner_id=USER_A_ID, created_at=datetime(2026, 1, 1),
+        )
+        self.session.seed(empty_notebook)
+
+        response = self.client.get(
+            "/api/v1/sources/", params={"notebook_id": empty_notebook.id}
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json(), [])
+        self.assertEqual(response.headers["X-Total-Count"], "0")
 
 
 class SourceAttachOwnershipTests(OwnershipApiTestCase):
@@ -616,6 +829,60 @@ class NotebookOwnershipTests(OwnershipApiTestCase):
         response = self.client.delete(f"/api/v1/notebooks/{NOTEBOOK_ORPHAN_ID}")
         self.assertEqual(response.status_code, 404)
         self.assertIsNotNone(self.session.store[Notebook].get(NOTEBOOK_ORPHAN_ID))
+
+    def test_delete_own_notebook_removes_related_rows_only(self):
+        """Связанные строки сносятся пачками (DELETE ... WHERE), и только свои.
+
+        Проверка идёт через заглушку сессии, которая эти DELETE выполняет
+        по-настоящему (FakeAsyncSession._execute_delete). Внешних ключей здесь
+        нет — порядок удаления ловит tests/test_notebook_delete_db.py на
+        настоящем PostgreSQL; здесь ловится охват условий WHERE.
+        """
+        self.session.seed(Note(id=700, title="Заметка A", notebook_id=NOTEBOOK_A_ID))
+        self.session.seed(Note(id=701, title="Заметка B", notebook_id=NOTEBOOK_B_ID))
+        self.session.seed(
+            Insight(id=800, title="Инсайт A", notebook_id=NOTEBOOK_A_ID)
+        )
+        self.session.seed(
+            Insight(id=801, title="Инсайт B", notebook_id=NOTEBOOK_B_ID)
+        )
+        # Задача документа A с чужим notebook_id: она обязана уйти по
+        # source_id, иначе останется ссылка на удалённый документ.
+        self.session.seed(
+            Job(id=900, job_type="index_document", status="completed",
+                source_id=DOC_A_ID, notebook_id=None)
+        )
+        self.session.seed(
+            Job(id=901, job_type="index_document", status="completed",
+                source_id=DOC_B_ID, notebook_id=NOTEBOOK_B_ID)
+        )
+
+        with patch("app.modules.rag.service.RAGService"):
+            response = self.client.delete(f"/api/v1/notebooks/{NOTEBOOK_A_ID}")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertGreater(
+            self.session.deleted_by_dml, 0,
+            "связанные строки должны сноситься одним DELETE ... WHERE",
+        )
+        for model, gone, kept in (
+            (Notebook, NOTEBOOK_A_ID, NOTEBOOK_B_ID),
+            (Document, DOC_A_ID, DOC_B_ID),
+            (Chunk, CHUNK_A_ID, CHUNK_B_ID),
+            (Log, LOG_A_ID, LOG_B_ID),
+            (Note, 700, 701),
+            (Insight, 800, 801),
+            (Job, 900, 901),
+        ):
+            with self.subTest(model=model.__name__):
+                self.assertIsNone(
+                    self.session.store.get(model, {}).get(gone),
+                    f"{model.__name__} удаляемого блокнота остался",
+                )
+                self.assertIsNotNone(
+                    self.session.store.get(model, {}).get(kept),
+                    f"{model.__name__} чужого блокнота задет",
+                )
 
     def test_delete_own_notebook_succeeds(self):
         with patch("app.modules.rag.service.RAGService"):

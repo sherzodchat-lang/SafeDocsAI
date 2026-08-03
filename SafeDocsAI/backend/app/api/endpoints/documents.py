@@ -1,25 +1,42 @@
 import os
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Annotated, Any, List, Optional
 from fastapi import (
     APIRouter,
     Depends,
     Form,
+    Path,
     Query,
+    Request,
     Response,
     UploadFile,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api import deps
 from app.core.exceptions import ApiError, SourceErrors
+from app.core.rate_limit import RateLimiter, check_rate_limit
 from app.models.models import User, Document, Chunk, as_utc
 from app.modules.documents import DocumentModuleService
+from app.services.document_service import DocumentService
 
 router = APIRouter()
+
+# Загрузка источника — самая дорогая операция раздела: файл принимается
+# целиком, а следом идёт извлечение текста и индексация на GPU. Права на неё
+# теперь есть у любого зарегистрированного пользователя (внутри своих
+# блокнотов), поэтому без ограничения частоты один аккаунт может занять
+# очередь индексации целиком.
+#
+# 30 загрузок за 5 минут: окно длиннее, чем у чата (30/60с), намеренно —
+# выбор нескольких файлов в диалоге загружается по одному файлу за запрос,
+# и обычный сценарий «перетащил папку с документами» должен пройти одним
+# махом. Устойчивая же скорость выходит 6 файлов в минуту, что индексация
+# успевает переваривать.
+upload_limiter = RateLimiter(requests=30, window=300)
 
 # Страница по умолчанию — как раньше; потолок нужен, чтобы ?limit=100000000
 # не выгружал всю таблицу одним запросом.
@@ -30,6 +47,19 @@ MAX_PAGE_SIZE = 500
 # тело остаётся массивом DocumentRead, и клиенты, не знающие о пагинации,
 # продолжают работать без изменений.
 TOTAL_COUNT_HEADER = "X-Total-Count"
+
+
+def serialize_utc(value: datetime) -> str:
+    """Момент времени из БД — строкой с явным UTC.
+
+    В колонке TIMESTAMP WITHOUT TIME ZONE лежит UTC, но без смещения строка
+    "2026-07-30T09:15:00" по спецификации JS читается как местное время — в
+    Душанбе (UTC+5) дата уезжала на пять часов назад.
+
+    Общая для всех разделов: даты источников, блокнотов, заметок и инсайтов
+    показываются рядом на одном экране и обязаны читаться одинаково.
+    """
+    return as_utc(value).isoformat().replace("+00:00", "Z")
 
 
 class DocumentRead(BaseModel):
@@ -58,15 +88,14 @@ class DocumentRead(BaseModel):
 
     @field_serializer("created_at")
     def _serialize_created_at(self, value: datetime) -> str:
-        # В колонке TIMESTAMP WITHOUT TIME ZONE лежит UTC, но без смещения
-        # строка "2026-07-30T09:15:00" по спецификации JS читается как местное
-        # время — в Душанбе (UTC+5) дата уезжала на пять часов назад.
-        return as_utc(value).isoformat().replace("+00:00", "Z")
+        return serialize_utc(value)
 
 
 class AttachSourcesPayload(BaseModel):
-    notebook_id: int
-    source_ids: list[int]
+    # Границы диапазона нужны и полям тела: id больше PostgreSQL integer
+    # роняет запрос в asyncpg (OverflowError) и отдаёт 500 вместо 404.
+    notebook_id: int = Field(ge=1, le=deps.MAX_ID)
+    source_ids: list[Annotated[int, Field(ge=1, le=deps.MAX_ID)]]
 
 
 class AttachSourcesResponse(BaseModel):
@@ -79,14 +108,35 @@ def _owner_filter(user: User) -> int | None:
     return None if user.role == "admin" else user.id
 
 
+# --- Доступ к источникам ------------------------------------------------
+#
+# Раздел живёт на владении, а не на роли: источники принадлежат блокноту, а
+# блокнот — своему владельцу. Любой аутентифицированный пользователь работает
+# с источниками внутри собственных блокнотов; чужой блокнот и чужой документ
+# отвечают 404 (см. deps.user_owns), документ без владельца — legacy-состояние
+# и остаётся админским. Админ по-прежнему видит и правит всё, content_manager
+# не теряет ничего: раньше он был ограничен теми же рамками владения.
+# Исключение одно — POST /reindex: это обслуживание всего индекса разом,
+# а не работа со своими источниками, и остаётся за админом.
+
+
 @router.post("/upload", response_model=DocumentRead)
 async def upload_document(
+    request: Request,
     file: UploadFile,
-    notebook_id: Optional[int] = Form(default=None),
-    current_user: User = Depends(deps.get_current_content_manager_or_admin),
+    notebook_id: Optional[int] = Form(default=None, ge=1, le=deps.MAX_ID),
+    current_user: User = Depends(deps.get_current_user),
     session: AsyncSession = Depends(deps.get_session),
 ) -> Any:
-    await deps.assert_owns_notebook(notebook_id, session, current_user)
+    await check_rate_limit(request, upload_limiter)
+    # notebook_id=None — источник «вне блокнота»: владельцем становится сам
+    # загрузивший, и дальше он виден только ему (и админу).
+    #
+    # lock=True держит блокнот под SELECT ... FOR SHARE до конца запроса: иначе
+    # удаление блокнота успевает пройти между проверкой и INSERT документа, и
+    # вставка падает по внешнему ключу document.notebook_id — 500 вместо
+    # честного 404 или подождавшего своей очереди удаления.
+    await deps.assert_owns_notebook(notebook_id, session, current_user, lock=True)
     return await DocumentModuleService.upload_document(
         session=session,
         file=file,
@@ -116,16 +166,34 @@ async def read_documents(
     response: Response,
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
-    notebook_id: int | None = Query(default=None),
+    notebook_id: int | None = Query(default=None, ge=1, le=deps.MAX_ID),
     session: AsyncSession = Depends(deps.get_session),
-    current_user: User = Depends(deps.get_current_content_manager_or_admin),
+    current_user: User = Depends(deps.get_current_user),
 ) -> Any:
     """Страница источников, свежие сверху.
 
     Порядок — created_at DESC, id DESC. Общее число записей уходит заголовком
     X-Total-Count: тело осталось массивом, поэтому клиент, не знающий о
     пагинации, ничего не заметил.
+
+    Владение при заданном notebook_id проверяется до выборки — тем же
+    assert_owns_notebook, что и в GET /notes/ и GET /insights/. Раньше здесь
+    работал только фильтр по owner_id, и чужой либо несуществующий блокнот
+    отвечал пустым списком: клиент не мог отличить «блокнота нет» от «в
+    блокноте нет источников», а один экран блокнота получал на три запроса
+    два разных ответа — 404 по заметкам и 200 по источникам.
+
+    Оракулом это не делает: assert_owns_notebook отвечает одним и тем же
+    404 source.notebook_not_found и на чужой блокнот, и на несуществующий
+    (см. deps.user_owns), поэтому подтвердить существование чужого блокнота
+    перебором по-прежнему нельзя. Пустой массив остаётся ответом ровно на
+    один случай — свой блокнот без источников.
+
+    Без notebook_id всё как было: выборка ограничена своими документами
+    фильтром по owner_id.
     """
+    if notebook_id is not None:
+        await deps.assert_owns_notebook(notebook_id, session, current_user)
     documents, total = await DocumentModuleService.read_documents(
         session=session,
         skip=skip,
@@ -140,13 +208,18 @@ async def read_documents(
 @router.post("/attach", response_model=AttachSourcesResponse)
 async def attach_documents(
     payload: AttachSourcesPayload,
-    current_user: User = Depends(deps.get_current_content_manager_or_admin),
+    current_user: User = Depends(deps.get_current_user),
     session: AsyncSession = Depends(deps.get_session),
 ) -> Any:
     if not payload.source_ids:
         raise ApiError(400, SourceErrors.NO_IDS_PROVIDED, "No source ids provided")
 
-    await deps.assert_owns_notebook(payload.notebook_id, session, current_user)
+    # lock=True — по той же причине, что и в upload: прикрепление проставляет
+    # документам notebook_id, и параллельное удаление блокнота между проверкой
+    # и UPDATE оставило бы ссылку на исчезнувшую строку (500 по внешнему ключу).
+    await deps.assert_owns_notebook(
+        payload.notebook_id, session, current_user, lock=True
+    )
     documents = await DocumentModuleService.attach_documents_to_notebook(
         session=session,
         notebook_id=payload.notebook_id,
@@ -160,8 +233,9 @@ async def attach_documents(
 async def get_document_chunks(
     document: Document = Depends(deps.get_owned_document),
     session: AsyncSession = Depends(deps.get_session),
-    current_user: User = Depends(deps.get_current_content_manager_or_admin),
 ) -> Any:
+    # Аутентификация и владение — внутри get_owned_document; отдельная
+    # зависимость на пользователя здесь была нужна только ради проверки роли.
     return await DocumentModuleService.get_document_chunks(
         session=session, document_id=document.id
     )
@@ -171,7 +245,6 @@ async def get_document_chunks(
 async def delete_document(
     document: Document = Depends(deps.get_owned_document),
     session: AsyncSession = Depends(deps.get_session),
-    current_user: User = Depends(deps.get_current_content_manager_or_admin),
 ) -> Any:
     return await DocumentModuleService.delete_document(
         session=session, document_id=document.id
@@ -204,7 +277,12 @@ async def preview_document(
     return FileResponse(
         doc.path,
         media_type=media_type,
-        filename=doc.name,
+        # Новые документы приходят сюда уже с очищенным name (см.
+        # DocumentModuleService.upload_document), но строки, загруженные до
+        # этого, хранят имя как прислал клиент — вплоть до
+        # `../../../../etc/passwd.txt`. Чистим и здесь, чтобы не заводить
+        # миграцию ради заголовка Content-Disposition.
+        filename=DocumentService.sanitize_display_name(doc.name),
     )
 
 
@@ -221,7 +299,7 @@ class ChunkContext(BaseModel):
 
 @router.get("/{id}/chunk/{chunk_id}/context")
 async def get_chunk_context(
-    chunk_id: int,
+    chunk_id: int = Path(..., ge=1, le=deps.MAX_ID),
     neighbors: int = Query(default=2, ge=0, le=5),
     doc: Document = Depends(deps.get_owned_document),
     session: AsyncSession = Depends(deps.get_session),

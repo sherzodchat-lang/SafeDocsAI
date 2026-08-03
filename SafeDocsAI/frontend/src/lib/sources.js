@@ -1,6 +1,8 @@
 // Единая нормализация источников: статусы, размер и формат ответа списка.
 // Раньше эти правила были продублированы в таблице «Все источники» и в панели блокнота.
 
+import { resolveErrorCodeMessage } from './apiError';
+
 // Статусы, при которых индексация ещё не завершилась и список надо опрашивать.
 export const IN_PROGRESS_STATUSES = ['pending', 'indexing'];
 
@@ -21,6 +23,25 @@ export const resolveStatus = (status) => {
 };
 
 export const isSourceInProgress = (status) => IN_PROGRESS_STATUSES.includes(resolveStatus(status));
+
+/**
+ * Причина, по которой источник не проиндексировался.
+ *
+ * Бэкенд кладёт её в поля error_code и error_text документа (backend/app/api/endpoints/
+ * documents.py, DocumentRead). Код — из того же реестра, что и коды HTTP-ошибок, поэтому
+ * перевод берём общей таблицей: source.indexing_failed, source.text_extraction_failed,
+ * source.encoding_not_utf8 и остальные уже сопоставлены с ключами documents.errors.*.
+ *
+ * Неизвестный или отсутствующий код деградирует в общее «не удалось проиндексировать»:
+ * ярлык «Ошибка» без единого слова о причине — худшее, что можно показать. Технический
+ * error_text сюда не попадает: он на одном языке и описывает внутренности, его место —
+ * подсказка при наведении рядом с этим сообщением.
+ */
+export const resolveSourceErrorMessage = (source, t) => {
+    if (resolveStatus(source?.status) !== 'error') return '';
+
+    return resolveErrorCodeMessage(source?.error_code, t) || t('documents.errors.indexingFailed');
+};
 
 export const hasSourcesInProgress = (sources) => (sources || []).some((source) => isSourceInProgress(source?.status));
 

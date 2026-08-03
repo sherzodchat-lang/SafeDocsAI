@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { settingsService } from '../services/settingsService';
 import { Button } from '../components/ui/Button';
 import { useLocale } from '../i18n';
+import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
 
 const ROLE_OPTIONS = ['admin', 'content_manager', 'user'];
@@ -84,7 +85,7 @@ const SettingsPage = () => {
             setUsers(usersRes.data || []);
         } catch (err) {
             console.error('Failed to load settings', err);
-            setError(err.response?.data?.detail || t('settings.loadFailed'));
+            setError(resolveApiErrorMessage(err, t, 'settings.loadFailed'));
         } finally {
             setIsLoading(false);
         }
@@ -118,7 +119,7 @@ const SettingsPage = () => {
             setMessage(t('settings.saved'));
         } catch (err) {
             console.error('Failed to update settings', err);
-            setError(err.response?.data?.detail || t('settings.saveFailed'));
+            setError(resolveApiErrorMessage(err, t, 'settings.saveFailed'));
         } finally {
             setIsSaving(false);
         }
@@ -132,7 +133,7 @@ const SettingsPage = () => {
             )));
         } catch (err) {
             console.error('Failed to update role', err);
-            alert(err.response?.data?.detail || t('settings.roleUpdateFailed'));
+            alert(resolveApiErrorMessage(err, t, 'settings.roleUpdateFailed'));
         }
     };
 

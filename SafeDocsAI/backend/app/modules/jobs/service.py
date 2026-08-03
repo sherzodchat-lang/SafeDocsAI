@@ -13,9 +13,21 @@ logger = logging.getLogger(__name__)
 
 JOB_INDEX_DOCUMENT = "index_document"
 
+# Отложенное удаление векторов из ChromaDB. Ставится, когда строки chunk из
+# PostgreSQL уже удалены, а ChromaDB в этот момент недоступна: id векторов
+# больше нигде не хранятся, и без такой задачи вычистить их было бы нечем.
+# payload: {"chunk_ids": [...], "notebook_id": <id или null>}.
+JOB_CLEANUP_EMBEDDINGS = "cleanup_embeddings"
+
 # Прерванная задача возвращается в очередь не бесконечно: документ, который
 # стабильно роняет воркер, иначе занимал бы очередь после каждого рестарта.
 MAX_ATTEMPTS = 3
+
+# У очистки векторов бюджет попыток отдельный и намного больше: она идемпотентна
+# (удаление несуществующих id — no-op), а причина отказа обычно временная —
+# лежащая ChromaDB. Сдаться после трёх попыток значило бы оставить висячие
+# векторы навсегда. Между попытками воркер выдерживает паузу, см. worker.py.
+CLEANUP_MAX_ATTEMPTS = 240
 
 # Аренда задачи. Воркер обновляет started_at каждые HEARTBEAT_SECONDS, поэтому
 # 'running' со старым started_at принадлежит процессу, которого уже нет.
@@ -163,13 +175,19 @@ class JobsService:
 
     @staticmethod
     async def requeue(
-        session: AsyncSession, job_id: int, *, error_text: str | None = None
+        session: AsyncSession,
+        job_id: int,
+        *,
+        error_text: str | None = None,
+        max_attempts: int = MAX_ATTEMPTS,
     ) -> str | None:
         """Вернуть прерванную задачу в очередь.
 
         Возвращает итоговый статус ('queued'/'failed') или None, если задача
-        уже не в работе. После MAX_ATTEMPTS попыток задача считается
-        безнадёжной и закрывается как failed.
+        уже не в работе. После max_attempts попыток задача считается
+        безнадёжной и закрывается как failed; бюджет попыток задаётся вызовом,
+        потому что у разных типов задач цена отказа разная
+        (см. CLEANUP_MAX_ATTEMPTS).
         """
         result = await session.execute(
             text(
@@ -192,7 +210,7 @@ class JobsService:
             {
                 "job_id": job_id,
                 "error_text": error_text,
-                "max_attempts": MAX_ATTEMPTS,
+                "max_attempts": max_attempts,
             },
         )
         row = result.first()
@@ -210,19 +228,31 @@ class JobsService:
         Отличать мёртвого воркера от живого по одному лишь статусу нельзя
         (при --workers 2 старт одного процесса пришёлся бы на работу другого),
         поэтому признак — протухший heartbeat в started_at.
+
+        Бюджет попыток зависит от типа задачи: у очистки векторов он свой,
+        иначе задача, пережившая несколько отказов ChromaDB, закрывалась бы
+        как failed при первом же падении воркера.
         """
         result = await session.execute(
             text(
                 """
                 UPDATE job
                 SET status = CASE
-                        WHEN attempt_count >= :max_attempts THEN 'failed'
+                        WHEN attempt_count >= CASE
+                            WHEN job_type = CAST(:cleanup_type AS TEXT)
+                            THEN CAST(:cleanup_max_attempts AS INTEGER)
+                            ELSE CAST(:max_attempts AS INTEGER)
+                        END THEN 'failed'
                         ELSE 'queued'
                     END,
                     error_text = CAST(:error_text AS TEXT),
                     started_at = NULL,
                     finished_at = CASE
-                        WHEN attempt_count >= :max_attempts
+                        WHEN attempt_count >= CASE
+                            WHEN job_type = CAST(:cleanup_type AS TEXT)
+                            THEN CAST(:cleanup_max_attempts AS INTEGER)
+                            ELSE CAST(:max_attempts AS INTEGER)
+                        END
                         THEN timezone('utc', now())
                     END
                 WHERE status = 'running'
@@ -237,6 +267,8 @@ class JobsService:
             {
                 "error_text": "Обработка прервана: воркер не отвечает",
                 "max_attempts": MAX_ATTEMPTS,
+                "cleanup_type": JOB_CLEANUP_EMBEDDINGS,
+                "cleanup_max_attempts": CLEANUP_MAX_ATTEMPTS,
                 "lease": float(lease_seconds),
             },
         )

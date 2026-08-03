@@ -10,6 +10,7 @@ import {
     FileText,
     LogOut,
     MessageSquare,
+    Pencil,
     Settings,
     Trash2,
     UserCircle2,
@@ -208,7 +209,9 @@ const Layout = () => {
             <div className="flex min-h-screen flex-1 flex-col lg:h-screen">
                 <header className="border-b border-slate-200 bg-white px-4 py-3 sm:px-6 lg:px-8">
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div className="flex items-center gap-3">
+                        {/* min-w-0 обязателен: без него flex-элемент не сжимается ниже длины
+                            содержимого, и truncate у имени блокнота (до 255 символов) не работает. */}
+                        <div className="flex min-w-0 items-center gap-3">
                             <div className="lg:hidden flex h-8 w-8 items-center justify-center rounded-lg bg-[#1f3a60] text-sm font-extrabold text-[#c5a059]">
                                 S
                             </div>
@@ -225,12 +228,12 @@ const Layout = () => {
                                         <span className="rounded-full bg-[#1f3a60]/10 px-2.5 py-0.5 text-[10px] font-bold text-[#1f3a60]">
                                             {t('layout.actions.notebookPrefix')} #{notebookHeader.id}
                                         </span>
-                                        <h1 className="truncate text-lg lg:text-2xl font-extrabold text-[#1f3a60]">
+                                        <h1 className="truncate text-lg lg:text-2xl font-extrabold text-[#1f3a60]" title={notebookHeader.name}>
                                             {notebookHeader.name}
                                         </h1>
                                     </div>
                                     {notebookHeader.description ? (
-                                        <p className="truncate text-sm text-slate-500">{notebookHeader.description}</p>
+                                        <p className="truncate text-sm text-slate-500" title={notebookHeader.description}>{notebookHeader.description}</p>
                                     ) : null}
                                     <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium text-slate-400">
                                         <div className="inline-flex items-center gap-1.5">
@@ -270,31 +273,74 @@ const Layout = () => {
                                     {t('layout.actions.systemOk')}
                                 </div>
                                 </>
-                            ) : notebookActions ? (
-                                <div className="flex flex-wrap items-center justify-end gap-2">
-                                    <Button
-                                        type="button"
-                                        variant="outline"
-                                        className="justify-center"
-                                        disabled={notebookActions.archiveDisabled}
-                                        title={notebookActions.archiveTitle}
-                                        onClick={notebookActions.onArchive}
-                                    >
-                                        {t('layout.actions.archive')}
-                                    </Button>
-                                    <Button
-                                        type="button"
-                                        variant="destructive"
-                                        className="justify-center"
-                                        disabled={notebookActions.deleteDisabled}
-                                        title={notebookActions.deleteTitle}
-                                        onClick={notebookActions.onDelete}
-                                    >
-                                        <Trash2 className="h-4 w-4" />
-                                        {t('layout.actions.delete')}
-                                    </Button>
-                                </div>
-                            ) : null}
+                            ) : (
+                                <>
+                                    {/* Внутри блокнота переключатель тоже нужен: продукт двуязычный,
+                                        иначе язык меняется только уходом в другой раздел и обратно. */}
+                                    <LocaleSwitcher className="mr-2" buttonClassName="px-2 py-0.5 text-[10px] font-bold" />
+
+                                    {notebookActions ? (
+                                        <div className="flex flex-wrap items-center justify-end gap-2">
+                                            {/* Область глобального чата задаётся только этой кнопкой.
+                                                Заливка и подпись показывают текущее состояние: у уже
+                                                активного блокнота повторное назначение бессмысленно,
+                                                поэтому клик по нему возвращает чат ко всем источникам. */}
+                                            {notebookActions.onToggleActiveForChat ? (
+                                                <Button
+                                                    type="button"
+                                                    variant={notebookActions.isActiveForChat ? 'primary' : 'outline'}
+                                                    className="justify-center"
+                                                    disabled={notebookActions.toggleActiveForChatDisabled}
+                                                    title={notebookActions.toggleActiveForChatTitle}
+                                                    aria-pressed={notebookActions.isActiveForChat}
+                                                    onClick={notebookActions.onToggleActiveForChat}
+                                                >
+                                                    <MessageSquare className="h-4 w-4" />
+                                                    {notebookActions.isActiveForChat
+                                                        ? t('layout.actions.activeForChat')
+                                                        : t('layout.actions.makeActiveForChat')}
+                                                </Button>
+                                            ) : null}
+                                            {/* Правка стоит рядом с удалением: шапка — единственное место,
+                                                где имя, описание и профиль блокнота видны целиком. */}
+                                            {notebookActions.onEdit ? (
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    className="justify-center"
+                                                    disabled={notebookActions.editDisabled}
+                                                    title={notebookActions.editTitle}
+                                                    onClick={notebookActions.onEdit}
+                                                >
+                                                    <Pencil className="h-4 w-4" />
+                                                    {t('layout.actions.edit')}
+                                                </Button>
+                                            ) : null}
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                className="justify-center"
+                                                disabled={notebookActions.archiveDisabled}
+                                                title={notebookActions.archiveTitle}
+                                                onClick={notebookActions.onArchive}
+                                            >
+                                                {t('layout.actions.archive')}
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                variant="destructive"
+                                                className="justify-center"
+                                                disabled={notebookActions.deleteDisabled}
+                                                title={notebookActions.deleteTitle}
+                                                onClick={notebookActions.onDelete}
+                                            >
+                                                <Trash2 className="h-4 w-4" />
+                                                {t('layout.actions.delete')}
+                                            </Button>
+                                        </div>
+                                    ) : null}
+                                </>
+                            )}
 
                             <button
                                 type="button"

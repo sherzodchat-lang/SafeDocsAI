@@ -1,18 +1,24 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Paperclip, Shield, ThumbsDown, ThumbsUp, User } from 'lucide-react';
-import { useForm } from 'react-hook-form';
+import { useForm, useWatch } from 'react-hook-form';
 import { chatService } from '../services/chatService';
 import { getSessionUsername } from '../services/api';
 import { Button } from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import DocumentViewer from '../components/DocumentViewer';
+import NotebookScopeBadge from '../components/notebook/NotebookScopeBadge';
+import { useActiveNotebookScope } from '../hooks/useActiveNotebookScope';
 import { cn } from '../lib/utils';
+import { resolveApiErrorMessage } from '../lib/apiError';
 import { useLocale } from '../i18n';
 import { formatLocaleDate } from '../lib/locale';
 
 const CHAT_HISTORY_STORAGE_PREFIX = 'knowledgeai.chat.history.';
-const ACTIVE_NOTEBOOK_STORAGE_KEY = 'knowledgeai.activeNotebookId';
 const MAX_PERSISTED_MESSAGES = 100;
+// Верхняя граница длины вопроса. Значение то же, что у QUESTION_MAX_LENGTH в
+// backend/app/api/deps.py: там оно держит бюджет контекста модели и отвечает
+// 422, здесь — не даёт пользователю упереться в предел уже после отправки.
+const MAX_QUESTION_LENGTH = 2000;
 const PENDING_MESSAGE_TTL_MS = 600000; // 10 минут — LLM отвечает до 5+ мин
 // Имя пользователя разделяет локальную историю чата. Раньше его доставали из
 // JWT в localStorage; теперь токен лежит в httpOnly-куке и из JS не читается,
@@ -170,6 +176,27 @@ const persistMessagesToStorage = (storageKey, messages, initialAssistantMessage)
     }
 };
 
+// Разметку ответа пишет модель по тексту источников, то есть ссылка в ней —
+// не наш контент. React экранирует текстовые узлы, но значение href не проверяет:
+// [клик](javascript:...) из документа стал бы рабочим исполняемым переходом.
+// Поэтому схему разбираем сами и пропускаем только безопасные.
+const SAFE_LINK_PROTOCOLS = ['http:', 'https:', 'mailto:', 'tel:'];
+
+const resolveSafeHref = (rawHref) => {
+    const value = String(rawHref || '').trim();
+    if (!value) return null;
+
+    // Относительный путь или якорь схемы не несут — им доверяем как есть.
+    if (value.startsWith('/') || value.startsWith('#')) return value;
+
+    try {
+        const { protocol } = new URL(value, window.location.origin);
+        return SAFE_LINK_PROTOCOLS.includes(protocol) ? value : null;
+    } catch {
+        return null;
+    }
+};
+
 const renderInlineMarkdown = (text) => {
     const parts = (text || '').split(/(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g).filter(Boolean);
 
@@ -189,10 +216,18 @@ const renderInlineMarkdown = (text) => {
         const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
         if (linkMatch) {
             const [, label, href] = linkMatch;
+            const safeHref = resolveSafeHref(href);
+
+            // Ссылку с непонятной схемой не выбрасываем целиком: подпись остаётся
+            // текстом, иначе кусок ответа модели просто исчезал бы без следа.
+            if (!safeHref) {
+                return <React.Fragment key={`${part}-${index}`}>{label}</React.Fragment>;
+            }
+
             return (
                 <a
                     key={`${part}-${index}`}
-                    href={href}
+                    href={safeHref}
                     target="_blank"
                     rel="noreferrer"
                     className="font-semibold text-[#1f3a60] hover:underline"
@@ -244,24 +279,20 @@ const formatTodayLabel = (locale, t) => {
     return t('chat.today', { date: formatted });
 };
 
-const resolveNotebookId = (notebookId) => {
-    if (notebookId !== undefined) {
-        return notebookId == null ? null : Number(notebookId);
-    }
-
-    const storedValue = localStorage.getItem(ACTIVE_NOTEBOOK_STORAGE_KEY);
-    return storedValue ? Number(storedValue) : null;
-};
-
-const formatNotebookLabel = (notebookId, t) => {
-    if (notebookId == null) return t('chat.allSources');
-    return String(notebookId);
-};
-
 const ChatPage = ({ notebookId, mode = 'page' }) => {
     const { locale, t } = useLocale();
-    const { register, handleSubmit: formHandleSubmit, reset } = useForm();
-    const effectiveNotebookId = resolveNotebookId(notebookId);
+    const { control, register, handleSubmit: formHandleSubmit, reset } = useForm();
+    const isNotebookPanel = mode === 'notebookPanel';
+    // Глобальный чат (без явного notebookId) работает в контексте активного блокнота,
+    // выбранного кнопкой в шапке блокнота. Область живёт в общем хуке: смена в другой
+    // вкладке должна переключать и запросы, и бейдж, а не только историю.
+    // В панели блокнота бейджа нет — имя уже стоит в шапке страницы, запрос не нужен.
+    const {
+        notebookId: effectiveNotebookId,
+        notebookName,
+        canResetScope,
+        resetScope,
+    } = useActiveNotebookScope(notebookId, { withNotebookName: !isNotebookPanel });
     const chatScope = effectiveNotebookId == null ? 'global' : `notebook.${effectiveNotebookId}`;
     const chatStorageKey = getChatStorageKey(chatScope);
     const initialAssistantMessage = useMemo(() => ({
@@ -278,10 +309,19 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
     const [viewerSource, setViewerSource] = useState(null);
     const messagesEndRef = useRef(null);
     const isPageLeavingRef = useRef(false);
-    const isNotebookPanel = mode === 'notebookPanel';
 
     const hasPendingMessage = messages.some((message) => message.pending === true);
     const hasConversation = messages.some((message, index) => index > 0 && !message.pending);
+
+    // Кнопка отправки заблокирована, пока в поле нет ничего, кроме пробелов:
+    // тот же порядок, что у формы блокнота (NotebooksPage) и формы заметки.
+    // Отправка по Enter идёт через тот же submitMessage и отсекается там же —
+    // блокировка кнопки её не обходит.
+    const questionValue = useWatch({ control, name: 'message' }) || '';
+    const canSubmit = questionValue.trim().length > 0 && !hasPendingMessage;
+    // Браузер молча перестаёт принимать ввод по maxLength, поэтому предел
+    // объясняем словами ровно в тот момент, когда пользователь в него упёрся.
+    const isQuestionLimitReached = questionValue.length >= MAX_QUESTION_LENGTH;
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -298,21 +338,6 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
     useEffect(() => {
         persistMessagesToStorage(chatStorageKey, messages, initialAssistantMessage);
     }, [chatStorageKey, initialAssistantMessage, messages]);
-
-    useEffect(() => {
-        if (notebookId !== undefined) return;
-
-        const handleStorage = (event) => {
-            if (event.key === ACTIVE_NOTEBOOK_STORAGE_KEY) {
-                const nextNotebookId = resolveNotebookId(undefined);
-                const nextScope = nextNotebookId == null ? 'global' : `notebook.${nextNotebookId}`;
-                setMessages(loadMessagesFromStorage(getChatStorageKey(nextScope), initialAssistantMessage, t('chat.interrupted')));
-            }
-        };
-
-        window.addEventListener('storage', handleStorage);
-        return () => window.removeEventListener('storage', handleStorage);
-    }, [initialAssistantMessage, notebookId, t]);
 
     useEffect(() => {
         isPageLeavingRef.current = false;
@@ -406,9 +431,12 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
                 setMessages((prev) => replacePendingMessageByRequestId(prev, requestId, partialMessage));
                 return;
             }
+            // Отказ по машинному коду (например, вопрос не прошёл проверку на
+            // входе) объясняем словами: общее «произошла ошибка» на 422 не
+            // подсказывает, что именно поправить.
             const errorContent = isAuthError
                 ? t('chat.authExpired')
-                : t('chat.requestFailed');
+                : resolveApiErrorMessage(error, t, 'chat.requestFailed');
             const errorMessage = { role: 'assistant', content: errorContent };
             const stored = loadMessagesFromStorage(chatStorageKey, initialAssistantMessage, t('chat.interrupted'));
             const storageUpdated = replacePendingMessageByRequestId(stored, requestId, errorMessage);
@@ -511,9 +539,13 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
                                 <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">
                                     {formatTodayLabel(locale, t)}
                                 </div>
-                                <div className="rounded-full bg-[#1f3a60]/10 px-3 py-1 text-xs font-semibold text-[#1f3a60]">
-                                    {t('chat.notebookLabel', { value: formatNotebookLabel(effectiveNotebookId, t) })}
-                                </div>
+                                <NotebookScopeBadge
+                                    notebookId={effectiveNotebookId}
+                                    notebookName={notebookName}
+                                    canReset={canResetScope}
+                                    onReset={resetScope}
+                                    resetTitle={t('chat.scopeResetTitle')}
+                                />
                             </div>
                             <Button variant="ghost" size="sm" onClick={handleClearChat} disabled={hasPendingMessage}>
                                 {t('chat.clear')}
@@ -612,17 +644,23 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
                                     className="h-12 rounded-2xl border-slate-300 bg-slate-50 pl-10 pr-14 focus:bg-white"
                                     placeholder={t('chat.notebookPlaceholder')}
                                     autoComplete="off"
+                                    maxLength={MAX_QUESTION_LENGTH}
                                     {...register('message')}
                                 />
                                 <Button
                                     type="submit"
                                     size="icon"
                                     className="absolute right-2 top-1/2 h-9 w-9 -translate-y-1/2 rounded-xl"
-                                    disabled={hasPendingMessage}
+                                    disabled={!canSubmit}
                                 >
                                     <ArrowRight className="h-4 w-4" />
                                 </Button>
                             </form>
+                            {isQuestionLimitReached ? (
+                                <p className="mt-2 text-xs font-medium text-amber-600">
+                                    {t('chat.questionLimitReached', { max: MAX_QUESTION_LENGTH })}
+                                </p>
+                            ) : null}
                         </>
                     ) : (
                         <>
@@ -646,17 +684,24 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
                                     className="h-12 rounded-xl border-slate-300 bg-slate-50 pl-10 pr-14 focus:bg-white"
                                     placeholder={t('chat.pagePlaceholder')}
                                     autoComplete="off"
+                                    maxLength={MAX_QUESTION_LENGTH}
                                     {...register('message')}
                                 />
                                 <Button
                                     type="submit"
                                     size="icon"
                                     className="absolute right-2 top-1/2 h-9 w-9 -translate-y-1/2 rounded-lg"
-                                    disabled={hasPendingMessage}
+                                    disabled={!canSubmit}
                                 >
                                     <ArrowRight className="h-4 w-4" />
                                 </Button>
                             </form>
+
+                            {isQuestionLimitReached ? (
+                                <p className="mt-2 text-center text-xs font-medium text-amber-600">
+                                    {t('chat.questionLimitReached', { max: MAX_QUESTION_LENGTH })}
+                                </p>
+                            ) : null}
 
                             <p className="mt-2 text-center text-[11px] font-medium text-slate-400">
                                 {t('chat.disclaimer')}

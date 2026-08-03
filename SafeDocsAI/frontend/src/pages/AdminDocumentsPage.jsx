@@ -16,13 +16,15 @@ import {
 } from 'lucide-react';
 import { sourcesService } from '../services/sourcesService';
 import { Button } from '../components/ui/Button';
+import NotebookScopeBadge from '../components/notebook/NotebookScopeBadge';
 import { cn } from '../lib/utils';
+import { useActiveNotebookScope } from '../hooks/useActiveNotebookScope';
 import { useModalDialog } from '../hooks/useModalDialog';
 import { useSources, useSourcesActions } from '../contexts/SourcesContext';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatDocumentLanguage, formatLocaleDate, parseTimestamp } from '../lib/locale';
-import { formatSize, resolveStatus } from '../lib/sources';
+import { formatSize, resolveSourceErrorMessage, resolveStatus } from '../lib/sources';
 
 const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
 const ALLOWED_MIME_TYPES = new Set([
@@ -38,19 +40,8 @@ const normalizeMimeType = (mimeType) => String(mimeType || '').split(';', 1)[0].
 
 const STATUS_ORDER = ['all', 'ready', 'pending', 'indexing', 'error'];
 
-const ACTIVE_NOTEBOOK_STORAGE_KEY = 'knowledgeai.activeNotebookId';
-
 const PAGE_SIZE_OPTIONS = [10, 25, 50];
 const DEFAULT_PAGE_SIZE = 25;
-
-const resolveNotebookId = (notebookId) => {
-    if (notebookId !== undefined) {
-        return notebookId == null ? null : Number(notebookId);
-    }
-
-    const storedValue = localStorage.getItem(ACTIVE_NOTEBOOK_STORAGE_KEY);
-    return storedValue ? Number(storedValue) : null;
-};
 
 const AdminDocumentsPage = ({ notebookId }) => {
     const { locale, t } = useLocale();
@@ -85,7 +76,18 @@ const AdminDocumentsPage = ({ notebookId }) => {
     const deleteDialogRef = useRef(null);
     const deleteCancelRef = useRef(null);
 
-    const effectiveNotebookId = resolveNotebookId(notebookId);
+    // Внутри блокнота страница работает панелью: область задана маршрутом, её имя
+    // уже стоит в шапке блокнота, поэтому ни бейджа, ни запроса за именем там нет.
+    const isNotebookPanel = notebookId != null;
+    // Самостоятельная страница берёт область из того же активного блокнота, что и
+    // глобальный чат. Раньше список молча сужался по нему; теперь область видна в
+    // бейдже и снимается одной кнопкой, а сам фильтр сохранён.
+    const {
+        notebookId: effectiveNotebookId,
+        notebookName,
+        canResetScope,
+        resetScope,
+    } = useActiveNotebookScope(notebookId, { withNotebookName: !isNotebookPanel });
     const statusMeta = useMemo(() => ({
         ready: {
             label: t('documents.status.ready'),
@@ -364,6 +366,20 @@ const AdminDocumentsPage = ({ notebookId }) => {
 
     return (
         <div className="space-y-6 px-4">
+            {/* Бейдж стоит над загрузкой, а не только над таблицей: активный блокнот
+                сужает список и одновременно задаёт, куда попадёт новый источник. */}
+            {!isNotebookPanel ? (
+                <div className="flex flex-wrap items-center gap-2">
+                    <NotebookScopeBadge
+                        notebookId={effectiveNotebookId}
+                        notebookName={notebookName}
+                        canReset={canResetScope}
+                        onReset={resetScope}
+                        resetTitle={t('documents.scopeResetTitle')}
+                    />
+                </div>
+            ) : null}
+
             <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
 
                 <div
@@ -559,6 +575,9 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                     const statusKey = resolveStatus(doc.status);
                                     const documentStatusMeta = statusMeta[statusKey];
                                     const languageTag = formatDocumentLanguage(doc.language);
+                                    // Причина провала индексации: error_code документа переводится
+                                    // той же таблицей, что и коды HTTP-ошибок.
+                                    const documentErrorMessage = resolveSourceErrorMessage(doc, t);
 
                                     return (
                                         <tr key={doc.id} className="border-t border-slate-100 text-sm hover:bg-slate-50/70">
@@ -567,8 +586,8 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                     <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-100 text-red-500">
                                                         <FileText className="h-4 w-4" />
                                                     </div>
-                                                    <div>
-                                                        <p className="font-semibold text-slate-800">{doc.name}</p>
+                                                    <div className="min-w-0">
+                                                        <p className="max-w-[320px] break-words font-semibold text-slate-800">{doc.name}</p>
                                                         <p className="text-xs text-slate-400">ID #{doc.id}</p>
                                                     </div>
                                                 </div>
@@ -605,6 +624,17 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                     )}
                                                     {documentStatusMeta.label}
                                                 </span>
+                                                {documentErrorMessage ? (
+                                                    /* error_text — техническая строка на одном языке:
+                                                       она нужна администратору, но в ячейке таблицы
+                                                       ей не место, поэтому уходит в подсказку. */
+                                                    <p
+                                                        className="mt-1 max-w-[240px] text-xs leading-5 text-red-600"
+                                                        title={doc.error_text || undefined}
+                                                    >
+                                                        {documentErrorMessage}
+                                                    </p>
+                                                ) : null}
                                             </td>
 
                                             <td className="px-5 py-3 text-right">
@@ -707,9 +737,9 @@ const AdminDocumentsPage = ({ notebookId }) => {
                         className="relative max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-xl"
                     >
                         <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
-                            <div>
+                            <div className="min-w-0">
                                 <h3 id="chunks-dialog-title" className="text-lg font-bold text-slate-800">{t('documents.chunksTitle')}</h3>
-                                <p className="text-sm text-slate-500">{chunksModal.docName}</p>
+                                <p className="break-words text-sm text-slate-500">{chunksModal.docName}</p>
                             </div>
                             <button
                                 ref={chunksCloseRef}
@@ -786,11 +816,11 @@ const AdminDocumentsPage = ({ notebookId }) => {
                             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
                                 <AlertTriangle className="h-5 w-5" />
                             </div>
-                            <div>
+                            <div className="min-w-0">
                                 <h3 id="delete-dialog-title" className="text-base font-semibold text-slate-900">
                                     {t('documents.deleteConfirm')}
                                 </h3>
-                                <p id="delete-dialog-description" className="mt-1 text-sm text-slate-500">
+                                <p id="delete-dialog-description" className="mt-1 break-words text-sm text-slate-500">
                                     {t('documents.deleteDescription', { name: deleteTarget.name })}
                                 </p>
                             </div>

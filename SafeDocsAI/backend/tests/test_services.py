@@ -22,6 +22,7 @@ from app.modules.chat.service import select_relevant_chunks as _select_relevant_
 from app.modules.documents.service import (
     DocumentIndexingError,
     DocumentModuleService,
+    redact_server_paths,
 )
 from app.modules.jobs.service import JOB_INDEX_DOCUMENT
 from app.modules.jobs.worker import IndexingWorker
@@ -131,6 +132,110 @@ class DocumentServiceTests(unittest.TestCase):
     def test_extract_blocks_from_txt_rejects_binary_content(self):
         with self.assertRaises(ValueError):
             self._extract_txt_bytes(bytes([0x00, 0x01, 0xC0, 0xE0, 0x02]) * 40)
+
+
+class FilenameHandlingTests(unittest.TestCase):
+    """Длина и очистка имени файла. Сквозные проверки — в
+    tests/test_upload_filename_db.py, здесь только сами преобразования."""
+
+    def test_truncate_keeps_extension_and_byte_budget(self):
+        truncated = DocumentService.truncate_name_bytes("A" * 400 + ".txt", 100)
+
+        self.assertEqual(len(truncated.encode("utf-8")), 100)
+        self.assertTrue(truncated.endswith(".txt"))
+
+    def test_truncate_leaves_short_name_untouched(self):
+        self.assertEqual(
+            DocumentService.truncate_name_bytes("отчёт.txt", 100), "отчёт.txt"
+        )
+
+    def test_truncate_does_not_split_a_multibyte_character(self):
+        """Лимит нечётный, а кириллица занимает по два байта: наивный срез
+        оставил бы половину буквы и UnicodeDecodeError на обратном чтении."""
+        truncated = DocumentService.truncate_name_bytes("б" * 100 + ".txt", 51)
+
+        self.assertLessEqual(len(truncated.encode("utf-8")), 51)
+        self.assertNotIn("\ufffd", truncated)
+        self.assertTrue(truncated.endswith(".txt"))
+
+    def test_truncate_survives_extension_longer_than_the_budget(self):
+        """Сохранять расширение ценой всего имени нечем — режем как есть."""
+        truncated = DocumentService.truncate_name_bytes("f." + "x" * 100, 10)
+
+        self.assertLessEqual(len(truncated.encode("utf-8")), 10)
+
+    def test_sanitize_strips_directory_components(self):
+        for raw in (
+            "../../../../etc/passwd.txt",
+            "/etc/passwd.txt",
+            r"..\..\..\etc\passwd.txt",
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    DocumentService.sanitize_display_name(raw), "passwd.txt"
+                )
+
+    def test_sanitize_strips_control_characters(self):
+        """Управляющие символы в заголовке Content-Disposition Starlette
+        экранирует сама (уходит в filename*=), но в списке источников такое
+        имя всё равно не нужно."""
+        self.assertEqual(
+            DocumentService.sanitize_display_name("evil\r\nX-Injected: yes.txt"),
+            "evilX-Injected: yes.txt",
+        )
+
+    def test_sanitize_falls_back_when_nothing_is_left(self):
+        for raw in ("", None, "..", ".", "/", "   "):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    DocumentService.sanitize_display_name(raw), "document"
+                )
+
+    def test_sanitize_keeps_an_ordinary_name(self):
+        self.assertEqual(
+            DocumentService.sanitize_display_name("обычный отчёт (2024).txt"),
+            "обычный отчёт (2024).txt",
+        )
+
+
+class ErrorTextRedactionTests(unittest.TestCase):
+    """document.error_text уходит клиенту в GET /sources/ и не должен нести
+    путь на сервере."""
+
+    def test_upload_directory_path_is_replaced(self):
+        message = (
+            "FileDataError: Failed to open file "
+            "'data/uploads/68d7cef87a52450a81d816f694c91b06_QA_broken.pdf' "
+            "as type pdf."
+        )
+
+        redacted = redact_server_paths(message)
+
+        self.assertNotIn("data/uploads", redacted)
+        self.assertNotIn("68d7cef87a52450a81d816f694c91b06", redacted)
+        # Причина отказа остаётся: она и есть диагностическая ценность.
+        self.assertIn("FileDataError", redacted)
+        self.assertIn("as type pdf", redacted)
+
+    def test_absolute_and_windows_paths_are_replaced(self):
+        self.assertNotIn(
+            "/home", redact_server_paths("OSError: /home/ubuntu/data/uploads/x.pdf")
+        )
+        self.assertNotIn(
+            "srv", redact_server_paths(r"RuntimeError: C:\srv\app\data\f.docx")
+        )
+
+    def test_plain_russian_messages_are_left_alone(self):
+        """Косая черта в тексте — не всегда путь."""
+        for message in (
+            "Не удалось извлечь текст из файла",
+            "Индексация не завершилась: задача потеряна",
+            "Файл не является валидным UTF-8. Конвертируйте файл в кодировку UTF-8 "
+            "перед загрузкой.",
+            "Скорость и/или объём: 20 MB/s",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(redact_server_paths(message), message)
 
 
 class RagServiceHelpersTests(unittest.TestCase):
@@ -474,6 +579,74 @@ class IndexingWorkerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RuntimeSettingsServiceTests(unittest.TestCase):
+    # Ключи, которые обработчик GET/PUT /api/v1/settings/ читает квадратными
+    # скобками. Отсутствие любого из них — это 500 на админ-панели.
+    REQUIRED_KEYS = (
+        "model",
+        "chat_model",
+        "embedding_model",
+        "enable_condense_query",
+        "retrieval_top_k",
+        "top_k",
+        "default_domain_profile",
+    )
+
+    def test_get_settings_without_a_file_still_has_every_required_key(self):
+        """Файла настроек нет — раньше здесь возвращался голый DEFAULTS, где
+        нет ключа "model", и обработчик падал с KeyError."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "runtime_settings.json"
+            with patch.object(
+                RuntimeSettingsService, "_settings_path", return_value=missing
+            ):
+                loaded = RuntimeSettingsService.get_settings()
+
+        for key in self.REQUIRED_KEYS:
+            self.assertIn(key, loaded, key)
+
+    def test_legacy_model_key_mirrors_chat_model(self):
+        """"model" — устаревшее имя chat_model, а не отдельная настройка:
+        отдельным умолчанием оно бы разъехалось с тем, чем реально отвечает чат."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "runtime_settings.json"
+            with patch.object(
+                RuntimeSettingsService, "_settings_path", return_value=missing
+            ):
+                loaded = RuntimeSettingsService.get_settings()
+
+        self.assertEqual(loaded["model"], loaded["chat_model"])
+        self.assertNotIn(
+            "model",
+            RuntimeSettingsService.DEFAULTS,
+            "'model' выводится из chat_model и не должен дублироваться в DEFAULTS",
+        )
+
+    def test_unreadable_file_falls_back_to_the_same_key_set(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            broken = Path(temp_dir) / "runtime_settings.json"
+            broken.write_text("{ это не json", encoding="utf-8")
+            with patch.object(
+                RuntimeSettingsService, "_settings_path", return_value=broken
+            ):
+                loaded = RuntimeSettingsService.get_settings()
+
+        for key in self.REQUIRED_KEYS:
+            self.assertIn(key, loaded, key)
+
+    def test_update_settings_without_model_in_patch_keeps_the_key(self):
+        """Ответ PUT собирается из этого же словаря: патч, не упоминающий
+        модель, ломал сохранение настроек ровно так же, как чтение."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "runtime_settings.json"
+            with patch.object(
+                RuntimeSettingsService, "_settings_path", return_value=settings_path
+            ):
+                updated = RuntimeSettingsService.update_settings({"top_k": 7})
+
+        for key in self.REQUIRED_KEYS:
+            self.assertIn(key, updated, key)
+        self.assertEqual(updated["top_k"], 7)
+
     def test_update_settings_persists_reranker_enabled_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "runtime_settings.json"

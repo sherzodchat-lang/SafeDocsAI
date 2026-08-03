@@ -6,7 +6,17 @@ import { useLocale } from '../i18n';
 
 const NotebookOverviewPage = () => {
   const { notebookId } = useParams();
-  const { error, isLoading } = useOutletContext();
+  const {
+    error,
+    isLoading,
+    notes,
+    notesLoading,
+    notesError,
+    reloadNotes,
+    addNote,
+    updateNote,
+    removeNote,
+  } = useOutletContext();
   const { t } = useLocale();
 
   if (isLoading) {
@@ -25,7 +35,19 @@ const NotebookOverviewPage = () => {
     );
   }
 
-  return <NotebookWorkspace notebookId={Number(notebookId)} />;
+  // Заметки берём из общего состояния блокнота: тот же список считает дату «Обновлён» в шапке.
+  return (
+    <NotebookWorkspace
+      notebookId={Number(notebookId)}
+      notes={notes}
+      notesLoading={notesLoading}
+      notesError={notesError}
+      onReloadNotes={reloadNotes}
+      onNoteCreated={addNote}
+      onNoteUpdated={updateNote}
+      onNoteDeleted={removeNote}
+    />
+  );
 };
 
 export default NotebookOverviewPage;
