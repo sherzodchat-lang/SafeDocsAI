@@ -459,5 +459,91 @@ class ReindexFlagTests(SettingsFileMixin, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.settings_path.exists())
 
 
+# --- Чтение ничего не создаёт -------------------------------------------
+
+
+class ReadingCreatesNothingTests(unittest.TestCase):
+    """Чистое чтение настроек не трогает файловую систему.
+
+    `_settings_path()` вызывал `path.parent.mkdir(parents=True, exist_ok=True)`
+    на КАЖДОМ обращении к пути, в том числе из get_settings, — то есть на
+    каждом сообщении чата, на каждом чанке при индексации и на каждом
+    GET /api/v1/settings/. Лишний сисколл на пути каждого запроса, и вдобавок
+    чистая операция чтения меняла файловую систему: на томе, смонтированном
+    только для чтения, GET /settings/ падал на mkdir ещё до того, как что-то
+    было прочитано, — хотя читать там нечего и ответ известен заранее.
+
+    Каталог создаётся только при записи. Отсутствующий каталог при чтении —
+    норма чистой установки, той же веткой, что и отсутствующий файл.
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        # Каталога data/ ещё нет: чистая установка до первого сохранения.
+        self.data_dir = Path(self._dir.name) / "data"
+        self.settings_path = self.data_dir / "runtime_settings.json"
+
+    def _use_missing_directory(self) -> None:
+        patcher = patch.object(
+            RuntimeSettingsService, "_settings_path", return_value=self.settings_path
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_path_helper_itself_creates_nothing(self):
+        """Настоящий _settings_path, БЕЗ подмены: mkdir жил именно в нём.
+
+        Подменённый в остальных тестах путь эту строку не исполнял вовсе,
+        поэтому проверка идёт по неподменённому помощнику.
+        """
+        with patch.object(runtime_settings_module.Path, "mkdir") as mkdir:
+            path = RuntimeSettingsService._settings_path()
+
+        mkdir.assert_not_called()
+        self.assertEqual(path.name, "runtime_settings.json")
+
+    def test_reading_settings_does_not_create_the_directory(self):
+        self._use_missing_directory()
+
+        values = RuntimeSettingsService.get_settings()
+
+        self.assertFalse(self.data_dir.exists())
+        # И прочиталось при этом ровно то, что и должно на чистой установке.
+        self.assertEqual(values["top_k"], RuntimeSettingsService.DEFAULTS["top_k"])
+
+    def test_reading_settings_calls_mkdir_at_all(self):
+        """Ни одного mkdir на пути чтения — именно он ронял read-only том."""
+        self._use_missing_directory()
+
+        with patch.object(runtime_settings_module.Path, "mkdir") as mkdir:
+            RuntimeSettingsService.get_settings()
+
+        mkdir.assert_not_called()
+
+    def test_reporting_a_repair_does_not_create_the_directory_either(self):
+        """_report_read_fallback называет путь к файлу в сообщении — и это
+        тоже чтение."""
+        self._use_missing_directory()
+        RuntimeSettingsService._reported_read_fallbacks.clear()
+        self.addCleanup(RuntimeSettingsService._reported_read_fallbacks.clear)
+
+        with self.assertLogs(LOGGER_NAME, level="WARNING"):
+            RuntimeSettingsService._report_read_fallback("top_k", "много", 5)
+
+        self.assertFalse(self.data_dir.exists())
+
+    def test_writing_settings_creates_the_directory(self):
+        """Каталог нужен именно записи: mkstemp кладёт временный файл в него."""
+        self._use_missing_directory()
+
+        RuntimeSettingsService._write_settings({"top_k": 7})
+
+        self.assertTrue(self.data_dir.is_dir())
+        self.assertEqual(
+            json.loads(self.settings_path.read_text(encoding="utf-8"))["top_k"], 7
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

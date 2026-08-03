@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import { AlertTriangle, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import { settingsService } from '../services/settingsService';
 import { documentsService } from '../services/sourcesService';
 import { clearSessionRole, getSessionUsername } from '../services/api';
@@ -8,8 +9,41 @@ import { useModalDialog } from '../hooks/useModalDialog';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage, resolveErrorCode } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
+// Разбор постраничного ответа общий на весь проект: тело — голый массив, общее
+// число — заголовком X-Total-Count. Имя функции историческое (первым таким
+// списком были источники), но разбирает она форму ответа, а не источники.
+import { normalizeSourcesResponse } from '../lib/sources';
 
 const ROLE_OPTIONS = ['admin', 'content_manager', 'user'];
+
+/**
+ * Размер страницы таблицы пользователей.
+ *
+ * 25 строк — примерно один экран без внутренней прокрутки, и ровно столько же
+ * показывает таблица источников (DEFAULT_PAGE_SIZE в AdminDocumentsPage.jsx):
+ * листание в двух админских таблицах устроено одинаково. Потолок сервера — 500
+ * (limit 1..500), и брать его целиком незачем: роли меняют поштучно, а не
+ * читают таблицу подряд, зато первый экран раздела при большой базе перестаёт
+ * тащить все регистрации разом.
+ */
+const USERS_PAGE_SIZE = 25;
+
+/**
+ * Вычитка всего списка — для поиска.
+ *
+ * Серверного поиска по пользователям нет, только пагинация. Фильтр по открытой
+ * странице отвечал бы «не найдено» там, где пользователь есть на соседней
+ * странице, — это ровно то враньё интерфейса, от которого раздел лечат. Поэтому
+ * на время поиска список вычитывается целиком, страницами по максимуму, который
+ * сервер отдаёт за один запрос (limit 1..500).
+ *
+ * Потолок на число запросов нужен, чтобы вычитка не превратилась в бесконечную
+ * при неожиданном ответе сервера и не выгружала произвольно большую таблицу.
+ * Упёршись в него, экран не молчит: он говорит, скольких пользователей проверил
+ * и сколько их всего (settings.search.partial).
+ */
+const SEARCH_FETCH_LIMIT = 500;
+const MAX_SEARCH_REQUESTS = 10;
 
 // Сервер отвечает этим кодом на запрос, который меняет embedding-модель без
 // подтверждения. Ответ не отказ по существу: тело валидно, повторить его нужно
@@ -27,12 +61,21 @@ const STALE_USERS_CODES = ['settings.user_not_found', 'settings.role_change_conf
 // (backend/app/api/endpoints/settings.py): схема объявлена с extra="forbid",
 // и лишний ключ в теле — уже не молчаливое игнорирование, а 422. Единственный
 // ключ тела вне этих списков — confirm_reindex, и он в схеме тоже объявлен.
-const TEXT_FIELDS = ['chat_model', 'embedding_model', 'contextual_embedding_model', 'reranker_model'];
+const TEXT_FIELDS = [
+    'chat_model',
+    'embedding_model',
+    'contextual_embedding_model',
+    'reranker_model',
+    // Профиль предметной области — тоже строка из фиксированного набора:
+    // допустимые значения приходят в available_domain_profiles, и всё, чего в
+    // этом наборе нет, сервер отвергает (settings.unsupported_domain_profile).
+    'default_domain_profile',
+];
 const BOOLEAN_FIELDS = ['enable_condense_query', 'contextual_embedding_enabled', 'reranker_enabled'];
 // Числовые поля держатся в состоянии СТРОКАМИ. Number(event.target.value) на
 // каждый ввод превращал очищенное поле в видимый 0, а на сервер уходило совсем
 // другое (Number(x) || 10), то есть показанное и отправленное расходились.
-const NUMBER_FIELDS = ['top_k', 'chat_model_num_ctx', 'contextual_embedding_num_ctx'];
+const NUMBER_FIELDS = ['retrieval_top_k', 'top_k', 'chat_model_num_ctx', 'contextual_embedding_num_ctx'];
 
 // Границы окна контекста — те же, что проверяет сервер (MIN_NUM_CTX/MAX_NUM_CTX
 // в backend/app/shared/settings/runtime_settings.py). Держим их константами, а
@@ -40,6 +83,19 @@ const NUMBER_FIELDS = ['top_k', 'chat_model_num_ctx', 'contextual_embedding_num_
 // разъехаться этим двум нельзя.
 const MIN_NUM_CTX = 2048;
 const MAX_NUM_CTX = 32768;
+
+// Границы пула кандидатов — по той же причине константами. Взяты с сервера, а
+// не придуманы: _require_int_in_range(patch["retrieval_top_k"],
+// "retrieval_top_k", 1, 50) в backend/app/shared/settings/runtime_settings.py,
+// те же 1..50 объявлены в ответе (retrieval_top_k: int = Field(ge=1, le=50) в
+// backend/app/api/endpoints/settings.py). Разойдись они с клиентскими — поле
+// предлагало бы значение, на котором сохранение упирается в отказ.
+const MIN_RETRIEVAL_TOP_K = 1;
+const MAX_RETRIEVAL_TOP_K = 50;
+
+// Верхняя граница top_k — своя и меньшая (те же места на сервере: top_k 1..20).
+const MIN_TOP_K = 1;
+const MAX_TOP_K = 20;
 
 /**
  * Диапазоны числовых полей ровно те, что проверяет сервер при ЗАПИСИ.
@@ -50,11 +106,16 @@ const MAX_NUM_CTX = 32768;
  * иначе про неё узнают только после неудачного сохранения.
  *
  * Разойтись с сервером эти числа могут только вместе с правкой бэкенда: там
- * они названы в тех же местах, что и здесь (top_k 1..20, num_ctx
- * MIN_NUM_CTX..MAX_NUM_CTX).
+ * они названы в тех же местах, что и здесь (retrieval_top_k 1..50, top_k 1..20,
+ * num_ctx MIN_NUM_CTX..MAX_NUM_CTX).
  */
 const NUMBER_FIELD_RANGES = {
-    top_k: { min: 1, max: 20, messageKey: 'settings.topKRange' },
+    retrieval_top_k: {
+        min: MIN_RETRIEVAL_TOP_K,
+        max: MAX_RETRIEVAL_TOP_K,
+        messageKey: 'settings.retrievalTopKRange',
+    },
+    top_k: { min: MIN_TOP_K, max: MAX_TOP_K, messageKey: 'settings.topKRange' },
     chat_model_num_ctx: { min: MIN_NUM_CTX, max: MAX_NUM_CTX, messageKey: 'settings.numCtxRange' },
     contextual_embedding_num_ctx: { min: MIN_NUM_CTX, max: MAX_NUM_CTX, messageKey: 'settings.numCtxRange' },
 };
@@ -67,7 +128,9 @@ const DEFAULT_FORM_VALUES = {
     enable_condense_query: true,
     contextual_embedding_enabled: false,
     reranker_enabled: false,
+    retrieval_top_k: '20',
     top_k: '10',
+    default_domain_profile: '',
     chat_model_num_ctx: '20000',
     contextual_embedding_num_ctx: '8192',
 };
@@ -78,6 +141,10 @@ const DEFAULT_CATALOG = {
     available_models: [],
     available_chat_models: [],
     available_embedding_models: [],
+    // Набор профилей предметной области задан на сервере (реестр
+    // app/domain_profiles): выбирать можно только из него, поэтому список
+    // приходит вместе с настройками и живёт здесь же, рядом с каталогом моделей.
+    available_domain_profiles: [],
     ollama_available: true,
     ollama_error: '',
     reindex_required: false,
@@ -100,7 +167,9 @@ const toFormValues = (data = {}) => ({
     enable_condense_query: Boolean(data.enable_condense_query),
     contextual_embedding_enabled: Boolean(data.contextual_embedding_enabled),
     reranker_enabled: Boolean(data.reranker_enabled),
+    retrieval_top_k: toNumberField(data.retrieval_top_k, DEFAULT_FORM_VALUES.retrieval_top_k),
     top_k: toNumberField(data.top_k, DEFAULT_FORM_VALUES.top_k),
+    default_domain_profile: String(data.default_domain_profile || ''),
     chat_model_num_ctx: toNumberField(data.chat_model_num_ctx, DEFAULT_FORM_VALUES.chat_model_num_ctx),
     contextual_embedding_num_ctx: toNumberField(
         data.contextual_embedding_num_ctx,
@@ -112,6 +181,7 @@ const toCatalog = (data = {}) => ({
     available_models: Array.isArray(data.available_models) ? data.available_models : [],
     available_chat_models: Array.isArray(data.available_chat_models) ? data.available_chat_models : [],
     available_embedding_models: Array.isArray(data.available_embedding_models) ? data.available_embedding_models : [],
+    available_domain_profiles: Array.isArray(data.available_domain_profiles) ? data.available_domain_profiles : [],
     ollama_available: data.ollama_available !== false,
     ollama_error: data.ollama_error || '',
     reindex_required: Boolean(data.reindex_required),
@@ -146,6 +216,23 @@ const validateNumberField = (field, rawValue) => {
     if (range && (number < range.min || number > range.max)) return range.messageKey;
 
     return '';
+};
+
+/**
+ * Пул кандидатов уже итоговой выдачи.
+ *
+ * Не ошибка: сервер такое сочетание принимает, границы полей у него
+ * независимы (retrieval_top_k 1..50, top_k 1..20). Но в момент запроса
+ * resolve_retrieval_limits (backend/app/modules/chat/service.py) берёт
+ * retrieval_top_k с min_value, равным итоговому top_k, то есть молча
+ * расширяет пул до top_k — сохранённое число перестаёт что-либо значить.
+ * Показать это заранее честнее, чем оставить настройку, которая не действует.
+ */
+const isRetrievalPoolNarrow = (values) => {
+    if (validateNumberField('retrieval_top_k', values.retrieval_top_k)) return false;
+    if (validateNumberField('top_k', values.top_k)) return false;
+
+    return Number(values.retrieval_top_k) < Number(values.top_k);
 };
 
 const collectFieldErrors = (values) => {
@@ -204,16 +291,20 @@ const buildPatch = (values, savedValues) => {
  *     ошибка. Такому полю пункт нужен ВСЕГДА: без него выбранную однажды
  *     модель нечем снять, хотя сервер такое значение принимает. Отсюда
  *     emptyLabel — он и включает постоянный пункт.
+ *
+ * id обязателен: имя списку даёт связанная подпись (<label htmlFor>), а не
+ * aria-label. Разница не в озвучке — она в том, что подпись без htmlFor не
+ * переводит фокус в поле по клику и не увеличивает область попадания.
  */
-const ModelSelect = ({ value, models, onChange, disabled, placeholderLabel, unknownLabel, ariaLabel, emptyLabel }) => {
+const ModelSelect = ({ id, value, models, onChange, disabled, placeholderLabel, unknownLabel, emptyLabel }) => {
     const options = Array.isArray(models) ? models : [];
 
     return (
         <select
+            id={id}
             value={value}
             onChange={onChange}
             disabled={disabled}
-            aria-label={ariaLabel}
             className={SELECT_CLASS}
         >
             {emptyLabel
@@ -245,8 +336,21 @@ const SettingsPage = () => {
     const [savedValues, setSavedValues] = useState(DEFAULT_FORM_VALUES);
     const [isSettingsLoaded, setIsSettingsLoaded] = useState(false);
 
+    // Страница пользователей и общее их число: список постраничный, а число
+    // приходит заголовком и о skip/limit ничего не знает.
     const [users, setUsers] = useState([]);
+    const [usersTotal, setUsersTotal] = useState(null);
+    const [usersPage, setUsersPage] = useState(1);
     const [isUsersLoaded, setIsUsersLoaded] = useState(false);
+
+    // Полный список — только для поиска, подробности у SEARCH_FETCH_LIMIT.
+    // Хранится вместе с общим числом на момент вычитки: если проверить удалось
+    // не всех, экран обязан сказать об этом, а не выдать неполный результат за
+    // полный.
+    const [searchIndex, setSearchIndex] = useState(null);
+    const [isSearchLoading, setIsSearchLoading] = useState(false);
+    const [searchError, setSearchError] = useState(null);
+    const [searchPage, setSearchPage] = useState(1);
 
     // Ошибки хранятся объектами, а не готовыми строками: перевод берётся при
     // отрисовке, поэтому смена языка переводит и уже показанное сообщение.
@@ -258,6 +362,9 @@ const SettingsPage = () => {
     const [roleError, setRoleError] = useState(null);
     // Успешные сообщения — ключом перевода с параметрами, по той же причине.
     const [notice, setNotice] = useState(null);
+    // Итог смены роли живёт отдельно от настроек: сообщение обязано стоять у
+    // своей таблицы, а не в чужой секции, и объявляться своей живой областью.
+    const [usersNotice, setUsersNotice] = useState(null);
 
     const [reindexResult, setReindexResult] = useState(null);
     // Подтверждение смены роли: пока цель выбрана, запрос ещё не ушёл.
@@ -329,31 +436,174 @@ const SettingsPage = () => {
         }
     }, [applySettingsData]);
 
-    const loadUsers = useCallback(async () => {
+    const loadUsers = useCallback(async (targetPage = 1) => {
         setIsUsersBusy(true);
         setUsersError(null);
+        setUsersPage(targetPage);
 
         try {
-            const response = await settingsService.getUsers();
-            setUsers(response.data || []);
+            const response = await settingsService.getUsers({
+                skip: (targetPage - 1) * USERS_PAGE_SIZE,
+                limit: USERS_PAGE_SIZE,
+            });
+            // Тот же разбор, что у источников: тело — голый массив, общее число
+            // приходит заголовком X-Total-Count (он объявлен в expose_headers,
+            // иначе браузер не отдал бы его коду страницы).
+            const { items, total } = normalizeSourcesResponse(response);
+            setUsers(items);
+            setUsersTotal(total);
             setIsUsersLoaded(true);
         } catch (err) {
             console.error('Failed to load users', err);
+            // Что лежит на запрошенной странице — неизвестно, и оставлять под её
+            // номером строки предыдущей значило бы показать чужую страницу как
+            // эту. Ошибка с кнопкой «Повторить» стоит рядом.
+            setUsers([]);
             setUsersError(err);
         } finally {
             setIsUsersBusy(false);
         }
     }, []);
 
+    /**
+     * Полная вычитка списка для поиска.
+     *
+     * Идёт по тому же контракту, что и страница таблицы: skip растёт на число
+     * уже полученных записей, limit — потолок сервера. Порядок (created_at DESC,
+     * id DESC) устойчив между страницами, поэтому склейка не теряет и не
+     * дублирует пользователей.
+     *
+     * Признак полноты считается здесь же: неполный набор в поиске молчать не
+     * имеет права.
+     */
+    const loadSearchIndex = useCallback(async () => {
+        setIsSearchLoading(true);
+        setSearchError(null);
+
+        try {
+            const collected = [];
+            let total = null;
+
+            for (let request = 0; request < MAX_SEARCH_REQUESTS; request += 1) {
+                const response = await settingsService.getUsers({
+                    skip: collected.length,
+                    limit: SEARCH_FETCH_LIMIT,
+                });
+                const page = normalizeSourcesResponse(response);
+                collected.push(...page.items);
+
+                if (page.total != null) total = page.total;
+                // Короткая страница — последняя: продолжать нечем и незачем.
+                if (page.items.length < SEARCH_FETCH_LIMIT) break;
+                if (total != null && collected.length >= total) break;
+            }
+
+            setSearchIndex({
+                items: collected,
+                total: total ?? collected.length,
+                isComplete: total == null || collected.length >= total,
+            });
+        } catch (err) {
+            console.error('Failed to load users for search', err);
+            setSearchError(err);
+        } finally {
+            setIsSearchLoading(false);
+        }
+    }, []);
+
     const loadData = useCallback(async () => {
         setIsLoading(true);
-        await Promise.allSettled([loadSettings(), loadUsers()]);
+        await Promise.allSettled([loadSettings(), loadUsers(1)]);
         setIsLoading(false);
     }, [loadSettings, loadUsers]);
 
     useEffect(() => {
         loadData();
     }, [loadData]);
+
+    /**
+     * Поиск из шапки: значение приходит в ?q=, как на странице источников.
+     *
+     * Поле в шапке существует давно, а страница его не читала вовсе — оно
+     * выглядело работающим и не делало ничего. Читать его недостаточно:
+     * серверного поиска по пользователям нет, и фильтр по открытой странице
+     * отвечал бы «не найдено» про пользователя, который просто лежит на другой
+     * странице. Поэтому поиск работает по полному списку, вычитанному отдельно
+     * (loadSearchIndex), и всегда говорит, по скольким пользователям он прошёл.
+     */
+    const [searchParams] = useSearchParams();
+    // В сообщениях показывается набранное, а сравнивается приведённое к нижнему
+    // регистру: пользователю возвращают его запрос, а не его же обработанную копию.
+    const searchTerm = (searchParams.get('q') || '').trim();
+    const searchQuery = searchTerm.toLowerCase();
+    const isSearching = Boolean(searchQuery);
+
+    useEffect(() => {
+        // Первая же вычитка кэшируется: набор запроса по буквам не должен
+        // тащить список заново на каждое нажатие.
+        if (!isSearching || searchIndex || isSearchLoading || searchError) return;
+        loadSearchIndex();
+    }, [isSearching, isSearchLoading, loadSearchIndex, searchError, searchIndex]);
+
+    useEffect(() => {
+        setSearchPage(1);
+    }, [searchQuery]);
+
+    const searchMatches = useMemo(() => {
+        if (!isSearching || !searchIndex) return [];
+
+        return searchIndex.items.filter(
+            (user) => String(user.username || '').toLowerCase().includes(searchQuery),
+        );
+    }, [isSearching, searchIndex, searchQuery]);
+
+    // Страницы в двух режимах считаются по-разному: список сервер отдаёт уже
+    // нарезанным, найденное режется здесь. Наружу оба режима выглядят одинаково.
+    const knownUsersTotal = usersTotal ?? ((usersPage - 1) * USERS_PAGE_SIZE + users.length);
+    const listTotal = isSearching ? searchMatches.length : knownUsersTotal;
+    const pageCount = Math.max(1, Math.ceil(listTotal / USERS_PAGE_SIZE));
+    const currentPage = isSearching ? Math.min(searchPage, pageCount) : usersPage;
+    const visibleUsers = useMemo(() => (
+        isSearching
+            ? searchMatches.slice((currentPage - 1) * USERS_PAGE_SIZE, currentPage * USERS_PAGE_SIZE)
+            : users
+    ), [currentPage, isSearching, searchMatches, users]);
+    const rangeStart = visibleUsers.length === 0 ? 0 : (currentPage - 1) * USERS_PAGE_SIZE + 1;
+    const rangeEnd = visibleUsers.length === 0 ? 0 : rangeStart + visibleUsers.length - 1;
+    // Вычитанного для поиска списка достаточно, чтобы показать найденное, даже
+    // если страница таблицы в этот момент не загрузилась.
+    const showUsersTable = isUsersLoaded || Boolean(searchIndex);
+
+    // Сброс вычитанного списка запускает её заново тем же условием, что и первый
+    // поиск: отдельного пути загрузки для повтора нет.
+    const retrySearchIndex = useCallback(() => {
+        setSearchError(null);
+        setSearchIndex(null);
+    }, []);
+
+    const goToPage = useCallback((nextPage) => {
+        if (isSearching) {
+            setSearchPage(nextPage);
+            return;
+        }
+
+        loadUsers(nextPage);
+    }, [isSearching, loadUsers]);
+
+    /**
+     * Название роли берётся из словаря, а не показывается служебным именем.
+     *
+     * В таблице и в диалоге подтверждения стояли «admin» и «content_manager» —
+     * латиница в интерфейсе, у которого язык по умолчанию таджикский. Роль, о
+     * которой словарь не знает (значение из старой схемы, ручная правка в БД),
+     * показывается как есть: сервер такие значения допускает, и подменять их
+     * ближайшим знакомым нельзя.
+     */
+    const getRoleLabel = useCallback((role) => {
+        const key = `settings.roles.${role}`;
+        const translated = t(key);
+        return translated === key ? role : translated;
+    }, [t]);
 
     const closeConfirmDialog = useCallback(() => {
         setConfirmTarget(null);
@@ -515,6 +765,7 @@ const SettingsPage = () => {
         if (!nextRole || nextRole === user.role) return;
 
         setRoleError(null);
+        setUsersNotice(null);
         setRoleTarget({
             id: user.id,
             username: user.username,
@@ -544,6 +795,18 @@ const SettingsPage = () => {
             setUsers((prev) => prev.map((user) => (
                 user.id === roleTarget.id ? { ...user, role: savedRole } : user
             )));
+            // Вычитанный для поиска список — та же таблица, только целиком:
+            // не обнови его здесь, и найденная строка показывала бы прежнюю
+            // роль до следующей вычитки.
+            setSearchIndex((prev) => (prev ? {
+                ...prev,
+                items: prev.items.map((user) => (
+                    user.id === roleTarget.id ? { ...user, role: savedRole } : user
+                )),
+            } : prev));
+            // Диалог просто закрывается, и об исходе операции сказать было
+            // нечем: зрячий видел новое значение в списке, незрячий — ничего.
+            setUsersNotice({ username: roleTarget.username, role: savedRole });
 
             // Роль сменили самому себе — подсказка интерфейса устарела в ту же
             // секунду. Сбрасываем её, чтобы админские разделы исчезли сразу, а
@@ -561,14 +824,18 @@ const SettingsPage = () => {
             setRoleError(err);
             // «Пользователь не найден» и «конфликт смены роли» означают одно:
             // список у клиента устарел. Перечитываем его сразу, чтобы решение
-            // принималось по актуальным данным.
+            // принималось по актуальным данным, — ту же страницу, на которой
+            // стоит админ, а не первую. Полный список для поиска устарел ровно
+            // так же, поэтому сбрасывается: следующий поиск вычитает его заново.
             if (STALE_USERS_CODES.includes(resolveErrorCode(err))) {
-                loadUsers();
+                loadUsers(usersPage);
+                setSearchIndex(null);
+                setSearchError(null);
             }
         } finally {
             setIsSavingRole(false);
         }
-    }, [isSavingRole, loadUsers, roleTarget]);
+    }, [isSavingRole, loadUsers, roleTarget, usersPage]);
 
     useModalDialog(Boolean(roleTarget), closeRoleDialog, roleDialogRef, roleCancelRef);
     useModalDialog(Boolean(confirmTarget), closeConfirmDialog, confirmDialogRef, confirmCancelRef);
@@ -603,6 +870,62 @@ const SettingsPage = () => {
                     : t('settings.modelUnavailableWarning', { model: value })}
             </p>
         );
+    };
+
+    /**
+     * Название профиля берём из общего словаря профилей.
+     *
+     * Тот же источник, что у диалога правки блокнота (notebooksPage.profiles):
+     * профиль в настройках и профиль блокнота — одно и то же понятие, и второй
+     * словарь на те же значения разошёлся бы с первым. Незнакомый профиль
+     * показывается своим служебным именем, а не пустой строкой: реестр на
+     * сервере пополняется без правки клиента.
+     */
+    const getDomainProfileLabel = (profile) => {
+        const key = `notebooksPage.profiles.${profile}`;
+        const translated = t(key);
+        return translated === key ? profile : translated;
+    };
+
+    const isDomainProfileUnknown = Boolean(formValues.default_domain_profile)
+        && catalog.available_domain_profiles.length > 0
+        && !catalog.available_domain_profiles.includes(formValues.default_domain_profile);
+
+    /**
+     * Голосовой статус таблицы пользователей.
+     *
+     * Порядок веток — от отказа к фону: сначала то, что помешало показать
+     * список, потом область поиска, потом обычное «показано N из M». Отдельная
+     * ветка ошибки обязательна: молча показать пустую таблицу значит выдать сбой
+     * загрузки за отсутствие пользователей.
+     */
+    const getUsersStatusMessage = () => {
+        if (usersError) return resolveApiErrorMessage(usersError, t, 'settings.usersLoadFailed');
+
+        if (isSearching) {
+            if (searchError) return resolveApiErrorMessage(searchError, t, 'settings.search.failed');
+            if (isSearchLoading || !searchIndex) return t('settings.search.loading');
+
+            return searchMatches.length === 0
+                ? t('settings.search.empty', { query: searchTerm, scanned: searchIndex.items.length })
+                : t('settings.search.results', {
+                    count: searchMatches.length,
+                    scanned: searchIndex.items.length,
+                    query: searchTerm,
+                });
+        }
+
+        if (isUsersBusy) return t('settings.usersLoading');
+
+        return t('settings.pagination.range', { from: rangeStart, to: rangeEnd, total: listTotal });
+    };
+
+    const getEmptyRowMessage = () => {
+        if (!isSearching) return t('settings.usersEmpty');
+        if (searchError) return t('settings.search.unavailable');
+        if (isSearchLoading || !searchIndex) return t('settings.search.loading');
+
+        return t('settings.search.noRows');
     };
 
     const renderConfirmDescription = () => {
@@ -719,8 +1042,11 @@ const SettingsPage = () => {
                     <>
                         <div className="grid gap-4 md:grid-cols-2">
                             <div>
-                                <label className="mb-2 block text-sm font-semibold text-slate-700">{t('settings.chatModel')}</label>
+                                <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-chat-model">
+                                    {t('settings.chatModel')}
+                                </label>
                                 <ModelSelect
+                                    id="settings-chat-model"
                                     value={formValues.chat_model}
                                     models={catalog.available_chat_models}
                                     onChange={(event) => setField('chat_model', event.target.value)}
@@ -729,14 +1055,16 @@ const SettingsPage = () => {
                                         ? t('settings.modelPlaceholder')
                                         : t('settings.noChatModels')}
                                     unknownLabel={t('settings.modelUnavailableOption', { model: formValues.chat_model })}
-                                    ariaLabel={t('settings.chatModel')}
                                 />
                                 {renderModelWarning(formValues.chat_model, catalog.available_chat_models)}
                             </div>
 
                             <div>
-                                <label className="mb-2 block text-sm font-semibold text-slate-700">{t('settings.embeddingModel')}</label>
+                                <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-embedding-model">
+                                    {t('settings.embeddingModel')}
+                                </label>
                                 <ModelSelect
+                                    id="settings-embedding-model"
                                     value={formValues.embedding_model}
                                     models={catalog.available_embedding_models}
                                     onChange={(event) => setField('embedding_model', event.target.value)}
@@ -745,7 +1073,6 @@ const SettingsPage = () => {
                                         ? t('settings.modelPlaceholder')
                                         : t('settings.noEmbeddingModels')}
                                     unknownLabel={t('settings.modelUnavailableOption', { model: formValues.embedding_model })}
-                                    ariaLabel={t('settings.embeddingModel')}
                                 />
                                 {renderModelWarning(formValues.embedding_model, catalog.available_embedding_models)}
                                 <p className="mt-2 text-xs text-slate-500">
@@ -779,24 +1106,107 @@ const SettingsPage = () => {
                             </label>
                         </div>
 
+                        {/* Два числа одного конвейера: сначала из индекса
+                            достаётся пул кандидатов (retrieval_top_k), потом
+                            из него после слияния и переранжирования отбирается
+                            top_k фрагментов для модели. Стоят рядом, потому что
+                            зависят друг от друга — см. подсказку под полем. */}
+                        <div className="mt-4 space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                            <div>
+                                <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-retrieval-top-k">
+                                    {t('settings.retrievalTopK')}
+                                </label>
+                                <input
+                                    id="settings-retrieval-top-k"
+                                    type="number"
+                                    min={MIN_RETRIEVAL_TOP_K}
+                                    max={MAX_RETRIEVAL_TOP_K}
+                                    value={formValues.retrieval_top_k}
+                                    onChange={(event) => setField('retrieval_top_k', event.target.value)}
+                                    aria-invalid={Boolean(fieldErrors.retrieval_top_k)}
+                                    className={`${NUMBER_INPUT_CLASS} w-32`}
+                                />
+                                {fieldErrors.retrieval_top_k && (
+                                    <p className="mt-1 text-xs font-semibold text-red-600">
+                                        {t(fieldErrors.retrieval_top_k)}
+                                    </p>
+                                )}
+                                {/* Не блокировка сохранения: сервер такое
+                                    значение принимает, но при запросе поднимает
+                                    пул до top_k, и настройка перестаёт
+                                    действовать. Молчать об этом нельзя. */}
+                                {isRetrievalPoolNarrow(formValues) && (
+                                    <p className="mt-1 text-xs font-semibold text-amber-600">
+                                        {t('settings.retrievalTopKBelowTopK', { topK: formValues.top_k })}
+                                    </p>
+                                )}
+                                <p className="mt-2 text-xs text-slate-500">{t('settings.retrievalTopKHint')}</p>
+                            </div>
+
+                            <div>
+                                <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-top-k">
+                                    {t('settings.topK')}
+                                </label>
+                                <input
+                                    id="settings-top-k"
+                                    type="number"
+                                    min={MIN_TOP_K}
+                                    max={MAX_TOP_K}
+                                    value={formValues.top_k}
+                                    onChange={(event) => setField('top_k', event.target.value)}
+                                    aria-invalid={Boolean(fieldErrors.top_k)}
+                                    className={`${NUMBER_INPUT_CLASS} w-32`}
+                                />
+                                {fieldErrors.top_k && (
+                                    <p className="mt-1 text-xs font-semibold text-red-600">{t(fieldErrors.top_k)}</p>
+                                )}
+                                <p className="mt-2 text-xs text-slate-500">{t('settings.topKHint')}</p>
+                            </div>
+                        </div>
+
                         <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-                            <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-top-k">
-                                {t('settings.topK')}
+                            <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-domain-profile">
+                                {t('settings.domainProfile')}
                             </label>
-                            <input
-                                id="settings-top-k"
-                                type="number"
-                                min={1}
-                                max={20}
-                                value={formValues.top_k}
-                                onChange={(event) => setField('top_k', event.target.value)}
-                                aria-invalid={Boolean(fieldErrors.top_k)}
-                                className={`${NUMBER_INPUT_CLASS} w-32`}
-                            />
-                            {fieldErrors.top_k && (
-                                <p className="mt-1 text-xs font-semibold text-red-600">{t(fieldErrors.top_k)}</p>
+                            {/* Список, а не свободный ввод: набор профилей
+                                держит сервер, и всё, чего нет в
+                                available_domain_profiles, он отвергает кодом
+                                settings.unsupported_domain_profile. */}
+                            <select
+                                id="settings-domain-profile"
+                                value={formValues.default_domain_profile}
+                                onChange={(event) => setField('default_domain_profile', event.target.value)}
+                                disabled={!catalog.available_domain_profiles.length && !formValues.default_domain_profile}
+                                className={SELECT_CLASS}
+                            >
+                                {!formValues.default_domain_profile && (
+                                    <option value="">
+                                        {catalog.available_domain_profiles.length
+                                            ? t('settings.domainProfilePlaceholder')
+                                            : t('settings.noDomainProfiles')}
+                                    </option>
+                                )}
+                                {/* Сохранённого профиля нет среди доступных —
+                                    показываем как есть, а не подменяем первым
+                                    пунктом: это ровно та тихая подмена, от
+                                    которой сервер уже отказался. */}
+                                {Boolean(formValues.default_domain_profile)
+                                    && !catalog.available_domain_profiles.includes(formValues.default_domain_profile) && (
+                                    <option value={formValues.default_domain_profile}>
+                                        {t('settings.domainProfileUnknownOption', { profile: formValues.default_domain_profile })}
+                                    </option>
+                                )}
+                                {catalog.available_domain_profiles.map((profile) => (
+                                    <option key={profile} value={profile}>{getDomainProfileLabel(profile)}</option>
+                                ))}
+                            </select>
+                            {isDomainProfileUnknown && (
+                                <p className="mt-2 text-xs font-semibold text-amber-600">
+                                    {t('settings.domainProfileUnknownWarning', { profile: formValues.default_domain_profile })}
+                                </p>
                             )}
-                            <p className="mt-2 text-xs text-slate-500">{t('settings.topKHint')}</p>
+                            <p className="mt-2 text-xs text-slate-500">{t('settings.domainProfileHint')}</p>
+                            <p className="mt-1 text-xs text-slate-500">{t('settings.domainProfileScopeHint')}</p>
                         </div>
 
                         <div className="mt-4 space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -816,8 +1226,11 @@ const SettingsPage = () => {
                             </label>
 
                             <div>
-                                <label className="mb-2 block text-sm font-semibold text-slate-700">{t('settings.contextualModel')}</label>
+                                <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-contextual-model">
+                                    {t('settings.contextualModel')}
+                                </label>
                                 <ModelSelect
+                                    id="settings-contextual-model"
                                     value={formValues.contextual_embedding_model}
                                     models={catalog.available_chat_models}
                                     onChange={(event) => setField('contextual_embedding_model', event.target.value)}
@@ -828,7 +1241,6 @@ const SettingsPage = () => {
                                     // вернуться к нему надо чем-то.
                                     emptyLabel={t('settings.contextualModelNone')}
                                     unknownLabel={t('settings.modelUnavailableOption', { model: formValues.contextual_embedding_model })}
-                                    ariaLabel={t('settings.contextualModel')}
                                 />
                                 {renderModelWarning(formValues.contextual_embedding_model, catalog.available_chat_models)}
                                 {/* Не блокировка сохранения, а предупреждение: сервер
@@ -934,11 +1346,14 @@ const SettingsPage = () => {
                             >
                                 {t('settings.reset')}
                             </Button>
-                            {notice && (
-                                <span className="text-sm font-semibold text-emerald-600">
-                                    {t(notice.key, notice.params)}
-                                </span>
-                            )}
+                            {/* Живая область стоит в разметке всегда, а не
+                                появляется вместе с текстом: область aria-live,
+                                добавленная в DOM уже с содержимым, объявляется
+                                не всеми скринридерами, и «Настройки сохранены»
+                                прошло бы мимо незрячего админа. */}
+                            <span role="status" aria-live="polite" className="text-sm font-semibold text-emerald-600">
+                                {notice ? t(notice.key, notice.params) : ''}
+                            </span>
                             {saveError && (
                                 <span role="alert" className="text-sm font-semibold text-red-600">
                                     {resolveApiErrorMessage(saveError, t, 'settings.saveFailed')}
@@ -950,34 +1365,125 @@ const SettingsPage = () => {
             </section>
 
             <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                <div className="border-b border-slate-200 px-5 py-4">
-                    <h3 className="text-lg font-bold text-[#1f3a60]">{t('settings.rolesTitle')}</h3>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                        <h3 className="text-lg font-bold text-[#1f3a60]">{t('settings.rolesTitle')}</h3>
+                        {/* Общее число — из X-Total-Count, а не из длины
+                            страницы: сколько всего пользователей в системе,
+                            интерфейс раньше показать не мог вовсе. */}
+                        {usersTotal != null && (
+                            <span className="rounded-full bg-[#1f3a60]/10 px-3 py-1 text-xs font-bold text-[#1f3a60]">
+                                {t('settings.usersTotal', { count: usersTotal })}
+                            </span>
+                        )}
+                    </div>
+
+                    <span role="status" aria-live="polite" className="text-sm font-semibold text-emerald-600">
+                        {usersNotice
+                            ? t('settings.roleChanged', {
+                                username: usersNotice.username,
+                                role: getRoleLabel(usersNotice.role),
+                            })
+                            : ''}
+                    </span>
                 </div>
+
+                {/* Единственный голосовой статус таблицы: что показано, сколько
+                    найдено и чем закончилась загрузка. */}
+                <p className="sr-only" role="status" aria-live="polite">{getUsersStatusMessage()}</p>
 
                 {usersError && (
                     <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-red-50 px-5 py-3">
                         <span role="alert" className="text-sm font-semibold text-red-700">
                             {resolveApiErrorMessage(usersError, t, 'settings.usersLoadFailed')}
                         </span>
-                        <Button type="button" variant="outline" size="sm" onClick={loadUsers} isLoading={isUsersBusy}>
+                        {/* Повторяется та страница, которая не загрузилась, а не первая. */}
+                        <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => loadUsers(usersPage)}
+                            isLoading={isUsersBusy}
+                        >
                             {t('settings.retry')}
                         </Button>
                     </div>
                 )}
 
-                {isUsersLoaded && (
+                {/* Область поиска названа явно: сколько пользователей проверено.
+                    Без этой строки «ничего не найдено» ничем не отличалось бы от
+                    «нет на этой странице». */}
+                {isSearching && (
+                    <div className="border-b border-slate-200 bg-slate-50 px-5 py-3">
+                        {searchError ? (
+                            <div className="flex flex-wrap items-center gap-3">
+                                <span role="alert" className="text-sm font-semibold text-red-700">
+                                    {resolveApiErrorMessage(searchError, t, 'settings.search.failed')}
+                                </span>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={retrySearchIndex}
+                                    isLoading={isSearchLoading}
+                                >
+                                    {t('settings.retry')}
+                                </Button>
+                            </div>
+                        ) : (isSearchLoading || !searchIndex) ? (
+                            <p className="text-xs font-semibold text-slate-500">{t('settings.search.loading')}</p>
+                        ) : (
+                            <>
+                                <p className="text-xs font-semibold text-slate-600">
+                                    {searchMatches.length === 0
+                                        ? t('settings.search.empty', {
+                                            query: searchTerm,
+                                            scanned: searchIndex.items.length,
+                                        })
+                                        : t('settings.search.results', {
+                                            count: searchMatches.length,
+                                            scanned: searchIndex.items.length,
+                                            query: searchTerm,
+                                        })}
+                                </p>
+                                {/* Вычитка упёрлась в потолок запросов: часть
+                                    пользователей поиск не видел, и выдавать
+                                    неполный результат за полный нельзя. */}
+                                {!searchIndex.isComplete && (
+                                    <p className="mt-1 text-xs font-semibold text-amber-700">
+                                        {t('settings.search.partial', {
+                                            scanned: searchIndex.items.length,
+                                            total: searchIndex.total,
+                                        })}
+                                    </p>
+                                )}
+                            </>
+                        )}
+                    </div>
+                )}
+
+                {showUsersTable && (
                     <div className="overflow-x-auto">
                         <table className="w-full min-w-[740px] text-left">
                             <thead className="bg-slate-50 text-xs uppercase tracking-[0.08em] text-slate-500">
                                 <tr>
-                                    <th className="px-5 py-3 font-semibold">{t('settings.table.user')}</th>
-                                    <th className="px-5 py-3 font-semibold">{t('settings.table.role')}</th>
-                                    <th className="px-5 py-3 font-semibold">{t('settings.table.createdAt')}</th>
+                                    {/* scope="col" — не украшение: без него скринридер
+                                        не связывает ячейку с заголовком столбца и
+                                        читает строку набором значений без имён. */}
+                                    <th scope="col" className="px-5 py-3 font-semibold">{t('settings.table.user')}</th>
+                                    <th scope="col" className="px-5 py-3 font-semibold">{t('settings.table.role')}</th>
+                                    <th scope="col" className="px-5 py-3 font-semibold">{t('settings.table.createdAt')}</th>
                                 </tr>
                             </thead>
 
                             <tbody>
-                                {users.map((user) => (
+                                {visibleUsers.length === 0 ? (
+                                    <tr>
+                                        <td colSpan="3" className="px-5 py-10 text-center text-sm text-slate-500">
+                                            {getEmptyRowMessage()}
+                                        </td>
+                                    </tr>
+                                ) : visibleUsers.map((user) => (
                                     <tr key={user.id} className="border-t border-slate-100 text-sm hover:bg-slate-50">
                                         <td className="px-5 py-3 font-semibold text-slate-800">{user.username}</td>
                                         <td className="px-5 py-3">
@@ -988,11 +1494,25 @@ const SettingsPage = () => {
                                                 // ответ не пришёл, порядок параллельных PUT ничем
                                                 // не гарантирован.
                                                 disabled={isSavingRole && roleTarget?.id === user.id}
-                                                aria-label={t('settings.table.role')}
+                                                // Имя списка включает пользователя: заголовка
+                                                // столбца скринридеру не хватает — в перечне форм
+                                                // он видит их вне таблицы, и N списков «Роль»
+                                                // неразличимы между собой.
+                                                aria-label={t('settings.roleSelectLabel', { username: user.username })}
                                                 className="h-9 rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1f3a60]/25 disabled:cursor-not-allowed disabled:opacity-60"
                                             >
+                                                {/* Роль вне известного набора (значение из старой
+                                                    схемы, ручная правка в БД) показывается своим
+                                                    пунктом: <select> со значением вне списка
+                                                    браузер рисует пустым, то есть роль исчезала
+                                                    бы с экрана вместе с правом её увидеть. */}
+                                                {!ROLE_OPTIONS.includes(user.role) && (
+                                                    <option value={user.role}>
+                                                        {t('settings.roleUnknownOption', { role: user.role })}
+                                                    </option>
+                                                )}
                                                 {ROLE_OPTIONS.map((role) => (
-                                                    <option key={role} value={role}>{role}</option>
+                                                    <option key={role} value={role}>{getRoleLabel(role)}</option>
                                                 ))}
                                             </select>
                                         </td>
@@ -1010,6 +1530,45 @@ const SettingsPage = () => {
                             </tbody>
                         </table>
                     </div>
+                )}
+
+                {/* Листание появляется только там, где страница не вмещает
+                    список: при десятке пользователей навигация была бы шумом. */}
+                {showUsersTable && listTotal > USERS_PAGE_SIZE && (
+                    <nav
+                        className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3"
+                        aria-label={t('settings.pagination.label')}
+                    >
+                        <span className="text-xs font-semibold text-slate-500">
+                            {t('settings.pagination.range', { from: rangeStart, to: rangeEnd, total: listTotal })}
+                        </span>
+
+                        <div className="flex items-center gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={currentPage <= 1 || isUsersBusy}
+                                onClick={() => goToPage(currentPage - 1)}
+                                aria-label={t('settings.pagination.previous')}
+                            >
+                                <ChevronLeft className="h-4 w-4" />
+                            </Button>
+                            <span className="text-xs font-semibold text-slate-600">
+                                {t('settings.pagination.pageOf', { page: currentPage, pages: pageCount })}
+                            </span>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={currentPage >= pageCount || isUsersBusy}
+                                onClick={() => goToPage(currentPage + 1)}
+                                aria-label={t('settings.pagination.next')}
+                            >
+                                <ChevronRight className="h-4 w-4" />
+                            </Button>
+                        </div>
+                    </nav>
                 )}
             </section>
 
@@ -1037,10 +1596,15 @@ const SettingsPage = () => {
                                     {t('settings.roleChangeConfirm')}
                                 </h3>
                                 <p id="role-dialog-description" className="mt-1 break-words text-sm text-slate-500">
+                                    {/* Роли называются так же, как в таблице:
+                                        служебные admin/content_manager в вопросе
+                                        «менять или нет» читались бы латиницей в
+                                        интерфейсе, где язык по умолчанию —
+                                        таджикский. */}
                                     {t('settings.roleChangeDescription', {
                                         username: roleTarget.username,
-                                        from: roleTarget.currentRole,
-                                        to: roleTarget.nextRole,
+                                        from: getRoleLabel(roleTarget.currentRole),
+                                        to: getRoleLabel(roleTarget.nextRole),
                                     })}
                                 </p>
                             </div>

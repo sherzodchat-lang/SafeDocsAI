@@ -40,7 +40,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 
-from app.api.endpoints.settings import RuntimeSettingsUpdate  # noqa: E402
+from app.api.endpoints.settings import (  # noqa: E402
+    RuntimeSettingsResponse,
+    RuntimeSettingsUpdate,
+    _settings_response,
+)
 from app.core.exceptions import SettingsErrors  # noqa: E402
 from app.shared.settings.runtime_settings import (  # noqa: E402
     MAX_NUM_CTX,
@@ -390,6 +394,118 @@ class DownedOllamaTests(SettingsApiTestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["top_k"], 7)
+
+
+# --- Умолчания в одном месте ---------------------------------------------
+
+
+class DefaultsHaveOneSourceTests(unittest.TestCase):
+    """Умолчания настроек нигде не выписаны второй раз.
+
+    Значения 20000, 8192, False и имена моделей жили в трёх местах:
+    RuntimeSettingsService.DEFAULTS (настоящий источник — оттуда их берут
+    чтение и сброс) и дважды в app/api/endpoints/settings.py, в схеме ответа и
+    в сборщике _settings_response. Совпадали они ровно до первой правки:
+    разъезд идёт молча, без единой ошибки, и наружу выходит умолчание, с
+    которым система не работает. Тот же класс дефекта раздел уже ловил — из-за
+    него "model" выводится из chat_model, а не хранится отдельной строкой.
+
+    БД здесь не нужна: проверяются схема и сборщик, оба чистые.
+    """
+
+    # Поля ответа, у которых есть умолчание. Ключ в схеме — он же ключ в
+    # DEFAULTS и он же ключ в файле настроек.
+    FIELDS_WITH_DEFAULTS = (
+        "contextual_embedding_enabled",
+        "contextual_embedding_model",
+        "chat_model_num_ctx",
+        "contextual_embedding_num_ctx",
+        "reranker_enabled",
+        "reranker_model",
+        "reindex_required",
+    )
+
+    def test_the_schema_defaults_are_the_service_defaults(self):
+        for field in self.FIELDS_WITH_DEFAULTS:
+            with self.subTest(field=field):
+                self.assertEqual(
+                    RuntimeSettingsResponse.model_fields[field].default,
+                    RuntimeSettingsService.DEFAULTS[field],
+                )
+
+    def test_every_field_with_a_default_is_covered_by_this_test(self):
+        """Список выше не должен отстать от схемы: новое поле с умолчанием
+        обязано либо попасть в проверку, либо не иметь умолчания вовсе."""
+        with_defaults = {
+            name
+            for name, field in RuntimeSettingsResponse.model_fields.items()
+            if not field.is_required()
+        }
+        # ollama_error — не настройка, а состояние каталога моделей: в файле
+        # его нет и в DEFAULTS ему не место.
+        self.assertEqual(
+            with_defaults - {"ollama_error"}, set(self.FIELDS_WITH_DEFAULTS)
+        )
+
+    def test_the_response_builder_falls_back_to_the_same_defaults(self):
+        """Подстраховка `.get(ключ, умолчание)` в _settings_response берёт
+        умолчание оттуда же.
+
+        Сработать ей вообще-то не на чем — get_settings отдаёт полный набор
+        ключей при любом состоянии диска, — но выписанный рядом литерал
+        разъехался бы ровно так же, как разъезжался в схеме.
+        """
+        catalog_patcher = patch.object(
+            RuntimeSettingsService, "model_catalog", return_value=FAKE_CATALOG
+        )
+        catalog_patcher.start()
+        self.addCleanup(catalog_patcher.stop)
+
+        # Минимум, который сборщик берёт по прямому ключу; всё остальное
+        # обязано подставиться из DEFAULTS.
+        response = _settings_response(
+            {
+                "model": CHAT_ON_STAND,
+                "chat_model": CHAT_ON_STAND,
+                "embedding_model": EMBEDDING_ON_STAND,
+                "enable_condense_query": True,
+                "retrieval_top_k": 20,
+                "top_k": 5,
+                "default_domain_profile": "tax",
+            }
+        )
+
+        for field in self.FIELDS_WITH_DEFAULTS:
+            with self.subTest(field=field):
+                self.assertEqual(
+                    getattr(response, field), RuntimeSettingsService.DEFAULTS[field]
+                )
+
+    def test_a_changed_default_reaches_the_schema_without_a_second_edit(self):
+        """Смысл правки: источник один, и правка одного места разъезжается
+        уже не молча, а никак."""
+        patched = dict(RuntimeSettingsService.DEFAULTS)
+        patched["chat_model_num_ctx"] = 12345
+
+        with patch.object(RuntimeSettingsService, "DEFAULTS", patched):
+            # Схема собрана на импорте, поэтому сверяем не её, а сборщик:
+            # именно он отвечает клиенту.
+            with patch.object(
+                RuntimeSettingsService, "model_catalog", return_value=FAKE_CATALOG
+            ):
+                response = _settings_response(
+                    {
+                        "model": CHAT_ON_STAND,
+                        "chat_model": CHAT_ON_STAND,
+                        "embedding_model": EMBEDDING_ON_STAND,
+                        "enable_condense_query": True,
+                        "retrieval_top_k": 20,
+                        "top_k": 5,
+                        "default_domain_profile": "tax",
+                    }
+                )
+
+        self.assertEqual(response.chat_model_num_ctx, 12345)
 
 
 if __name__ == "__main__":  # pragma: no cover

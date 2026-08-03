@@ -404,6 +404,80 @@ class ReadRepairsUnknownValuesTests(SettingsPolicyTestCase):
 
         self.assertEqual(values["top_k"], RuntimeSettingsService.DEFAULTS["top_k"])
 
+    def test_a_word_meaning_no_no_longer_turns_a_heavy_feature_on(self):
+        """Главная проверка: bool непустой строки — это True.
+
+        Читалось `bool(value)`, поэтому "нет", "disabled" и "нет-нет" —
+        то есть ровно те слова, которыми функцию пытаются ВЫКЛЮЧИТЬ, —
+        включали её. И включали именно тяжёлое: реранкер гоняет модель на
+        каждый запрос, контекстное обогащение — на каждый чанк при индексации.
+        """
+        self.write_settings_file(
+            reranker_enabled="нет",
+            contextual_embedding_enabled="disabled",
+            reindex_required="нет-нет",
+        )
+
+        values = RuntimeSettingsService.get_settings()
+
+        self.assertFalse(values["reranker_enabled"])
+        self.assertFalse(values["contextual_embedding_enabled"])
+        self.assertFalse(values["reindex_required"])
+
+    def test_an_unreadable_flag_reads_as_that_fields_own_default(self):
+        """Не глобальное False, а умолчание поля.
+
+        У enable_condense_query умолчание True — функция включена намеренно.
+        Безусловное False чинило бы одно тихое включение ценой другого тихого
+        выключения; «значение непонятно» и «значения нет» — одно состояние
+        знания, и вести себя они обязаны одинаково.
+        """
+        self.write_settings_file(enable_condense_query="ага")
+
+        values = RuntimeSettingsService.get_settings()
+
+        self.assertIs(values["enable_condense_query"], True)
+        self.assertEqual(
+            values["enable_condense_query"],
+            RuntimeSettingsService.DEFAULTS["enable_condense_query"],
+        )
+
+    def test_an_unreadable_flag_is_never_silent(self):
+        """Предсказуемо И громко: подмена уходит тем же механизмом, что и
+        остальные подмены при чтении (_report_read_fallback)."""
+        self.write_settings_file(reranker_enabled="нет")
+
+        with self.assertLogs(LOGGER_NAME, level="WARNING") as captured:
+            RuntimeSettingsService.get_settings()
+
+        message = "\n".join(captured.output)
+        self.assertIn("reranker_enabled", message)
+        self.assertIn("нет", message)
+
+    def test_an_unreadable_flag_does_not_break_reading(self):
+        """Это путь ЧТЕНИЯ: падать нельзя ни на чём.
+
+        get_settings зовут чат, поиск, индексация и сам экран настроек —
+        отказ погасил бы в том числе экран, на котором флаг исправляют.
+        """
+        self.write_settings_file(reranker_enabled={"не": "логическое"})
+
+        values = RuntimeSettingsService.get_settings()
+
+        self.assertFalse(values["reranker_enabled"])
+        # Остальные настройки прочитались как ни в чём не бывало.
+        self.assertEqual(values["top_k"], RuntimeSettingsService.DEFAULTS["top_k"])
+
+    def test_words_that_do_mean_a_boolean_are_still_read_on_read(self):
+        """Снисходительность к понятным словам осталась: _TRUE_WORDS и
+        _FALSE_WORDS общие у чтения и у записи."""
+        self.write_settings_file(reranker_enabled="yes", enable_condense_query="off")
+
+        values = RuntimeSettingsService.get_settings()
+
+        self.assertIs(values["reranker_enabled"], True)
+        self.assertIs(values["enable_condense_query"], False)
+
     def test_a_model_that_left_ollama_is_still_returned_as_it_is(self):
         """Каталог при чтении не спрашивается вовсе.
 

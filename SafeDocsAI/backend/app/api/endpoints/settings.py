@@ -2,13 +2,14 @@ import logging
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, text
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api import deps
+from app.api.endpoints.documents import MAX_PAGE_SIZE, TOTAL_COUNT_HEADER
 from app.domain_profiles import list_domain_profiles
 from app.core.database import get_session
 from app.core.exceptions import ApiError, SettingsErrors
@@ -18,6 +19,46 @@ from app.shared.settings import RuntimeSettingsService
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Страница по умолчанию равна потолку намеренно — как в GET /notebooks/ и
+# GET /notes/: клиент этого списка (SettingsPage.jsx) параметров не передаёт,
+# и любой меньший размер молча урезал бы уже отдаваемый список — админ увидел
+# бы часть пользователей и не узнал бы, что видит не всех. Потолок при этом
+# закрывает главное: выгрузку всей таблицы user одним запросом.
+DEFAULT_PAGE_SIZE = MAX_PAGE_SIZE
+
+
+# Умолчания настроек — из ОДНОГО места, RuntimeSettingsService.DEFAULTS.
+#
+# Значения 20000, 8192, False и имена моделей были выписаны трижды: в DEFAULTS
+# (настоящий источник — оттуда их берут и чтение, и сброс) и дважды здесь, в
+# схеме ответа и в сборщике _settings_response. Совпадали они только пока их не
+# правили: правка одного места разъезжается с двумя другими молча, без единой
+# ошибки, и наружу выходит умолчание, с которым система не работает. Ровно этот
+# класс дефекта раздел уже ловил — см. комментарий к выводу "model" из
+# chat_model в RuntimeSettingsService.get_settings.
+#
+# Подстановка идёт по тому же ключу, под которым настройка лежит в файле
+# настроек, поэтому опечатка в имени поля здесь — это KeyError, а не тихо
+# разъехавшееся умолчание.
+#
+# Псевдонима вроде `_DEFAULTS = RuntimeSettingsService.DEFAULTS` здесь
+# намеренно нет: он привязался бы к объекту словаря на импорте, и подмена
+# самого атрибута класса (тесты, скрипт, будущая загрузка умолчаний из
+# конфигурации) мимо него бы прошла. Помощник ниже читает атрибут в момент
+# вызова.
+def _default(field: str) -> Any:
+    """Умолчание настройки. Источник один — RuntimeSettingsService.DEFAULTS."""
+    return RuntimeSettingsService.DEFAULTS[field]
+
+
+def _setting(values: dict[str, Any], field: str) -> Any:
+    """Значение настройки из прочитанного файла, с откатом на её умолчание.
+
+    Имя поля пишется один раз: в `values.get("x", DEFAULTS["x"])` разъехаться
+    могли не только значения, но и сами ключи.
+    """
+    return values.get(field, _default(field))
 
 
 class RuntimeSettingsResponse(BaseModel):
@@ -34,16 +75,19 @@ class RuntimeSettingsResponse(BaseModel):
     ollama_available: bool
     ollama_error: str | None = None
     available_domain_profiles: list[str]
-    contextual_embedding_enabled: bool = False
-    contextual_embedding_model: str = ""
-    chat_model_num_ctx: int = 20000
-    contextual_embedding_num_ctx: int = 8192
-    reranker_enabled: bool = False
-    reranker_model: str = "gemma4:e4b"
+    # Умолчания полей взяты из RuntimeSettingsService.DEFAULTS, а не выписаны
+    # литералами: контракт OpenAPI при этом не меняется — в схему попадают те
+    # же значения, только теперь они гарантированно те же, что отдаёт сервер.
+    contextual_embedding_enabled: bool = _default("contextual_embedding_enabled")
+    contextual_embedding_model: str = _default("contextual_embedding_model")
+    chat_model_num_ctx: int = _default("chat_model_num_ctx")
+    contextual_embedding_num_ctx: int = _default("contextual_embedding_num_ctx")
+    reranker_enabled: bool = _default("reranker_enabled")
+    reranker_model: str = _default("reranker_model")
     # Векторы посчитаны прежней embedding-моделью: поиск идёт по коллекции,
     # которую ещё не заполнили. Флаг жил в файле настроек, но наружу не
     # выходил — интерфейс не мог даже показать, что индекс просрочен.
-    reindex_required: bool = False
+    reindex_required: bool = _default("reindex_required")
 
 
 class RuntimeSettingsUpdate(BaseModel):
@@ -159,6 +203,14 @@ def _settings_response(values: dict[str, Any]) -> RuntimeSettingsResponse:
     Один сборщик на GET, PUT и сброс: три копии этого списка полей разъедутся
     на первой же новой настройке, и клиент получит от разных эндпоинтов разную
     форму одного и того же объекта.
+
+    Умолчания подставляет _setting — из RuntimeSettingsService.DEFAULTS, а не
+    литералами: второй копии этих значений здесь больше нет. Сработать откату
+    вообще-то не на чем (все три вызывающих приходят из get_settings, а тот
+    отдаёт полный набор ключей при любом состоянии диска — см. его docstring),
+    но оставлен он затем, что этот сборщик — единственное, что стоит между
+    настройками и ответом клиенту: падать здесь по KeyError значит погасить
+    экран настроек целиком.
     """
     model_catalog = RuntimeSettingsService.model_catalog()
     return RuntimeSettingsResponse(
@@ -175,13 +227,13 @@ def _settings_response(values: dict[str, Any]) -> RuntimeSettingsResponse:
         ollama_available=model_catalog["ollama_available"],
         ollama_error=model_catalog["ollama_error"],
         available_domain_profiles=list_domain_profiles(),
-        contextual_embedding_enabled=values.get("contextual_embedding_enabled", False),
-        contextual_embedding_model=values.get("contextual_embedding_model", ""),
-        chat_model_num_ctx=values.get("chat_model_num_ctx", 20000),
-        contextual_embedding_num_ctx=values.get("contextual_embedding_num_ctx", 8192),
-        reranker_enabled=values.get("reranker_enabled", False),
-        reranker_model=values.get("reranker_model", "gemma4:e4b"),
-        reindex_required=bool(values.get("reindex_required", False)),
+        contextual_embedding_enabled=_setting(values, "contextual_embedding_enabled"),
+        contextual_embedding_model=_setting(values, "contextual_embedding_model"),
+        chat_model_num_ctx=_setting(values, "chat_model_num_ctx"),
+        contextual_embedding_num_ctx=_setting(values, "contextual_embedding_num_ctx"),
+        reranker_enabled=_setting(values, "reranker_enabled"),
+        reranker_model=_setting(values, "reranker_model"),
+        reindex_required=bool(_setting(values, "reindex_required")),
     )
 
 
@@ -249,13 +301,60 @@ async def reset_runtime_settings(
     return _settings_response(restored)
 
 
-@router.get("/users", response_model=list[UserRoleItem])
+@router.get(
+    "/users",
+    response_model=list[UserRoleItem],
+    responses={
+        200: {
+            "headers": {
+                TOTAL_COUNT_HEADER: {
+                    "description": (
+                        "Общее число пользователей в системе, без учёта "
+                        "skip/limit."
+                    ),
+                    "schema": {"type": "integer"},
+                }
+            }
+        }
+    },
+)
 async def list_users_for_role_management(
+    response: Response,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     current_user: User = Depends(deps.get_current_active_superuser),
     session: AsyncSession = Depends(get_session),
 ) -> Any:
-    result = await session.exec(select(User).order_by(User.created_at.desc()))
+    """Страница пользователей для управления ролями, свежие сверху.
+
+    Отдавалась вся таблица user одним запросом, без потолка вообще: экран
+    админский, но растёт он вместе с числом регистраций, а интерфейс не мог
+    даже показать общее число — в теле его нет, а тело и есть весь ответ.
+
+    Пагинация ровно та же, что у GET /sources/, /notebooks/ и /notes/: skip,
+    limit и общее число заголовком X-Total-Count. Тело осталось голым массивом
+    UserRoleItem, поэтому клиент, не знающий о пагинации, ничего не заметил —
+    менять форму ответа здесь нельзя, её читают как массив.
+
+    Порядок — created_at DESC, id DESC. Второй ключ обязателен: без него
+    пользователи, созданные в одну миллисекунду (а регистрации идут пачками, и
+    тестовые пользователи заводятся скриптом), встают между запросами в разном
+    порядке — одна и та же запись показывается на двух соседних страницах, а
+    другая не показывается ни на одной.
+    """
+    page = (
+        select(User)
+        .order_by(User.created_at.desc(), User.id.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await session.exec(page)
     users = result.all()
+
+    # COUNT(*) отдельным запросом, а не len(users): нужно число ВСЕХ
+    # пользователей, а не тех, что попали на страницу.
+    total_result = await session.exec(select(func.count()).select_from(User))
+    response.headers[TOTAL_COUNT_HEADER] = str(int(total_result.first() or 0))
     return [
         UserRoleItem(
             id=user.id,
