@@ -12,10 +12,11 @@ import AdminLogsPage from './pages/AdminLogsPage';
 import NotebooksPage from './pages/NotebooksPage';
 import NotebookLayout from './pages/NotebookLayout';
 import NotebookOverviewPage from './pages/NotebookOverviewPage';
+import NotebookPresentationsPage from './pages/NotebookPresentationsPage';
 import SettingsPage from './pages/SettingsPage';
 
 import RegisterPage from './pages/RegisterPage';
-import RequireAdmin from './components/auth/RequireAdmin';
+import RequireAdmin, { RequireContentAccess } from './components/auth/RequireAdmin';
 import { hasActiveSession } from './services/api';
 
 // Токены лежат в httpOnly-куках и из JS не читаются, поэтому признаком входа
@@ -64,6 +65,14 @@ function App() {
                 <Route path="chat" element={<NotebookChatRoute />} />
                 <Route path="sources" element={<NotebookSourcesRoute />} />
                 <Route path="notes" element={<NotebookNotesRoute />} />
+                {/* Презентации бэкенд отдаёт контент-менеджеру и админу
+                    (presentation.role_not_allowed остальным). Гард здесь
+                    ничего не разрешает: он лишь заменяет форму, из которой всё
+                    равно ничего не отправится, на объяснение — прямой заход по
+                    адресу пользовательской ролью упирается именно в него. */}
+                <Route element={<RequireContentAccess />}>
+                  <Route path="presentations" element={<NotebookPresentationsPage />} />
+                </Route>
               </Route>
               <Route path="admin/sources" element={<AdminSourcesPage />} />
               <Route path="admin/documents" element={<Navigate to="/admin/sources" replace />} />

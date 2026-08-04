@@ -31,6 +31,7 @@ from app.api.endpoints import (
     ask,
     logs,
     analytics,
+    presentations,
     settings as runtime_settings,
 )
 
@@ -272,6 +273,14 @@ app.include_router(
 )
 app.include_router(
     runtime_settings.router, prefix=f"{settings.API_V1_STR}/settings", tags=["settings"]
+)
+# Единственный роутер раздела, подключённый БЕЗ собственного префикса: его пути
+# живут в двух пространствах сразу — заказ и список привязаны к блокноту
+# (/notebooks/{id}/presentations), а сама колода адресуется своим id
+# (/presentations/{id}). Разрезать его на два роутера значило бы развести по
+# файлам ответы одного и того же контракта.
+app.include_router(
+    presentations.router, prefix=settings.API_V1_STR, tags=["presentations"]
 )
 
 

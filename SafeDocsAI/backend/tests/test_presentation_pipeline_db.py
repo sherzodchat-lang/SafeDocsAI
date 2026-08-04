@@ -31,11 +31,13 @@ from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 
 from app.core.exceptions import ExternalServiceError, PresentationErrors  # noqa: E402
 from app.modules.presentations.constants import (  # noqa: E402
+    SLIDE_COUNT_MIN,
     STATUS_ERROR,
     STATUS_GENERATING,
     STATUS_QUEUED,
     STATUS_READY,
 )
+from app.modules.presentations.llm_schemas import content_section_count  # noqa: E402
 from app.modules.presentations import service as presentation_service  # noqa: E402
 from app.modules.presentations.worker import PresentationWorker  # noqa: E402
 from app.shared.models import (  # noqa: E402
@@ -49,14 +51,24 @@ from app.shared.settings.config import settings as app_settings  # noqa: E402
 
 EMBEDDING_MODEL = "qwen3-embedding:8b"
 
+# Заказ ровно на нижней границе допустимого (SLIDE_COUNT_MIN): самая короткая
+# колода, которую вообще можно заказать через API, — значит и самый дешёвый
+# прогон полного пайплайна. Число секций в плане отсюда же выводится, а не
+# выписано: разъедься они, план не прошёл бы валидацию, и тест ловил бы это
+# как «модель вернула не то».
+DECK_SLIDES = SLIDE_COUNT_MIN
+
+PLAN_SECTIONS = [
+    {"heading": "Кто имеет право", "search_query": "право на льготу"},
+    {"heading": "Как оформить", "search_query": "порядок оформления"},
+    {"heading": "Куда обращаться", "search_query": "куда обращаться"},
+]
+assert len(PLAN_SECTIONS) == content_section_count(DECK_SLIDES), (
+    "план фикстуры разошёлся с числом слайдов заказа"
+)
+
 PLAN_JSON = json.dumps(
-    {
-        "title": "Налоговые льготы",
-        "sections": [
-            {"heading": "Кто имеет право", "search_query": "право на льготу"},
-            {"heading": "Как оформить", "search_query": "порядок оформления"},
-        ],
-    },
+    {"title": "Налоговые льготы", "sections": PLAN_SECTIONS},
     ensure_ascii=False,
 )
 
@@ -203,7 +215,7 @@ class PresentationPipelineTestCase(DatabaseBackedTestCase):
             "owner_id": self.user.id,
             "template_key": "classic",
             "language": "ru",
-            "slide_count": 4,
+            "slide_count": DECK_SLIDES,
             "description": "Обзор льгот",
             "status": STATUS_QUEUED,
         }
@@ -233,6 +245,7 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
                 PLAN_JSON,
                 slide_json("Кто имеет право", ["Первый факт", "Второй факт"], 1),
                 slide_json("Как оформить", ["Третий факт", "Четвёртый факт"], 2),
+                slide_json("Куда обращаться", ["Пятый факт", "Шестой факт"], 3),
             ]
         )
         await self.prepare()
@@ -290,16 +303,17 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
         self.assertIn("Налоги", texts[0])  # имя блокнота
         self.assertIn("Кто имеет право", texts[1])
         self.assertIn("Как оформить", texts[2])
-        self.assertIn("Источники", texts[3])
+        self.assertIn("Куда обращаться", texts[3])
+        self.assertIn("Источники", texts[-1])
         # Уникальные документы с именами и страницами.
-        self.assertIn("Кодекс.pdf", texts[3])
-        self.assertIn("стр. 7", texts[3])
+        self.assertIn("Кодекс.pdf", texts[-1])
+        self.assertIn("стр. 7", texts[-1])
 
     async def test_digest_of_written_bullets_reaches_the_next_slide(self):
         """Мера 2: слайд-вызов видит, что уже сказано на предыдущих."""
         await self.run_one_job()
 
-        plan_call, first_slide, second_slide = self.model_calls
+        plan_call, first_slide, second_slide, _third_slide = self.model_calls
         self.assertNotIn("already_written", first_slide[1]["content"])
         self.assertIn("<already_written>", second_slide[1]["content"])
         self.assertIn("- Первый факт", second_slide[1]["content"])
@@ -314,7 +328,10 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
         # Первый вызов — обзорный под план, дальше по одному на секцию.
         self.assertEqual(
             self.retrieval_queries,
-            ["Обзор льгот", "право на льготу", "порядок оформления"],
+            [
+                "Обзор льгот",
+                *[section["search_query"] for section in PLAN_SECTIONS],
+            ],
         )
 
     async def test_journal_records_the_order_and_its_outcome(self):
@@ -416,6 +433,7 @@ class FailureTests(PresentationPipelineTestCase):
                 PLAN_JSON,
                 slide_json("Кто имеет право", ["Факт", "Ещё факт"], 1),
                 slide_json("Как оформить", ["Факт", "Ещё факт"], 2),
+                slide_json("Куда обращаться", ["Факт", "Ещё факт"], 3),
             ]
         )
         await self.prepare()
@@ -430,6 +448,7 @@ class FailureTests(PresentationPipelineTestCase):
                 PLAN_JSON,
                 slide_json("Кто имеет право", ["Факт", "Ещё факт"], 1),
                 slide_json("Как оформить", ["Факт", "Ещё факт"], 2),
+                slide_json("Куда обращаться", ["Факт", "Ещё факт"], 3),
             ]
         )
         await self.prepare()

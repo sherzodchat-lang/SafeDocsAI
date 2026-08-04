@@ -145,6 +145,32 @@ const ERROR_CODE_KEYS = {
     // Клиент повторяет тот же запрос с confirm_reindex=true.
     'settings.reindex_confirmation_required': 'settings.errors.reindexConfirmationRequired',
     'settings.invalid_value': 'settings.errors.invalidValue',
+    // Раздел презентаций (backend/app/core/exceptions.py, PresentationErrors —
+    // и коды HTTP-слоя того же префикса). Свой префикс и свои ключи: «в
+    // блокноте нет источников» для презентации — не то же самое, что ошибка
+    // индексации источника, и действие пользователю нужно другое.
+    //
+    // Отказы запроса: роль, состав заказа, конфликты состояния.
+    'presentation.role_not_allowed': 'presentations.errors.roleNotAllowed',
+    'presentation.unsupported_template': 'presentations.errors.unsupportedTemplate',
+    'presentation.unsupported_language': 'presentations.errors.unsupportedLanguage',
+    'presentation.value_out_of_range': 'presentations.errors.valueOutOfRange',
+    'presentation.description_too_long': 'presentations.errors.descriptionTooLong',
+    'presentation.generation_in_progress': 'presentations.errors.generationInProgress',
+    'presentation.not_ready': 'presentations.errors.notReady',
+    'presentation.file_missing': 'presentations.errors.fileMissing',
+    // 404 на чужую или несуществующую колоду. Свой код, а не source.not_found:
+    // тот переводится как «источник не найден» — неверный текст на экране
+    // презентаций.
+    'presentation.not_found': 'presentations.errors.notFound',
+    // Коды ПАЙПЛАЙНА приходят не в HTTP-ответе, а в поле presentation.error_code
+    // — ровно как source.indexing_failed у источников, — но проходят через ту же
+    // таблицу: реестр кодов у бэкенда один (см. resolveErrorCodeMessage).
+    // no_sources живёт по обе стороны: им отвечает и запрос, и воркер.
+    'presentation.no_sources': 'presentations.errors.noSources',
+    'presentation.generation_failed': 'presentations.errors.generationFailed',
+    'presentation.generation_timeout': 'presentations.errors.generationTimeout',
+    'presentation.ollama_unavailable': 'presentations.errors.ollamaUnavailable',
     // Журнал запросов живёт отдельной сущностью и своим префиксом
     // (backend/app/core/exceptions.py, LogErrors), поэтому и ключ перевода свой:
     // «запись журнала не найдена» — не то же самое, что «источник не найден».

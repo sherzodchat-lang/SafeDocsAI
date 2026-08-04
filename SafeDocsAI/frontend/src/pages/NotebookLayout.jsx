@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Outlet, useNavigate, useParams } from 'react-router-dom';
+import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 
 import { useNotebookHeader } from '../components/layout/NotebookHeaderContext';
 import NotebookEditDialog from '../components/notebook/NotebookEditDialog';
 import { useSources, useSourcesActions } from '../contexts/SourcesContext';
+import { useSessionRole } from '../hooks/useSessionRole';
 import { useLocale } from '../i18n';
+import { cn } from '../lib/utils';
 import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
 import { notebooksService } from '../services/notebooksService';
@@ -28,6 +30,23 @@ const clearNotebookLocalState = (notebookId) => {
     .filter((key) => key.startsWith(CHAT_HISTORY_STORAGE_PREFIX) && key.endsWith(chatHistorySuffix))
     .forEach((key) => localStorage.removeItem(key));
 };
+
+/**
+ * Разделы блокнота. Маршруты у них были и раньше, а перехода — нет: в источники
+ * и заметки вели ссылки со дна панелей рабочего пространства, и найти их можно
+ * было, только зная, что они там есть. Презентации так не открыть вовсе,
+ * поэтому разделы собраны в одну полосу вкладок над содержимым.
+ *
+ * contentOnly — вкладка контент-менеджера: пользовательской роли она не
+ * рисуется. Это не защита (её держит сервер и гард маршрута), а отсутствие
+ * тупика: ссылка, ведущая на «недостаточно прав», — не пункт меню.
+ */
+const NOTEBOOK_TABS = [
+  { path: '', labelKey: 'notebookTabs.overview' },
+  { path: 'sources', labelKey: 'notebookTabs.sources' },
+  { path: 'notes', labelKey: 'notebookTabs.notes' },
+  { path: 'presentations', labelKey: 'notebookTabs.presentations', contentOnly: true },
+];
 
 const readActiveNotebookId = () => {
   if (typeof window === 'undefined') return null;
@@ -57,7 +76,9 @@ const resolveLatestNotebookActivity = (notebook, sources, notes) => {
 const NotebookLayout = () => {
   const { notebookId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { locale, t } = useLocale();
+  const { canManageContent } = useSessionRole();
   const [notebook, setNotebook] = useState(null);
   const [notes, setNotes] = useState([]);
   const [notesLoading, setNotesLoading] = useState(true);
@@ -350,8 +371,40 @@ const NotebookLayout = () => {
     t,
   ]);
 
+  const notebookBasePath = notebookId ? `/notebooks/${notebookId}` : '';
+  const visibleTabs = NOTEBOOK_TABS.filter((tab) => !tab.contentOnly || canManageContent);
+
   return (
-    <div className="flex h-full min-h-0 flex-col gap-6">
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      {notebookBasePath ? (
+        <nav aria-label={t('notebookTabs.label')} className="flex flex-wrap gap-2">
+          {visibleTabs.map((tab) => {
+            const href = tab.path ? `${notebookBasePath}/${tab.path}` : notebookBasePath;
+            // Обзор — индексный маршрут, поэтому сравнение точное: без него он
+            // подсвечивался бы вместе с любой вложенной вкладкой.
+            const isActive = tab.path
+              ? location.pathname === href || location.pathname.startsWith(`${href}/`)
+              : location.pathname === notebookBasePath || location.pathname === `${notebookBasePath}/`;
+
+            return (
+              <Link
+                key={tab.labelKey}
+                to={href}
+                aria-current={isActive ? 'page' : undefined}
+                className={cn(
+                  'rounded-lg border px-3.5 py-1.5 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40 focus-visible:ring-offset-2',
+                  isActive
+                    ? 'border-[#1f3a60] bg-[#1f3a60] text-white'
+                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-[#1f3a60]',
+                )}
+              >
+                {t(tab.labelKey)}
+              </Link>
+            );
+          })}
+        </nav>
+      ) : null}
+
       <div className="min-h-0 flex-1">
         <Outlet context={contextValue} />
       </div>

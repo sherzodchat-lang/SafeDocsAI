@@ -8,10 +8,12 @@ presentations` (например, ради предела длины описа�
 """
 
 from app.modules.presentations.constants import (
+    DEFAULT_LANGUAGE,
     DESCRIPTION_MAX,
     LANGUAGE_RU,
     LANGUAGE_TJ,
     PRESENTATION_JOB_TIMEOUT,
+    SLIDE_COUNT_DEFAULT,
     SLIDE_COUNT_MAX,
     SLIDE_COUNT_MIN,
     SLIDE_RETRIEVAL_CANDIDATE_POOL,
@@ -39,6 +41,7 @@ from app.modules.presentations.llm_schemas import (
 )
 
 __all__ = [
+    "DEFAULT_LANGUAGE",
     "DESCRIPTION_MAX",
     "LANGUAGE_RU",
     "LANGUAGE_TJ",
@@ -49,6 +52,7 @@ __all__ = [
     "PresentationPlan",
     "PresentationSlide",
     "RENDERER_ADDED_SLIDES",
+    "SLIDE_COUNT_DEFAULT",
     "SLIDE_COUNT_MAX",
     "SLIDE_COUNT_MIN",
     "SLIDE_RETRIEVAL_CANDIDATE_POOL",
