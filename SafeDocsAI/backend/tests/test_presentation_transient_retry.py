@@ -12,11 +12,19 @@ available memory, evicting») и грузила её заново: 9 с, 20.7 с
 Второе, что здесь проверяется, — что отказ называет себя правдиво. Ollama была
 ЖИВА, а пользователь прочёл «Ollama недоступна» и пошёл к администратору
 поднимать поднятое.
+
+Третье — ЦЕНА повтора. После таймаута он идёт с паузой, после остальных
+временных отказов — немедленно. Пауза здесь никогда не выжидается по-настоящему:
+asyncio.sleep подменяется, и проверяется его АРГУМЕНТ. Тест, который честно
+спит тридцать секунд, проверяет не политику повтора, а терпение того, кто
+запустил набор.
 """
 
 from __future__ import annotations
 
+import asyncio
 import unittest
+from unittest.mock import patch
 
 import httpx
 import ollama
@@ -26,8 +34,12 @@ from app.core.exceptions import (
     ExternalServiceErrorKind,
     PresentationErrors,
 )
-from app.modules.presentations.constants import LLM_CALL_ATTEMPTS
+from app.modules.presentations.constants import (
+    LLM_CALL_ATTEMPTS,
+    LLM_RETRY_PAUSE_AFTER_TIMEOUT,
+)
 from app.modules.presentations.service import (
+    CallTimings,
     PresentationGenerationError,
     call_with_one_retry,
     error_code_for,
@@ -106,18 +118,39 @@ class FlakyModel:
         return self._answer
 
 
-async def call(model) -> object:
+async def call(model, *, validate=lambda raw: raw, timings=None) -> object:
     return await call_with_one_retry(
         model_manager=model,
         model="какая-нибудь",
         messages=[{"role": "user", "content": "вопрос"}],
-        validate=lambda raw: raw,
+        validate=validate,
         label="план",
         stage="план презентации",
+        timings=timings,
     )
 
 
-class TransientFailuresGetASecondCallTests(unittest.IsolatedAsyncioTestCase):
+class RetryPolicyTestCase(unittest.IsolatedAsyncioTestCase):
+    """Общая обвязка: пауза перед повтором записывается, а не выжидается.
+
+    Подменяется asyncio.sleep, а не константа паузы: проверять надо, что код
+    просит подождать И СКОЛЬКО, а не что он умеет не спать при нуле. Заодно эта
+    подмена возвращает набору его прежнюю скорость — без неё каждый повтор
+    после таймаута стоил бы полминуты стены.
+    """
+
+    def setUp(self) -> None:
+        self.slept: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            self.slept.append(seconds)
+
+        patcher = patch.object(asyncio, "sleep", fake_sleep)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class TransientFailuresGetASecondCallTests(RetryPolicyTestCase):
     async def test_a_timeout_on_the_first_attempt_does_not_kill_the_order(self) -> None:
         model = FlakyModel([wrap(httpx.ReadTimeout("timed out"))])
         self.assertEqual(await call(model), "ответ")
@@ -167,7 +200,144 @@ class TransientFailuresGetASecondCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0], seen[1])
 
 
-class ExhaustedRetriesTellTheTruthTests(unittest.IsolatedAsyncioTestCase):
+class ThePauseIsOnlyForTimeoutsTests(RetryPolicyTestCase):
+    """Повтор ждёт только там, где симптом — медленность.
+
+    Разница не косметическая. После таймаута немедленный повтор возвращается в
+    тот же затор: на приёмке Ollama грузила вытесненную модель 9 с, 20.7 с и
+    51.9 с, и вторая попытка, начатая сразу, сгорала так же, как первая, —
+    повтор формально был, а толку от него не было. После отказа СОЕДИНЕНИЯ и
+    после невалидного JSON ждать нечего: там либо отвечать некому, либо ответ
+    уже получен и он негодный. Пауза в этих двух случаях только замедлила бы
+    детект.
+    """
+
+    async def test_a_timeout_waits_before_the_second_call(self) -> None:
+        model = FlakyModel([wrap(httpx.ReadTimeout("timed out"))])
+
+        self.assertEqual(await call(model), "ответ")
+
+        self.assertEqual(model.attempts, 2)
+        self.assertEqual(self.slept, [LLM_RETRY_PAUSE_AFTER_TIMEOUT])
+
+    async def test_a_refused_connection_is_retried_immediately(self) -> None:
+        model = FlakyModel([wrap(httpx.ConnectError("refused"))])
+
+        self.assertEqual(await call(model), "ответ")
+
+        self.assertEqual(model.attempts, 2)
+        self.assertEqual(self.slept, [], "повтор после отказа связи ждал впустую")
+
+    async def test_an_invalid_answer_is_retried_immediately(self) -> None:
+        """Модель ответила сразу и ответила мусором — ждать нечего."""
+        from app.modules.presentations.llm_schemas import LlmResponseError
+
+        rejected: list[str] = []
+
+        def reject_once(raw: str) -> str:
+            rejected.append(raw)
+            if len(rejected) == 1:
+                raise LlmResponseError("не json")
+            return raw
+
+        model = FlakyModel([], answer="ответ")
+
+        self.assertEqual(await call(model, validate=reject_once), "ответ")
+
+        self.assertEqual(model.attempts, 2)
+        self.assertEqual(self.slept, [])
+
+    async def test_a_server_error_is_retried_immediately_too(self) -> None:
+        # 5xx — беда на стороне сервиса, а не затор: он либо уже починился, либо
+        # ответит тем же самым, и узнать это лучше сразу.
+        model = FlakyModel([wrap(ollama.ResponseError("boom", 503))])
+
+        self.assertEqual(await call(model), "ответ")
+
+        self.assertEqual(self.slept, [])
+
+    async def test_the_last_attempt_does_not_pause_before_giving_up(self) -> None:
+        """Пауза перед несуществующей попыткой — чистая задержка отказа.
+
+        Ждать после ПОСЛЕДНЕГО таймаута незачем: повторять уже нечего, а заказ
+        всё это время стоит в 'generating' и морочит голову пользователю.
+        """
+        model = FlakyModel([wrap(httpx.ReadTimeout("timed out"))] * LLM_CALL_ATTEMPTS)
+
+        with self.assertRaises(PresentationGenerationError):
+            await call(model)
+
+        self.assertEqual(model.attempts, LLM_CALL_ATTEMPTS)
+        self.assertEqual(len(self.slept), LLM_CALL_ATTEMPTS - 1)
+
+    async def test_the_pause_is_not_counted_as_call_time(self) -> None:
+        """Пауза — не длительность вызова, и в замеры попадать не должна.
+
+        Попади она туда, p50 и max поехали бы на тридцать секунд, а ровное
+        число в графе max перестало бы читаться как «сработал чей-то потолок» —
+        то есть сломался бы единственный признак, по которому в логе видно, что
+        заказ упёрся в границу, а не был медленным.
+
+        Пауза здесь подменена настоящим ожиданием, но КОРОТКИМ: без ожидания
+        разницу «внутри замера или снаружи» не увидеть вовсе, а настоящие
+        тридцать секунд проверяли бы терпение того, кто запустил набор.
+        Порог взят вчетверо меньше подменной паузы и на два порядка больше
+        самого вызова (подменённая модель отвечает мгновенно), так что ни та,
+        ни другая сторона не зависит от загрузки машины.
+        """
+        import time
+
+        pause_seconds = 0.2
+
+        async def slow_fake_sleep(seconds: float) -> None:
+            self.slept.append(seconds)
+            time.sleep(pause_seconds)
+
+        timings = CallTimings()
+        model = FlakyModel([wrap(httpx.ReadTimeout("timed out"))])
+        with patch.object(asyncio, "sleep", slow_fake_sleep):
+            await call(model, timings=timings)
+
+        self.assertEqual(self.slept, [LLM_RETRY_PAUSE_AFTER_TIMEOUT])
+        self.assertEqual(len(timings.durations), 2)
+        for seconds in timings.durations:
+            self.assertLess(
+                seconds,
+                pause_seconds / 4,
+                "пауза перед повтором приписана вызову модели",
+            )
+
+
+class UnclassifiedFailuresAreLoudAndCountedTests(RetryPolicyTestCase):
+    """Причина не разобрана — повтора нет, и это обязано быть видно.
+
+    Такой отказ стоит заказу первой же попытки, а выглядит как рядовая ошибка
+    провайдера. Счётчик в статистической строке джобы — то место, где «одна
+    странная ошибка» превращается в «классификатор устарел».
+    """
+
+    async def test_an_unknown_failure_is_not_retried_and_gets_counted(self) -> None:
+        timings = CallTimings()
+        model = FlakyModel([ExternalServiceError("странное", service="Ollama")])
+
+        with self.assertRaises(ExternalServiceError):
+            await call(model, timings=timings)
+
+        self.assertEqual(model.attempts, 1, "неразобранную причину повторили")
+        self.assertEqual(timings.unclassified, 1)
+        self.assertIn("неклассифицированных 1", timings.summary())
+
+    async def test_a_classified_failure_does_not_touch_the_counter(self) -> None:
+        timings = CallTimings()
+        model = FlakyModel([wrap(httpx.ReadTimeout("timed out"))])
+
+        await call(model, timings=timings)
+
+        self.assertEqual(timings.unclassified, 0)
+        self.assertNotIn("неклассиф", timings.summary())
+
+
+class ExhaustedRetriesTellTheTruthTests(RetryPolicyTestCase):
     """Код отказа называет то, что случилось на самом деле."""
 
     async def test_a_timeout_that_survived_the_retries_is_not_unavailability(

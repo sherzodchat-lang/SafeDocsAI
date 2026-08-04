@@ -55,6 +55,7 @@ from app.modules.presentations.constants import (
     LLM_CALL_ATTEMPTS,
     LLM_CALL_TIMEOUT,
     LLM_CALL_WATCHDOG_TIMEOUT,
+    LLM_RETRY_PAUSE_AFTER_TIMEOUT,
     MAX_ERROR_TEXT,
     PLAN_RETRIEVAL_TOP_K,
     PRESENTATION_FILE_SUFFIX,
@@ -462,6 +463,7 @@ class CallTimings:
     plan_calls: int = 0
     slide_calls: int = 0
     retries: int = 0
+    unclassified: int = 0
 
     def record(self, *, stage: str, attempt: int, seconds: float) -> None:
         self.durations.append(seconds)
@@ -471,6 +473,19 @@ class CallTimings:
             self.slide_calls += 1
         if attempt > 1:
             self.retries += 1
+
+    def record_unclassified(self) -> None:
+        """Отказ провайдера, причину которого разобрать не удалось.
+
+        Считается отдельно от повторов, потому что означает не «стало медленно»,
+        а «классификатор устарел»: у такого отказа нет права на второй вызов
+        (см. ExternalServiceErrorKind.UNKNOWN), и заказ умирает с первой
+        попытки. Полный путь класса пишет сама обёртка провайдера
+        (ModelManager._wrap_provider_error) — на уровне ERROR; здесь остаётся
+        то, чего в отдельной строке лога не видно: сколько раз это случилось за
+        одну джобу.
+        """
+        self.unclassified += 1
 
     @staticmethod
     def percentile(values: list[float], share: float) -> float:
@@ -491,10 +506,20 @@ class CallTimings:
         """Одна строка: сколько вызовов, каких и как долго они шли."""
         if not self.durations:
             return "вызовов модели 0"
+        counters = (
+            f"план {self.plan_calls}, слайды {self.slide_calls}, "
+            f"повторных {self.retries}"
+        )
+        if self.unclassified:
+            # Только когда не ноль. Счётчик заведён ради ЗАМЕТНОСТИ: «причину
+            # отказа разобрать не смогли» — это отчёт о слепом пятне
+            # классификатора, а не рядовая метрика. Постоянный «0» в каждой
+            # строке журнала перестаёт читаться на второй неделе, и появление
+            # там единицы не заметит никто.
+            counters += f", неклассифицированных {self.unclassified}"
         return (
             f"вызовов модели {len(self.durations)} "
-            f"(план {self.plan_calls}, слайды {self.slide_calls}, "
-            f"повторных {self.retries}) -> "
+            f"({counters}) -> "
             f"p50 {self.percentile(self.durations, 0.5):.1f}с, "
             f"p90 {self.percentile(self.durations, 0.9):.1f}с, "
             f"max {max(self.durations):.1f}с, "
@@ -617,6 +642,14 @@ async def call_with_one_retry(
     модели») не повторяется: второй вызов вернёт тот же ответ, потратив вдвое
     больше времени.
 
+    Повтор НЕМЕДЛЕННЫЙ везде, кроме одного случая — таймаута вызова. Там
+    симптом — медленность, и повтор без паузы возвращается в тот же затор:
+    модель всё ещё грузится, и второй бюджет сгорает так же, как первый. Отсюда
+    LLM_RETRY_PAUSE_AFTER_TIMEOUT перед второй попыткой — и только после
+    таймаута. У отказа соединения и у невалидного JSON ждать нечего: там либо
+    отвечать некому, либо ответ уже получен и он негодный, — и пауза лишь
+    замедлила бы детект.
+
     Таймаут стоит ЗДЕСЬ, вокруг каждого обращения к модели, и у КАЖДОЙ попытки
     он свой: повтор — это отдельный вызов, который заново генерирует весь
     ответ, а не остаток первого. Общий на две попытки бюджет означал бы, что
@@ -637,14 +670,37 @@ async def call_with_one_retry(
     for attempt in range(1, LLM_CALL_ATTEMPTS + 1):
         started = perf_counter()
         try:
-            raw = await asyncio.wait_for(
-                model_manager.chat(
-                    model=model,
-                    messages=current_messages,
-                    num_ctx=PRESENTATION_NUM_CTX,
-                ),
-                timeout=LLM_CALL_WATCHDOG_TIMEOUT,
-            )
+            # Вложенный try — ради ГРАНИЦЫ ЗАМЕРА. Записать длительность обязан
+            # finally (вызов, снятый по таймауту, тоже попадает в статистику), а
+            # пауза перед повтором стоит ниже, в обработчике отказа. Оставь
+            # запись во внешнем finally — и пауза, которая вызовом не является,
+            # приписалась бы вызову: p50 и max поехали бы на её тридцать секунд,
+            # а ровное число в графе max перестало бы читаться как «сработал
+            # чей-то потолок».
+            try:
+                raw = await asyncio.wait_for(
+                    model_manager.chat(
+                        model=model,
+                        messages=current_messages,
+                        num_ctx=PRESENTATION_NUM_CTX,
+                    ),
+                    timeout=LLM_CALL_WATCHDOG_TIMEOUT,
+                )
+            finally:
+                # В статистику попадает и вызов, снятый по таймауту: его
+                # длительность известна и равна потолку, а строка с `max 300.0с`
+                # — единственное, по чему в логе видно, что заказ упёрся именно
+                # в потолок, а не просто был медленным.
+                #
+                # Ровное число в этой графе читается как «сработал чей-то
+                # потолок», и по нему же виден ЧЕЙ: 300 с — свой
+                # (LLM_CALL_TIMEOUT), 330 с — страховка wait_for, а всё прочее
+                # ровное (памятные 120 с) означает чужой потолок, пролезший в
+                # путь презентаций.
+                if timings is not None:
+                    timings.record(
+                        stage=stage, attempt=attempt, seconds=perf_counter() - started
+                    )
         except asyncio.TimeoutError as exc:
             logger.warning(
                 "Presentation %s: attempt %d hit the watchdog after %ss "
@@ -659,35 +715,42 @@ async def call_with_one_retry(
         except ExternalServiceError as exc:
             # Причина уже разобрана обёрткой провайдера
             # (ModelManager._wrap_provider_error) — здесь только политика.
+            if exc.kind == ExternalServiceErrorKind.UNKNOWN and timings is not None:
+                # Полный путь класса уже записан обёрткой на уровне ERROR.
+                # Здесь считается ЧАСТОТА: одна такая строка в журнале выглядит
+                # случайностью, а «неклассифицированных 13» в итоге джобы —
+                # это уже адрес работы.
+                timings.record_unclassified()
             if not exc.is_transient:
                 raise
             if attempt >= LLM_CALL_ATTEMPTS:
                 raise provider_error(stage, exc) from exc
+            pause = (
+                LLM_RETRY_PAUSE_AFTER_TIMEOUT
+                if exc.kind == ExternalServiceErrorKind.TIMEOUT
+                else 0
+            )
             logger.warning(
-                "Presentation %s: attempt %d failed transiently (%s: %s), retrying",
+                "Presentation %s: attempt %d failed transiently (%s: %s), %s",
                 label,
                 attempt,
                 exc.kind,
                 exc.message,
+                # Пауза названа в строке отказа, а не отдельным сообщением:
+                # иначе тридцатисекундная дыра в журнале выглядит зависанием
+                # воркера, и её идут искать.
+                f"retrying in {pause}s" if pause else "retrying immediately",
             )
+            if pause:
+                # Только после таймаута: там симптом — медленность, и повтор без
+                # паузы возвращается в тот же затор (наблюдённая перезагрузка
+                # модели шла до 51.9 с). При отказе соединения и невалидном JSON
+                # ждать нечего — пауза замедлила бы детект, ничего не починив.
+                await asyncio.sleep(pause)
             # Промпт остаётся ИСХОДНЫМ: ответа не было вовсе, предъявлять
             # модели нечего, а build_retry_messages рассчитан на разговор про
             # отвергнутый ответ.
             continue
-        finally:
-            # В статистику попадает и вызов, снятый по таймауту: его длительность
-            # известна и равна потолку, а строка с `max 300.0с` — единственное,
-            # по чему в логе видно, что заказ упёрся именно в потолок, а не
-            # просто был медленным.
-            #
-            # Ровное число в этой графе читается как «сработал чей-то потолок»,
-            # и по нему же виден ЧЕЙ: 300 с — свой (LLM_CALL_TIMEOUT), 330 с —
-            # страховка wait_for, а всё прочее ровное (памятные 120 с) означает
-            # чужой потолок, пролезший в путь презентаций.
-            if timings is not None:
-                timings.record(
-                    stage=stage, attempt=attempt, seconds=perf_counter() - started
-                )
         try:
             return validate(raw)
         except LlmResponseError as exc:

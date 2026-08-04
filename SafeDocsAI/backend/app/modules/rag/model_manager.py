@@ -1,8 +1,11 @@
 import json
+import logging
 from typing import Any, AsyncIterator, Sequence
+import urllib.error
 import urllib.request
 from urllib.parse import urljoin
 
+import httpx
 import ollama
 
 from app.core.exceptions import (
@@ -13,14 +16,48 @@ from app.core.exceptions import (
 from app.modules.rag.constants import DEFAULT_CHAT_MODEL
 from app.shared.settings.config import settings
 
-# Имена классов исключений, а не сами классы: httpx приходит транзитом через
-# ollama, а urllib и socket дают свои. Ловить по типу значило бы импортировать
-# сюда три чужие библиотеки и проглядеть четвёртую при смене клиента.
+logger = logging.getLogger(__name__)
+
+# ТИПЫ исключений, по которым разбирается причина отказа. httpx и ollama — уже
+# зависимости проекта (ollama тащит httpx за собой и им же ходит по сети), так
+# что импортировать их сюда честно, а не «протаскивать три чужие библиотеки».
 #
-# Разделение на две группы — это и есть то, что раньше было утеряно. Оба
-# набора дают 503 (см. _wrap_provider_error), но повторять их можно
-# по-разному, а рассказывать пользователю — тем более: «сервис не поднят» и
-# «сервис занят и не успел ответить» чинятся разными людьми.
+# Раньше здесь стояли ИМЕНА классов, и это было сознательным временным
+# решением с записанной слабостью: наследник с другим именем — httpx заводит их
+# каждую пару версий — молча падал в UNKNOWN, то есть в «не повторять», и
+# отличить новый вид отказа от настоящей экзотики было нельзя. isinstance
+# закрывает целые ветки иерархии разом: httpx.TimeoutException — это и
+# ReadTimeout, и PoolTimeout, и WriteTimeout, и всё, что от них произойдёт
+# завтра.
+#
+# Разделение на две группы — то, ради чего классификация и заведена. Оба набора
+# дают 503 (см. _wrap_provider_error), но повторять их можно по-разному, а
+# рассказывать пользователю — тем более: «сервис не поднят» и «сервис занят и не
+# успел ответить» чинятся разными людьми.
+#
+# Порядок групп значим: httpx.ConnectTimeout — наследник TimeoutException, но
+# считается НЕДОСТУПНОСТЬЮ. Соединение не установилось вовсе, то есть отвечать
+# было некому, и советовать пользователю «закажите колоду покороче» при
+# выключенном сервисе значило бы отправить его чинить не то.
+_UNAVAILABLE_TYPES = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.RemoteProtocolError,
+    ConnectionError,  # встроенный, вместе с ConnectionRefusedError
+    urllib.error.URLError,  # запасной путь embed() ходит через urllib
+)
+_TIMEOUT_TYPES = (
+    httpx.TimeoutException,  # ReadTimeout, WriteTimeout, PoolTimeout, ...
+    TimeoutError,  # он же asyncio.TimeoutError и socket.timeout
+)
+
+# ФОЛБЭК по именам — последний рубеж для экзотики. Не удалён вместе с переходом
+# на типы, потому что закрывает ровно то, чего isinstance закрыть не может:
+# исключение из библиотеки, которой здесь нет и не должно быть (urllib3,
+# requests у соседнего клиента, будущая замена ollama). Импортировать её ради
+# одной проверки — значит завести зависимость на пустом месте; не проверять
+# вовсе — значит отдать её в UNKNOWN, где повтора не бывает. Имена берутся те
+# же, что и раньше: пересечение с типами выше безвредно, а расхождение — нет.
 _CONNECTION_ERROR_NAMES = {
     "ConnectError",
     "ConnectTimeout",
@@ -38,18 +75,32 @@ _TIMEOUT_ERROR_NAMES = {
 }
 
 
-def _error_names(exc: Exception) -> set[str]:
-    """Имена самого исключения и того, что его породило.
+def _error_chain(exc: Exception) -> tuple[BaseException, ...]:
+    """Само исключение и то, что его породило.
 
     Цепочка нужна потому, что ollama оборачивает httpx: снаружи бывает
-    ResponseError, а причина отказа — в __cause__.
+    ResponseError, а причина отказа — в __cause__. Глубже одного звена не
+    ходим намеренно: дальше в __context__ попадает всё, что случилось рядом по
+    ходу обработки (запасной путь embed() перебирает три способа подряд), и
+    классификация начала бы отвечать про чужой отказ.
     """
-    names = {exc.__class__.__name__}
+    chain: list[BaseException] = [exc]
     for attr in ("__cause__", "__context__"):
         nested = getattr(exc, attr, None)
         if nested is not None:
-            names.add(nested.__class__.__name__)
-    return names
+            chain.append(nested)
+    return tuple(chain)
+
+
+def _error_path(exc: BaseException) -> str:
+    """Полный путь класса: module.QualName.
+
+    Именно полный: «TimeoutError» в логе не отвечает на вопрос, чей он —
+    встроенный, httpx'овый или чужого клиента, — а разбирают такую строку по
+    имени модуля.
+    """
+    kind = type(exc)
+    return f"{kind.__module__}.{kind.__qualname__}"
 
 
 def _classify_provider_error(exc: Exception) -> str:
@@ -57,16 +108,25 @@ def _classify_provider_error(exc: Exception) -> str:
 
     Порядок проверок значим: у ollama.ResponseError есть свой status_code, но
     в него же заворачиваются сетевые беды, поэтому сеть смотрится первой.
-    ConnectTimeout считается НЕДОСТУПНОСТЬЮ, а не таймаутом: соединение не
-    установилось вовсе, то есть отвечать было некому.
     """
-    names = _error_names(exc)
+    chain = _error_chain(exc)
+    if any(isinstance(item, _UNAVAILABLE_TYPES) for item in chain):
+        return ExternalServiceErrorKind.UNAVAILABLE
+    if any(isinstance(item, _TIMEOUT_TYPES) for item in chain):
+        return ExternalServiceErrorKind.TIMEOUT
+
+    names = {type(item).__name__ for item in chain}
     if names & _CONNECTION_ERROR_NAMES:
         return ExternalServiceErrorKind.UNAVAILABLE
     if names & _TIMEOUT_ERROR_NAMES:
         return ExternalServiceErrorKind.TIMEOUT
 
     status = getattr(exc, "status_code", None)
+    # Статус приносит ollama.ResponseError (у него -1 означает «сервер статуса
+    # не назвал» — отсюда проверка > 0). Читается через getattr, а не через
+    # isinstance: тот же атрибут выставляют обёртки соседних клиентов, и
+    # разбирать его стоит у всех, кто его дал, — сам факт наличия статуса уже
+    # означает, что до сервиса дошли и он ответил.
     if isinstance(status, int) and status > 0:
         # 5xx — беда на стороне Ollama (модель не влезла в память, воркер
         # умер), она проходит сама. 4xx — осмысленный отказ запросу («нет
@@ -162,6 +222,23 @@ class ModelManager:
         Ollama.
         """
         kind = _classify_provider_error(exc)
+        if kind == ExternalServiceErrorKind.UNKNOWN:
+            # ERROR, а не WARNING, и с полным путём класса. Неразобранная
+            # причина — это не «редкий отказ», а слепое пятно классификатора:
+            # повтора такому отказу не положено (см. ExternalServiceErrorKind),
+            # то есть заказ умирает с первой попытки, и чинится это добавлением
+            # типа в _UNAVAILABLE_TYPES/_TIMEOUT_TYPES выше. Чтобы добавить,
+            # надо знать ЧТО, — отсюда module.QualName всей цепочки, а не одно
+            # имя класса: снаружи часто стоит общая обёртка, а виновник лежит в
+            # __cause__.
+            logger.error(
+                "%s failure was not classified: %s. It will NOT be retried — "
+                "what exactly to repeat is unknown. Add the type to "
+                "_UNAVAILABLE_TYPES/_TIMEOUT_TYPES in "
+                "app/modules/rag/model_manager.py",
+                service,
+                ", ".join(_error_path(item) for item in _error_chain(exc)),
+            )
         status_code = 503 if kind in _UNAVAILABLE_KINDS else 502
         # Текст уезжает в presentation.error_text и в detail HTTP-ответов, то
         # есть его читает человек: он обязан совпадать с тем, что произошло.

@@ -7,8 +7,14 @@ PRESENTATION_JOB_TIMEOUT = 600, посчитанное для другой мо�
 Теперь калибруется одна величина — LLM_CALL_TIMEOUT на ОДИН вызов, — а потолок
 джобы считается из числа слайдов заказа.
 
+Второе, что здесь закреплено, — ПРАВИЛО, по которому формула собрана: каждый
+её член равен ВНЕШНЕЙ границе своей стадии, а не внутренней, которая «обычно
+срабатывает первой». У вызова модели границ две (клиентский LLM_CALL_TIMEOUT и
+страховка LLM_CALL_WATCHDOG_TIMEOUT), и формула, посчитанная по первой,
+занижала потолок ровно на те случаи, ради которых заведена вторая.
+
 Числа заказа в проверках не выписаны: они спрашиваются у констант. Тест на
-конкретные 2700 и 8700 краснел бы при честной перекалибровке потолка вызова и
+конкретные секунды краснел бы при честной перекалибровке потолка вызова и
 пропускал бы то единственное, ради чего заведён, — потерю связи между
 потолком джобы и размером заказа.
 """
@@ -20,6 +26,8 @@ import unittest
 from app.modules.presentations.constants import (
     LLM_CALL_ATTEMPTS,
     LLM_CALL_TIMEOUT,
+    LLM_CALL_WATCHDOG_TIMEOUT,
+    LLM_RETRY_PAUSE_AFTER_TIMEOUT,
     SLIDE_COUNT_MAX,
     SLIDE_COUNT_MIN,
     presentation_job_timeout,
@@ -54,24 +62,54 @@ class JobCeilingIsDerivedTests(unittest.TestCase):
         self.assertLess(ceilings[0], ceilings[-1])
 
     def test_ceiling_matches_the_declared_formula(self) -> None:
-        """(1 план + секции) × попытки × потолок вызова + буфер рендера."""
+        """Вызовы по ВНЕШНЕЙ границе + паузы повторов + стадия рендера."""
         for slide_count in (SLIDE_COUNT_MIN, SLIDE_COUNT_MAX):
             with self.subTest(slide_count=slide_count):
                 calls = 1 + content_section_count(slide_count)
                 expected = (
-                    calls * LLM_CALL_ATTEMPTS + 1
-                ) * LLM_CALL_TIMEOUT
+                    calls * LLM_CALL_ATTEMPTS * LLM_CALL_WATCHDOG_TIMEOUT
+                    + calls * (LLM_CALL_ATTEMPTS - 1) * LLM_RETRY_PAUSE_AFTER_TIMEOUT
+                    + LLM_CALL_TIMEOUT
+                )
                 self.assertEqual(presentation_job_timeout(slide_count), expected)
+
+    def test_every_term_is_the_outer_boundary_of_its_stage(self) -> None:
+        """Правило формулы: внешняя граница, а не «обычно срабатывающая».
+
+        У вызова модели границ две: клиент (LLM_CALL_TIMEOUT) и страховка
+        wait_for (LLM_CALL_WATCHDOG_TIMEOUT). В норме первым сдаётся клиент —
+        но именно «в норме»: страховка заведена ровно на тот случай, когда он
+        не сработал (разбор уже полученного тела, незакрытый поток), и тогда
+        стадия честно занимает watchdog. Потолок джобы, посчитанный по
+        внутренней границе, короче правды на разницу, помноженную на число
+        вызовов, — то есть ошибается в единственную запрещённую сторону.
+        """
+        self.assertGreater(
+            LLM_CALL_WATCHDOG_TIMEOUT,
+            LLM_CALL_TIMEOUT,
+            "проверка выродилась: у вызова перестало быть двух границ",
+        )
+        for slide_count in (SLIDE_COUNT_MIN, SLIDE_COUNT_MAX):
+            with self.subTest(slide_count=slide_count):
+                calls = 1 + content_section_count(slide_count)
+                self.assertGreaterEqual(
+                    presentation_job_timeout(slide_count),
+                    calls * LLM_CALL_ATTEMPTS * LLM_CALL_WATCHDOG_TIMEOUT,
+                    "вызовы заложены по внутренней границе клиента",
+                )
 
     def test_the_ceiling_covers_a_run_where_every_stage_hits_its_budget(self) -> None:
         """Заказ, у которого КАЖДАЯ стадия уложилась впритык, не снимается.
 
         Стадии перечисляются по одной, а не подставляются в формулу: так
-        проверка ловит забытый буфер рендера и сдвиг на единицу в числе секций,
-        то есть ровно те ошибки, из-за которых потолок джобы снимал бы заказ,
-        где ни один вызов сам по себе не нарушил свой бюджет. Это и была бы
-        ошибка в короткую сторону — та, ради устранения которой таймаут
-        опустили на уровень вызова.
+        проверка ловит забытую стадию рендера, забытые паузы повторов и сдвиг
+        на единицу в числе секций, то есть ровно те ошибки, из-за которых
+        потолок джобы снимал бы заказ, где ни один вызов сам по себе не нарушил
+        свой бюджет. Это и была бы ошибка в короткую сторону — та, ради
+        устранения которой таймаут опустили на уровень вызова.
+
+        Худший прогон здесь честный: каждая попытка досидела до ВНЕШНЕЙ границы
+        вызова, и каждый повтор был повтором после таймаута, то есть с паузой.
         """
         for slide_count in range(SLIDE_COUNT_MIN, SLIDE_COUNT_MAX + 1):
             with self.subTest(slide_count=slide_count):
@@ -80,10 +118,13 @@ class JobCeilingIsDerivedTests(unittest.TestCase):
                     f"секция {index + 1}"
                     for index in range(content_section_count(slide_count))
                 ]
-                worst_run = sum(
-                    LLM_CALL_ATTEMPTS * LLM_CALL_TIMEOUT for _ in stages
-                )
-                worst_run += LLM_CALL_TIMEOUT  # рендер
+                worst_run = 0
+                for _ in stages:
+                    worst_run += LLM_CALL_ATTEMPTS * LLM_CALL_WATCHDOG_TIMEOUT
+                    worst_run += (
+                        LLM_CALL_ATTEMPTS - 1
+                    ) * LLM_RETRY_PAUSE_AFTER_TIMEOUT
+                worst_run += LLM_CALL_TIMEOUT  # стадия рендера
                 self.assertGreaterEqual(
                     presentation_job_timeout(slide_count), worst_run
                 )
@@ -138,9 +179,38 @@ class CallTimeoutIsCalibratedTests(unittest.TestCase):
         self.assertGreater(LLM_CALL_ATTEMPTS, 1, "повторной попытки нет вовсе")
         calls = 1 + content_section_count(SLIDE_COUNT_MAX)
         without_render = presentation_job_timeout(SLIDE_COUNT_MAX) - LLM_CALL_TIMEOUT
+        without_pauses = without_render - calls * (
+            LLM_CALL_ATTEMPTS - 1
+        ) * LLM_RETRY_PAUSE_AFTER_TIMEOUT
         self.assertEqual(
-            without_render, calls * LLM_CALL_ATTEMPTS * LLM_CALL_TIMEOUT
+            without_pauses, calls * LLM_CALL_ATTEMPTS * LLM_CALL_WATCHDOG_TIMEOUT
         )
+
+    def test_the_retry_pause_is_a_term_of_the_formula(self) -> None:
+        """Пауза перед повтором проходит под тем же потолком, что и вызовы.
+
+        Забытая в формуле, она делает потолок короче правды ровно на себя,
+        помноженную на число повторов, — и снимает заказ, у которого каждая
+        стадия уложилась в свой бюджет. Проверка сравнивает потолок с тем же
+        потолком без пауз, а не с константой: перекалибровка паузы её не
+        покрасит, а вот исчезновение члена — покрасит.
+        """
+        self.assertGreater(
+            LLM_RETRY_PAUSE_AFTER_TIMEOUT, 0, "паузы перед повтором нет вовсе"
+        )
+        for slide_count in (SLIDE_COUNT_MIN, SLIDE_COUNT_MAX):
+            with self.subTest(slide_count=slide_count):
+                calls = 1 + content_section_count(slide_count)
+                pauses = (
+                    calls * (LLM_CALL_ATTEMPTS - 1) * LLM_RETRY_PAUSE_AFTER_TIMEOUT
+                )
+                self.assertGreaterEqual(
+                    presentation_job_timeout(slide_count)
+                    - calls * LLM_CALL_ATTEMPTS * LLM_CALL_WATCHDOG_TIMEOUT
+                    - LLM_CALL_TIMEOUT,
+                    pauses,
+                    "паузы повторов выпали из потолка джобы",
+                )
 
 
 class CallStatisticsTests(unittest.TestCase):
@@ -184,6 +254,37 @@ class CallStatisticsTests(unittest.TestCase):
 
     def test_summary_of_a_job_that_never_called_the_model(self) -> None:
         self.assertEqual(CallTimings().summary(), "вызовов модели 0")
+
+    def test_unclassified_failures_show_up_next_to_the_retries(self) -> None:
+        """Счётчик неразобранных причин — в той же строке, что и повторы.
+
+        Отдельного места для него нет намеренно: смотрят в лог джобы один раз и
+        одной строкой, а «повторных 0, неклассифицированных 3» читается сразу —
+        медленно не было, просто классификатор не понял, что произошло, и
+        повтора не случилось ни разу.
+        """
+        timings = CallTimings()
+        timings.record(stage="план презентации", attempt=1, seconds=12.0)
+        timings.record_unclassified()
+        timings.record_unclassified()
+
+        summary = timings.summary()
+        self.assertIn("неклассифицированных 2", summary)
+        # Рядом с повторами, а не в конце строки после замеров: обе величины
+        # отвечают на вопрос «что было с вызовами», а не «сколько они шли».
+        self.assertLess(summary.index("повторных"), summary.index("неклассиф"))
+        self.assertLess(summary.index("неклассиф"), summary.index("p50"))
+
+    def test_a_zero_counter_does_not_litter_the_line(self) -> None:
+        """Ноль не печатается — иначе счётчик перестаёт быть заметным.
+
+        Величина заведена ради РЕДКОГО события: постоянный «0» в каждой строке
+        журнала перестаёт читаться на второй неделе, и появление там единицы не
+        заметит никто.
+        """
+        timings = CallTimings()
+        timings.record(stage="план презентации", attempt=1, seconds=12.0)
+        self.assertNotIn("неклассиф", timings.summary())
 
 
 if __name__ == "__main__":  # pragma: no cover
