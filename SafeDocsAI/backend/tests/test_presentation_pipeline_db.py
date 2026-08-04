@@ -1,7 +1,12 @@
 """Пайплайн генерации презентации на настоящем PostgreSQL.
 
-Ollama и ChromaDB не поднимаются: подменены ретривал и ModelManager — ровно
-две внешние зависимости пайплайна. Всё остальное настоящее, включая рендер
+Ollama и ChromaDB не поднимаются: подменены ретривал и фабрика ModelManager
+(build_presentation_model_manager) — ровно две внешние зависимости пайплайна.
+Подменяется именно ФАБРИКА, а не класс: клиента пути презентаций строит она, и
+её же настоящую проверяет сторож связи потолков (tests/
+test_presentation_call_timeout_single_source.py).
+
+Всё остальное настоящее, включая рендер
 python-pptx, запись файла и строку в журнале блокнота: именно на стыке «файл
 на диске — строка в базе» и живут интересные ошибки.
 
@@ -14,6 +19,12 @@ python-pptx, запись файла и строку в журнале блок�
 * временный файл подчищается при любом исходе;
 * коды отказов: generation_failed, ollama_unavailable, generation_timeout —
   и то, что снятая таймаутом джоба не оставляет за собой файлов;
+* таймаут живёт на уровне ВЫЗОВА, а не джобы: зависший вызов снимается своим
+  бюджетом, повторная попытка имеет собственный, и error_text называет стадию
+  и номер слайда. Подменённая модель не ходит по HTTP, поэтому здесь работает
+  ВТОРОЙ эшелон — wait_for на LLM_CALL_WATCHDOG_TIMEOUT; в бою первым сдаётся
+  клиент со своим LLM_CALL_TIMEOUT, и это ровно тот случай, ради которого
+  страховка и оставлена: зависание, которого клиент не видит;
 * дайджест уже написанного доезжает до второго слайд-вызова (мера 2 правила
   «не добивать»).
 """
@@ -25,6 +36,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
+from time import perf_counter
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -38,6 +50,7 @@ from app.modules.presentations.constants import (  # noqa: E402
     STATUS_GENERATING,
     STATUS_QUEUED,
     STATUS_READY,
+    presentation_job_timeout,
 )
 from app.modules.presentations.llm_schemas import content_section_count  # noqa: E402
 from app.modules.presentations import service as presentation_service  # noqa: E402
@@ -183,7 +196,7 @@ class PresentationPipelineTestCase(DatabaseBackedTestCase):
     def use_model(self, responses: list) -> None:
         manager = FakeModelManager(responses, self.model_calls)
         patcher = patch.object(
-            presentation_service, "ModelManager", lambda: manager
+            presentation_service, "build_presentation_model_manager", lambda: manager
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -230,6 +243,23 @@ class PresentationPipelineTestCase(DatabaseBackedTestCase):
         row = await self.get_row(Presentation, self._presentation_id)
         self.assertIsNotNone(row)
         return row
+
+    async def run_pipeline(self, *, timings=None):
+        """Пайплайн напрямую, минуя цикл воркера.
+
+        Нужен там, где проверяется САМ вызов, а не запись исхода: воркер
+        заводит CallTimings внутри себя и наружу его не отдаёт, а отказ
+        превращает в строку 'error'. Захват при этом настоящий — строка обязана
+        быть в 'generating', иначе прогресс молча не пишется.
+        """
+        async with self.session_factory() as session:
+            claimed = await presentation_service.PresentationsService.claim_next(
+                session
+            )
+        self.assertEqual(claimed, self._presentation_id)
+        return await presentation_service.generate_presentation(
+            self._presentation_id, timings=timings
+        )
 
     async def prepare(self, **overrides) -> None:
         self._presentation_id = (await self.make_presentation(**overrides)).id
@@ -503,24 +533,26 @@ class FailureTests(PresentationPipelineTestCase):
         self.assertEqual(len(self.model_calls), 3)
 
     async def test_a_hanging_model_times_out_and_leaves_nothing_behind(self):
-        """Ollama приняла запрос и не ответила: джобу снимает таймаут.
+        """Ollama приняла запрос и не ответила: вызов снимает СВОЙ таймаут.
 
-        Что таймаут доезжает до строки кодом generation_timeout, проверено на
-        ПОДМЕНЁННОМ пайплайне (tests/test_presentation_queue_db.py): там речь о
-        цикле. Здесь пайплайн настоящий, и снимают его посреди вызова модели —
-        то есть внутри открытой сессии, после ретривала и до всякого файла.
-        Отмена приходит не исключением пайплайна, а извне, поэтому уборка,
-        которая ловит обычные отказы (`finally` вокруг временного файла,
-        откат сессии), обязана сработать и на ней.
+        Главное здесь — ЧЕЙ таймаут сработал. Потолок джобы не тронут и
+        остаётся настоящим (для колоды из SLIDE_COUNT_MIN слайдов это
+        presentation_job_timeout(5) = 2700 с): если бы зависший вызов ждал
+        его, тест не уложился бы и в сорок минут. Снят же заказ за доли
+        секунды — то есть по бюджету ОДНОГО вызова. Ровно это и было целью
+        переноса: повисший вызов на втором слайде из пятнадцати не должен
+        убивать заказ через двадцать минут.
 
-        Проверяется то, чего не проверяет тест на подменённом пайплайне:
-        после снятого таймаутом заказа на диске не осталось НИЧЕГО — ни колоды,
-        ни `.tmp-*`, — а строка не обещает файла (file_path пуст).
+        Заодно проверяется то, чего не проверяет тест на подменённом пайплайне
+        (tests/test_presentation_queue_db.py): здесь пайплайн настоящий, и
+        снимают его посреди вызова модели — внутри открытой сессии, после
+        ретривала и до всякого файла. После снятого заказа на диске не осталось
+        НИЧЕГО — ни колоды, ни `.tmp-*`, — а строка не обещает файла.
 
         Бюджет: подготовка до первого обращения к модели — несколько запросов к
-        PostgreSQL, единицы миллисекунд; таймаут взят на два порядка больше,
-        поэтому «не успели дойти до модели» здесь не случайность, а поломка, и
-        её ловит проверка entered ниже.
+        PostgreSQL, единицы миллисекунд; таймаут вызова взят на два порядка
+        больше, поэтому «не успели дойти до модели» здесь не случайность, а
+        поломка, и её ловит проверка entered ниже.
         """
         self.use_retrieval()
         entered: list[str] = []
@@ -531,18 +563,39 @@ class FailureTests(PresentationPipelineTestCase):
                 await asyncio.sleep(30)
                 raise AssertionError("висящий вызов не должен завершаться")
 
-        patcher = patch.object(presentation_service, "ModelManager", HangingModel)
+        patcher = patch.object(
+            presentation_service,
+            "build_presentation_model_manager",
+            lambda: HangingModel(),
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         await self.prepare()
 
-        with patch("app.modules.presentations.worker.PRESENTATION_JOB_TIMEOUT", 1.0):
+        started = perf_counter()
+        # Подменённая модель не ходит по HTTP, значит клиентскому таймауту
+        # (LLM_CALL_TIMEOUT) сработать не на чем — здесь проверяется именно
+        # СТРАХОВКА второго эшелона, wait_for. В бою у неё та же роль:
+        # зависание, которого клиент не видит по построению.
+        with patch.object(presentation_service, "LLM_CALL_WATCHDOG_TIMEOUT", 1.0):
             row = await self.run_one_job()
+        elapsed = perf_counter() - started
 
         self.assertEqual(entered, ["chat"], "до вызова модели дело не дошло")
+        # Порог с большим запасом к бюджету вызова (1 с) и с большим запасом
+        # ВНИЗ к тому, сколько ждал бы заказ, если бы его снимал не он:
+        # висящий вызов заготовлен на 30 с, потолок джобы — 2700 с.
+        self.assertLess(
+            elapsed,
+            10.0,
+            "заказ ждал общего потолка джобы "
+            f"({presentation_job_timeout(DECK_SLIDES):.0f} с), а не потолка вызова",
+        )
         self.assertEqual(row.status, STATUS_ERROR)
         self.assertEqual(row.error_code, PresentationErrors.GENERATION_TIMEOUT)
-        self.assertTrue(row.error_text)
+        # error_text называет СТАДИЮ: «не уложились во время» без стадии
+        # одинаково описывает и первую минуту, и предпоследнюю секцию.
+        self.assertIn(presentation_service.STAGE_PLAN, row.error_text)
         # Причина понятна пользователю и не тащит с собой ни трейсбека, ни
         # путей на сервере (error_text уходит клиенту вместе со статусом).
         self.assertNotIn("Traceback", row.error_text)
@@ -550,6 +603,120 @@ class FailureTests(PresentationPipelineTestCase):
         # И главное: диск чист, а строка ничего не обещает.
         self.assertIsNone(row.file_path)
         self.assertEqual(self.storage_files(), [])
+
+    async def test_a_hanging_slide_call_names_the_slide_in_the_error(self):
+        """Отказ по таймауту называет не только стадию, но и номер слайда.
+
+        План прошёл, повис второй слайд-вызов. Пользователь видит строку с
+        причиной рядом со статусом, и «слайд 2 из 3» — единственное, что
+        отличает её от такой же строки про первую минуту генерации.
+        """
+        self.use_retrieval()
+        answers = [PLAN_JSON, slide_json("Кто имеет право", ["Факт", "Ещё"], 1)]
+
+        class SlowOnTheSecondSlide:
+            async def chat(self, *, model=None, messages=None, num_ctx=None) -> str:
+                if answers:
+                    return answers.pop(0)
+                await asyncio.sleep(30)
+                raise AssertionError("висящий вызов не должен завершаться")
+
+        patcher = patch.object(
+            presentation_service,
+            "build_presentation_model_manager",
+            lambda: SlowOnTheSecondSlide(),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await self.prepare()
+
+        with patch.object(presentation_service, "LLM_CALL_WATCHDOG_TIMEOUT", 1.0):
+            row = await self.run_one_job()
+
+        self.assertEqual(row.error_code, PresentationErrors.GENERATION_TIMEOUT)
+        self.assertIn("слайд 2 из 3", row.error_text)
+        self.assertIn(PLAN_SECTIONS[1]["heading"], row.error_text)
+        self.assertEqual(self.storage_files(), [])
+
+    async def test_the_retry_gets_a_budget_of_its_own(self):
+        """Повтор — отдельный вызов, а не остаток бюджета первой попытки.
+
+        Он получает исходный промпт, отвергнутый ответ и претензию валидатора,
+        то есть генерирует ВЕСЬ ответ заново и стоит примерно столько же.
+        Общий на две попытки бюджет означал бы, что медленная первая попытка
+        съедает время второй: заказ падал бы по таймауту на попытке, которая
+        сама по себе была здоровой.
+
+        Бюджет теста: потолок вызова 0.5 с, первая попытка занимает 0.4 с из
+        них. При ОБЩЕМ бюджете второй попытке осталось бы 0.1 с; проверка ниже
+        требует от неё хотя бы 0.3 с — то есть промах втрое, а не на границе
+        точности таймера.
+        """
+        self.use_retrieval()
+        call_budget = 0.5
+        attempts: list[int] = []
+
+        class SlowThenHanging:
+            async def chat(self, *, model=None, messages=None, num_ctx=None) -> str:
+                attempts.append(len(attempts) + 1)
+                if len(attempts) == 1:
+                    await asyncio.sleep(call_budget * 0.8)
+                    return "это не JSON"  # валидатор отвергнет -> повтор
+                await asyncio.sleep(30)
+                raise AssertionError("висящий вызов не должен завершаться")
+
+        patcher = patch.object(
+            presentation_service,
+            "build_presentation_model_manager",
+            lambda: SlowThenHanging(),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await self.prepare()
+
+        timings = presentation_service.CallTimings()
+        with patch.object(
+            presentation_service, "LLM_CALL_WATCHDOG_TIMEOUT", call_budget
+        ):
+            with self.assertRaises(
+                presentation_service.PresentationGenerationError
+            ) as caught:
+                await self.run_pipeline(timings=timings)
+
+        self.assertEqual(attempts, [1, 2], "повторной попытки не было")
+        self.assertEqual(
+            caught.exception.error_code, PresentationErrors.GENERATION_TIMEOUT
+        )
+        self.assertEqual(timings.retries, 1)
+        self.assertGreaterEqual(
+            timings.durations[1],
+            call_budget * 0.6,
+            "повтор получил остаток бюджета первой попытки, а не свой",
+        )
+
+    async def test_call_timings_are_collected_for_the_statistics_line(self):
+        """Каждый вызов модели попадает в CallTimings, и план отличим от слайда."""
+        self.use_retrieval()
+        self.use_model(
+            [
+                PLAN_JSON,
+                slide_json("Кто имеет право", ["Факт", "Ещё факт"], 1),
+                slide_json("Как оформить", ["Факт", "Ещё факт"], 2),
+                slide_json("Куда обращаться", ["Факт", "Ещё факт"], 3),
+            ]
+        )
+        await self.prepare()
+
+        timings = presentation_service.CallTimings()
+        await self.run_pipeline(timings=timings)
+
+        self.assertEqual(timings.plan_calls, 1)
+        self.assertEqual(timings.slide_calls, len(PLAN_SECTIONS))
+        self.assertEqual(timings.retries, 0)
+        self.assertEqual(len(timings.durations), 1 + len(PLAN_SECTIONS))
+        summary = timings.summary()
+        self.assertIn("p50", summary)
+        self.assertIn("p90", summary)
 
     async def test_broken_render_leaves_no_files_behind(self):
         self.use_retrieval()

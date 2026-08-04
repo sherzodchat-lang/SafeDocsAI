@@ -16,7 +16,7 @@ import sys
 import unittest
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -24,10 +24,13 @@ from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 
 from app.core.exceptions import PresentationErrors  # noqa: E402
 from app.modules.presentations.constants import (  # noqa: E402
+    SLIDE_COUNT_MAX,
+    SLIDE_COUNT_MIN,
     STATUS_ERROR,
     STATUS_GENERATING,
     STATUS_QUEUED,
     STATUS_READY,
+    presentation_job_timeout,
 )
 from app.modules.presentations.service import (  # noqa: E402
     GenerationResult,
@@ -311,16 +314,24 @@ class RestartRecoveryTests(PresentationQueueTestCase):
 class WorkerLoopTests(PresentationQueueTestCase):
     """Цикл вокруг пайплайна: таймаут, устойчивость к падению джобы, FIFO."""
 
-    async def test_timeout_marks_the_row_with_its_own_code(self):
+    async def test_job_ceiling_marks_the_row_with_the_timeout_code(self):
+        """Потолок джобы — страховка от зависания МЕЖДУ стадиями.
+
+        Стадии ограничены сами (LLM_CALL_TIMEOUT, см.
+        tests/test_presentation_pipeline_db.py), и до этого потолка доходит
+        только беда, которой отдельный wait_for не видит: бесконечный цикл,
+        зависший ретривал, повисшее соединение с базой. Пайплайн здесь подменён
+        целиком — именно такую беду он и изображает.
+        """
         presentation = await self.make_presentation()
 
-        async def never_finishes(_presentation_id):
+        async def never_finishes(_presentation_id, **_kwargs):
             await asyncio.sleep(30)
 
         with patch(
             "app.modules.presentations.worker.generate_presentation", never_finishes
-        ), patch(
-            "app.modules.presentations.worker.PRESENTATION_JOB_TIMEOUT", 0.05
+        ), patch.object(
+            self.worker, "_job_ceiling", AsyncMock(return_value=0.05)
         ):
             self.assertTrue(await self.worker._claim_and_process())
 
@@ -328,6 +339,73 @@ class WorkerLoopTests(PresentationQueueTestCase):
         self.assertEqual(row.status, STATUS_ERROR)
         self.assertEqual(row.error_code, PresentationErrors.GENERATION_TIMEOUT)
         self.assertTrue(row.error_text)
+
+    async def test_job_ceiling_is_derived_from_the_order_and_logged_at_start(self):
+        """Потолок не назначен числом, а посчитан из slide_count заказа.
+
+        И посчитан он ДО первого await пайплайна: заказ на пять слайдов и заказ
+        на пятнадцать не имеют права ждать одинаково, а узнать, из чего взялся
+        потолок, должно быть можно из лога, а не из чтения constants.py.
+        """
+        presentation = await self.make_presentation(slide_count=SLIDE_COUNT_MIN)
+
+        with self.assertLogs("app.modules.presentations.worker", level="INFO") as logs:
+            ceiling = await self.worker._job_ceiling(presentation.id)
+
+        self.assertEqual(ceiling, presentation_job_timeout(SLIDE_COUNT_MIN))
+        self.assertLess(ceiling, presentation_job_timeout(SLIDE_COUNT_MAX))
+        start_line = next(
+            line for line in logs.output if "потолок джобы" in line
+        )
+        self.assertIn(str(SLIDE_COUNT_MIN), start_line)
+        self.assertIn(f"{ceiling:.0f}", start_line)
+
+    async def test_unreadable_order_falls_back_to_the_longest_deck(self):
+        """Ошибка в длинную сторону: недоступная база не укорачивает потолок."""
+        with patch(
+            "app.modules.presentations.worker.session_context",
+            side_effect=RuntimeError("db is down"),
+        ):
+            with self.assertLogs(
+                "app.modules.presentations.worker", level="WARNING"
+            ):
+                ceiling = await self.worker._job_ceiling(1)
+
+        self.assertEqual(ceiling, presentation_job_timeout(SLIDE_COUNT_MAX))
+
+    async def test_call_statistics_reach_the_log_of_every_job(self):
+        """p50/p90 по вызовам модели пишутся и у джобы, которая упала.
+
+        Ради этой строки CallTimings и заводит воркер, а не пайплайн: у
+        сорвавшейся джобы результата нет, а вызовы — есть, и смотрят в лог
+        именно на них.
+        """
+        presentation = await self.make_presentation()
+
+        async def records_calls(_presentation_id, *, timings=None):
+            timings.record(stage="план презентации", attempt=1, seconds=10.0)
+            for index, seconds in enumerate((20.0, 30.0, 40.0)):
+                timings.record(
+                    stage=f"слайд {index + 1} из 3", attempt=1, seconds=seconds
+                )
+            raise RuntimeError("модель выдала мусор")
+
+        with patch(
+            "app.modules.presentations.worker.generate_presentation", records_calls
+        ):
+            with self.assertLogs(
+                "app.modules.presentations.worker", level="INFO"
+            ) as logs:
+                self.assertTrue(await self.worker._claim_and_process())
+
+        stats_line = next(line for line in logs.output if "p50" in line)
+        self.assertIn("вызовов модели 4", stats_line)
+        self.assertIn("p50 20.0с", stats_line)
+        self.assertIn("p90 40.0с", stats_line)
+        self.assertIn(str(presentation.id), stats_line)
+        self.assertEqual(
+            (await self.reload(presentation.id)).status, STATUS_ERROR
+        )
 
     async def test_two_orders_run_one_at_a_time_in_the_order_they_were_placed(self):
         """FIFO и ПО ОДНОЙ — ради этого очередь и существует.
@@ -353,7 +431,7 @@ class WorkerLoopTests(PresentationQueueTestCase):
         running = 0
         peak = 0
 
-        async def slow(presentation_id):
+        async def slow(presentation_id, **_kwargs):
             nonlocal running, peak
             running += 1
             peak = max(peak, running)
@@ -396,7 +474,7 @@ class WorkerLoopTests(PresentationQueueTestCase):
         healthy = await self.make_presentation(created_at=now - timedelta(minutes=1))
         seen: list[int] = []
 
-        async def flaky(presentation_id):
+        async def flaky(presentation_id, **_kwargs):
             seen.append(presentation_id)
             if presentation_id == broken.id:
                 raise RuntimeError("модель выдала мусор")
@@ -449,7 +527,7 @@ class WorkerLoopTests(PresentationQueueTestCase):
         presentation = await self.make_presentation()
         started = asyncio.Event()
 
-        async def never_finishes(_presentation_id):
+        async def never_finishes(_presentation_id, **_kwargs):
             started.set()
             await asyncio.sleep(30)
 

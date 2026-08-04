@@ -46,6 +46,11 @@ env/
 chroma/
 data/chroma/
 
+# Собранные колоды: пользовательские данные, а не исходники. Путь задан
+# в constants.py (PRESENTATIONS_DIR) и наполняется в бою и на приёмке —
+# без этой строки .pptx попадали в индекс при первом же `git add -A`.
+data/presentations/
+
 # Logs
 *.log
 logs/

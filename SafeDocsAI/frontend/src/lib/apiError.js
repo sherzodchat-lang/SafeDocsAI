@@ -171,6 +171,10 @@ const ERROR_CODE_KEYS = {
     'presentation.generation_failed': 'presentations.errors.generationFailed',
     'presentation.generation_timeout': 'presentations.errors.generationTimeout',
     'presentation.ollama_unavailable': 'presentations.errors.ollamaUnavailable',
+    // Отдельно от ollama_unavailable: сервис жив, но не успел ответить (модель
+    // выгружали и грузили заново). Тексты разные потому, что разные действия:
+    // там — «сообщите администратору», здесь — «повторите заказ, можно короче».
+    'presentation.llm_timeout': 'presentations.errors.llmTimeout',
     // Журнал запросов живёт отдельной сущностью и своим префиксом
     // (backend/app/core/exceptions.py, LogErrors), поэтому и ключ перевода свой:
     // «запись журнала не найдена» — не то же самое, что «источник не найден».

@@ -5,32 +5,112 @@ from urllib.parse import urljoin
 
 import ollama
 
-from app.core.exceptions import EmbeddingModelNotConfigured, ExternalServiceError
+from app.core.exceptions import (
+    EmbeddingModelNotConfigured,
+    ExternalServiceError,
+    ExternalServiceErrorKind,
+)
 from app.modules.rag.constants import DEFAULT_CHAT_MODEL
 from app.shared.settings.config import settings
 
+# Имена классов исключений, а не сами классы: httpx приходит транзитом через
+# ollama, а urllib и socket дают свои. Ловить по типу значило бы импортировать
+# сюда три чужие библиотеки и проглядеть четвёртую при смене клиента.
+#
+# Разделение на две группы — это и есть то, что раньше было утеряно. Оба
+# набора дают 503 (см. _wrap_provider_error), но повторять их можно
+# по-разному, а рассказывать пользователю — тем более: «сервис не поднят» и
+# «сервис занят и не успел ответить» чинятся разными людьми.
+_CONNECTION_ERROR_NAMES = {
+    "ConnectError",
+    "ConnectTimeout",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "RemoteProtocolError",
+    "URLError",
+}
+_TIMEOUT_ERROR_NAMES = {
+    "PoolTimeout",
+    "ReadTimeout",
+    "TimeoutError",
+    "TimeoutException",
+    "WriteTimeout",
+}
 
-def _is_service_unavailable(exc: Exception) -> bool:
+
+def _error_names(exc: Exception) -> set[str]:
+    """Имена самого исключения и того, что его породило.
+
+    Цепочка нужна потому, что ollama оборачивает httpx: снаружи бывает
+    ResponseError, а причина отказа — в __cause__.
+    """
     names = {exc.__class__.__name__}
     for attr in ("__cause__", "__context__"):
         nested = getattr(exc, attr, None)
         if nested is not None:
             names.add(nested.__class__.__name__)
-    unavailable = {
-        "ConnectError",
-        "ConnectTimeout",
-        "ConnectionError",
-        "ReadTimeout",
-        "RemoteProtocolError",
-        "TimeoutError",
-        "TimeoutException",
-    }
-    return any(name in unavailable for name in names)
+    return names
+
+
+def _classify_provider_error(exc: Exception) -> str:
+    """Причина отказа провайдера -> ExternalServiceErrorKind.
+
+    Порядок проверок значим: у ollama.ResponseError есть свой status_code, но
+    в него же заворачиваются сетевые беды, поэтому сеть смотрится первой.
+    ConnectTimeout считается НЕДОСТУПНОСТЬЮ, а не таймаутом: соединение не
+    установилось вовсе, то есть отвечать было некому.
+    """
+    names = _error_names(exc)
+    if names & _CONNECTION_ERROR_NAMES:
+        return ExternalServiceErrorKind.UNAVAILABLE
+    if names & _TIMEOUT_ERROR_NAMES:
+        return ExternalServiceErrorKind.TIMEOUT
+
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status > 0:
+        # 5xx — беда на стороне Ollama (модель не влезла в память, воркер
+        # умер), она проходит сама. 4xx — осмысленный отказ запросу («нет
+        # такой модели»), и повтор вернёт ровно тот же ответ.
+        if status >= 500:
+            return ExternalServiceErrorKind.SERVER_ERROR
+        return ExternalServiceErrorKind.REQUEST_REJECTED
+
+    return ExternalServiceErrorKind.UNKNOWN
+
+
+# Причины, которым положен 503, а не 502. Набор тот же, что давал прежний
+# _is_service_unavailable: статус уезжает в HTTP-ответы чата и настроек, и
+# двигать его заодно с классификацией значило бы чинить одно, ломая другое.
+_UNAVAILABLE_KINDS = (
+    ExternalServiceErrorKind.UNAVAILABLE,
+    ExternalServiceErrorKind.TIMEOUT,
+)
 
 
 class ModelManager:
-    def __init__(self) -> None:
-        self._timeout = settings.OLLAMA_TIMEOUT_SECONDS
+    def __init__(self, timeout: float | None = None) -> None:
+        """timeout — бюджет ОДНОГО HTTP-обращения к Ollama.
+
+        Параметр существует потому, что бюджетов честно два, и сводить их к
+        одному нельзя ни в одну сторону:
+
+        * ЧАТ (умолчание, settings.OLLAMA_TIMEOUT_SECONDS = 120) —
+          интерактивный бюджет. За ним сидит человек и смотрит на экран;
+          поднять его до пяти минут ради фоновой джобы значит заставить
+          зависший чатовский запрос висеть впятеро дольше;
+        * ПРЕЗЕНТАЦИИ (передаётся явно, LLM_CALL_TIMEOUT = 300) — фоновая
+          джоба, откалиброванная по замерам приёмки: худший наблюдённый вызов
+          (план) — 69.9 с.
+
+        Пока значение было одно, откалиброванный LLM_CALL_TIMEOUT был
+        недостижим: клиент сдавался на 120-й секунде («max 120.0с» в строке
+        статистики воркера — ровное число, то есть не замер), и wait_for
+        вокруг вызова не срабатывал никогда. Не «унифицировать» обратно:
+        разные величины здесь — решение, а не недосмотр.
+        """
+        self._timeout = (
+            settings.OLLAMA_TIMEOUT_SECONDS if timeout is None else float(timeout)
+        )
         self._ollama_client = ollama.Client(
             host=settings.OLLAMA_API_BASE,
             timeout=self._timeout,
@@ -39,6 +119,17 @@ class ModelManager:
             host=settings.OLLAMA_API_BASE,
             timeout=self._timeout,
         )
+
+    @property
+    def timeout(self) -> float:
+        """Бюджет одного обращения — тем, кто обязан его знать.
+
+        Читается сторожевым тестом связи (tests/
+        test_presentation_call_timeout_single_source.py): без внешнего доступа
+        к значению проверить, что пути презентаций достался именно
+        LLM_CALL_TIMEOUT, можно было бы только через приватные потроха httpx.
+        """
+        return self._timeout
 
     @staticmethod
     def resolve_chat_model(model: str | None = None) -> str:
@@ -62,17 +153,30 @@ class ModelManager:
 
     @staticmethod
     def _wrap_provider_error(service: str, exc: Exception) -> ExternalServiceError:
-        status_code = 503 if _is_service_unavailable(exc) else 502
-        message = (
-            f"{service} is unavailable"
-            if status_code == 503
-            else f"{service} request failed"
-        )
+        """Чужое исключение -> ошибка проекта, С СОХРАНЁННОЙ ПРИЧИНОЙ.
+
+        Причина (kind) важнее текста: по ней вызывающий решает, повторять ли
+        обращение и что сказать пользователю. Без неё «соединение отвергнуто»
+        и «ответ не пришёл вовремя» — одна и та же ошибка с одним и тем же
+        503, и презентации отдавали «Ollama недоступна» на живую, но занятую
+        Ollama.
+        """
+        kind = _classify_provider_error(exc)
+        status_code = 503 if kind in _UNAVAILABLE_KINDS else 502
+        # Текст уезжает в presentation.error_text и в detail HTTP-ответов, то
+        # есть его читает человек: он обязан совпадать с тем, что произошло.
+        if kind == ExternalServiceErrorKind.TIMEOUT:
+            message = f"{service} did not answer in time"
+        elif kind == ExternalServiceErrorKind.UNAVAILABLE:
+            message = f"{service} is unavailable"
+        else:
+            message = f"{service} request failed"
         return ExternalServiceError(
             message,
             service=service,
             status_code=status_code,
             cause=exc,
+            kind=kind,
         )
 
     @staticmethod
