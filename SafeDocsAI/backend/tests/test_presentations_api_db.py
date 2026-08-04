@@ -869,7 +869,11 @@ class DownloadTests(PresentationsApiTestCase):
     async def test_unfinished_presentation_answers_409(self):
         for status in (STATUS_QUEUED, STATUS_GENERATING, STATUS_ERROR):
             with self.subTest(status=status):
-                row = await self.make_presentation(status=status)
+                # Свой блокнот на каждый статус: 'queued' и 'generating' — оба
+                # активные, а больше одного активного заказа на блокнот база не
+                # держит (uq_presentation_active_notebook).
+                notebook = await self.make_notebook(f"Блокнот {status}")
+                row = await self.make_presentation(notebook, status=status)
 
                 response = await self.download(row.id)
 

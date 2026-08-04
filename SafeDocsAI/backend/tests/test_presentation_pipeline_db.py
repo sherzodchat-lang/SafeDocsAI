@@ -12,11 +12,13 @@ python-pptx, запись файла и строку в журнале блок�
 * файл появляется атомарно и ДО commit'а со status='ready' — строка не имеет
   права обещать файл, которого нет;
 * временный файл подчищается при любом исходе;
-* коды отказов: generation_failed, ollama_unavailable;
+* коды отказов: generation_failed, ollama_unavailable, generation_timeout —
+  и то, что снятая таймаутом джоба не оставляет за собой файлов;
 * дайджест уже написанного доезжает до второго слайд-вызова (мера 2 правила
   «не добивать»).
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -440,6 +442,114 @@ class FailureTests(PresentationPipelineTestCase):
 
         row = await self.run_one_job()
         self.assertEqual(row.status, STATUS_READY)
+
+    async def test_an_invented_citation_is_refused_and_the_retry_saves_the_deck(self):
+        """Ссылка на чанк, которого модели не показывали, — не слайд.
+
+        Проверка «цитата лежит внутри выданного набора» есть в схеме
+        (tests/test_presentation_schemas.py), но там она получает
+        allowed_citations из фикстуры. Здесь набор собирает сам пайплайн — из
+        того, что вернул ретривал, — и проверяется вся дорога: выдуманный
+        chunk_id отвергается, претензия валидатора с перечнем разрешённых
+        значений уезжает в повторный промпт, и исправленный ответ доводит
+        колоду до конца.
+        """
+        self.use_retrieval(chunk_ids=(1, 2, 3))
+        self.use_model(
+            [
+                PLAN_JSON,
+                # Чанка 99 в контексте не было: ретривал отдал 1, 2 и 3.
+                slide_json("Кто имеет право", ["Факт", "Ещё факт"], 99),
+                slide_json("Кто имеет право", ["Факт", "Ещё факт"], 1),
+                slide_json("Как оформить", ["Факт", "Ещё факт"], 2),
+                slide_json("Куда обращаться", ["Факт", "Ещё факт"], 3),
+            ]
+        )
+        await self.prepare()
+
+        row = await self.run_one_job()
+
+        self.assertEqual(row.status, STATUS_READY)
+        # Повтор получил и отвергнутый ответ, и предметную претензию: без
+        # перечня разрешённых chunk_id модель повторила бы ту же выдумку.
+        retry_prompt = self.model_calls[2][-1]["content"]
+        self.assertIn("rejected by the validator", retry_prompt)
+        self.assertIn("'99'", retry_prompt)
+
+    async def test_two_invented_citations_fail_the_job_without_a_file(self):
+        """Выдуманный источник не «чинится» выбрасыванием цитаты.
+
+        Слайд недействителен целиком: неизвестно, какое из его утверждений
+        опиралось на несуществующий фрагмент. Поэтому исход — отказ, а не
+        колода с правдоподобным списком источников; это же и есть то, что
+        обесценивает инъекцию через описание заказа.
+        """
+        self.use_retrieval(chunk_ids=(1, 2, 3))
+        self.use_model(
+            [
+                PLAN_JSON,
+                slide_json("Кто имеет право", ["Факт", "Ещё факт"], 77),
+                slide_json("Кто имеет право", ["Факт", "Ещё факт"], 88),
+            ]
+        )
+        await self.prepare()
+
+        row = await self.run_one_job()
+
+        self.assertEqual(row.status, STATUS_ERROR)
+        self.assertEqual(row.error_code, PresentationErrors.GENERATION_FAILED)
+        self.assertEqual(self.storage_files(), [])
+        # Ровно две попытки на слайд: план плюс два слайд-вызова.
+        self.assertEqual(len(self.model_calls), 3)
+
+    async def test_a_hanging_model_times_out_and_leaves_nothing_behind(self):
+        """Ollama приняла запрос и не ответила: джобу снимает таймаут.
+
+        Что таймаут доезжает до строки кодом generation_timeout, проверено на
+        ПОДМЕНЁННОМ пайплайне (tests/test_presentation_queue_db.py): там речь о
+        цикле. Здесь пайплайн настоящий, и снимают его посреди вызова модели —
+        то есть внутри открытой сессии, после ретривала и до всякого файла.
+        Отмена приходит не исключением пайплайна, а извне, поэтому уборка,
+        которая ловит обычные отказы (`finally` вокруг временного файла,
+        откат сессии), обязана сработать и на ней.
+
+        Проверяется то, чего не проверяет тест на подменённом пайплайне:
+        после снятого таймаутом заказа на диске не осталось НИЧЕГО — ни колоды,
+        ни `.tmp-*`, — а строка не обещает файла (file_path пуст).
+
+        Бюджет: подготовка до первого обращения к модели — несколько запросов к
+        PostgreSQL, единицы миллисекунд; таймаут взят на два порядка больше,
+        поэтому «не успели дойти до модели» здесь не случайность, а поломка, и
+        её ловит проверка entered ниже.
+        """
+        self.use_retrieval()
+        entered: list[str] = []
+
+        class HangingModel:
+            async def chat(self, *, model=None, messages=None, num_ctx=None) -> str:
+                entered.append("chat")
+                await asyncio.sleep(30)
+                raise AssertionError("висящий вызов не должен завершаться")
+
+        patcher = patch.object(presentation_service, "ModelManager", HangingModel)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await self.prepare()
+
+        with patch("app.modules.presentations.worker.PRESENTATION_JOB_TIMEOUT", 1.0):
+            row = await self.run_one_job()
+
+        self.assertEqual(entered, ["chat"], "до вызова модели дело не дошло")
+        self.assertEqual(row.status, STATUS_ERROR)
+        self.assertEqual(row.error_code, PresentationErrors.GENERATION_TIMEOUT)
+        self.assertTrue(row.error_text)
+        # Причина понятна пользователю и не тащит с собой ни трейсбека, ни
+        # путей на сервере (error_text уходит клиенту вместе со статусом).
+        self.assertNotIn("Traceback", row.error_text)
+        self.assertNotIn(self.storage.name, row.error_text)
+        # И главное: диск чист, а строка ничего не обещает.
+        self.assertIsNone(row.file_path)
+        self.assertEqual(self.storage_files(), [])
 
     async def test_broken_render_leaves_no_files_behind(self):
         self.use_retrieval()

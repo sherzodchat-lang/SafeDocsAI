@@ -52,9 +52,7 @@ class PresentationQueueTestCase(DatabaseBackedTestCase):
 
         self.user: User = await self.make_user("owner", "user")
         self.as_user(self.user)
-        self.notebook: Notebook = await self.seed(
-            Notebook(name="Блокнот", domain_profile="tax", owner_id=self.user.id)
-        )
+        self._notebooks = 0
 
         env_patcher = patch.object(
             app_settings, "OLLAMA_MODEL_EMBEDDING", EMBEDDING_MODEL
@@ -87,9 +85,29 @@ class PresentationQueueTestCase(DatabaseBackedTestCase):
 
     # --- данные ---
 
+    async def make_notebook(self, name: str | None = None) -> Notebook:
+        self._notebooks += 1
+        return await self.seed(
+            Notebook(
+                name=name or f"Блокнот {self._notebooks}",
+                domain_profile="tax",
+                owner_id=self.user.id,
+            )
+        )
+
     async def make_presentation(self, *, created_at=None, **overrides) -> Presentation:
+        """Заказ в очереди. По умолчанию — в СВОЁМ блокноте.
+
+        Собственный блокнот на каждый заказ не украшение фикстуры, а следствие
+        инварианта базы: частичный уникальный индекс
+        uq_presentation_active_notebook не допускает двух активных
+        ('queued'/'generating') заказов по одному блокноту. Очередь при этом
+        общая на систему, и всё, что проверяется здесь — порядок, позиция,
+        захват, — от того, чьи это блокноты, не зависит: ждущие заказы в
+        рабочей базе принадлежат разным блокнотам ровно по той же причине.
+        """
         fields = {
-            "notebook_id": self.notebook.id,
+            "notebook_id": (await self.make_notebook()).id,
             "owner_id": self.user.id,
             "template_key": "classic",
             "language": "ru",
@@ -310,6 +328,62 @@ class WorkerLoopTests(PresentationQueueTestCase):
         self.assertEqual(row.status, STATUS_ERROR)
         self.assertEqual(row.error_code, PresentationErrors.GENERATION_TIMEOUT)
         self.assertTrue(row.error_text)
+
+    async def test_two_orders_run_one_at_a_time_in_the_order_they_were_placed(self):
+        """FIFO и ПО ОДНОЙ — ради этого очередь и существует.
+
+        Порядок захвата проверен на самом claim_next (ClaimTests), но там нет
+        цикла: между двумя захватами лежит вся обработка джобы, и наложение
+        возможно ровно здесь — в `_run`, который после успешного захвата сразу
+        уходит на следующую итерацию (`if claimed: continue`). Две генерации
+        одновременно — это две модели в памяти одной видеокарты: либо OOM, либо
+        обе задачи ползут вдвое дольше, а позиция в очереди начинает врать.
+
+        Соседний тест про упавшую джобу тоже смотрит на порядок, но там первая
+        задача падает, то есть до наложения дело не доходит по построению.
+        Здесь обе успешны, и время работы каждой заведомо перекрывает опрос
+        очереди (poll_interval 0.05 с) — если бы цикл брал вторую, не дождавшись
+        первой, он успел бы это сделать.
+        """
+        now = utcnow()
+        first = await self.make_presentation(created_at=now - timedelta(minutes=2))
+        second = await self.make_presentation(created_at=now - timedelta(minutes=1))
+
+        events: list[str] = []
+        running = 0
+        peak = 0
+
+        async def slow(presentation_id):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            events.append(f"start {presentation_id}")
+            await asyncio.sleep(0.1)
+            async with self.session_factory() as session:
+                await PresentationsService.mark_ready(
+                    session, presentation_id, file_path="/tmp/x.pptx", file_size=1
+                )
+            events.append(f"done {presentation_id}")
+            running -= 1
+            return GenerationResult()
+
+        with patch("app.modules.presentations.worker.generate_presentation", slow):
+            self.worker.start()
+            await self.wait_until(lambda: self._both_settled(first.id, second.id))
+            await self.worker.stop()
+
+        self.assertEqual(peak, 1, "воркер взял вторую задачу, не отпустив первую")
+        self.assertEqual(
+            events,
+            [
+                f"start {first.id}",
+                f"done {first.id}",
+                f"start {second.id}",
+                f"done {second.id}",
+            ],
+        )
+        for presentation in (first, second):
+            self.assertEqual((await self.reload(presentation.id)).status, STATUS_READY)
 
     async def test_exception_inside_a_job_does_not_kill_the_worker(self):
         """Упавшая генерация — строка со status='error', а не мёртвая очередь.

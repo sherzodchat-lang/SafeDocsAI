@@ -8,8 +8,25 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 from app.core.config import settings
+# Статусы очереди презентаций — из объявления раздела, а не выписанными строками
+# здесь: предикат частичного индекса ниже обязан описывать ровно то же
+# множество «активных» статусов, что проверяет хендлер заказа
+# (presentations.ACTIVE_STATUSES). Импорт дешёвый и не тянет ни ретривал, ни
+# ChromaDB — пакет презентаций переэкспортирует только константы и схемы
+# (см. его docstring).
+from app.modules.presentations.constants import STATUS_GENERATING, STATUS_QUEUED
 
 logger = logging.getLogger(__name__)
+
+# --- Инвариант очереди презентаций ---------------------------------------
+#
+# «Не больше одной активной генерации на блокнот» держит БАЗА, а не хендлер.
+# Имя индекса и множество статусов вынесены в константы, потому что на них
+# ссылаются трое: сама миграция ниже, перехват нарушения уникальности в
+# app/api/endpoints/presentations.py (по имени индекса он отличает СВОЁ
+# нарушение от чужого) и проверка схемы в тестах.
+PRESENTATION_ACTIVE_INDEX = "uq_presentation_active_notebook"
+PRESENTATION_ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_GENERATING)
 
 # Echo SQL queries only in development
 engine = create_async_engine(
@@ -116,6 +133,92 @@ async def init_db():
                     """
                 )
             )
+
+            # Не больше ОДНОЙ активной генерации на блокнот — инвариантом БАЗЫ.
+            #
+            # Предпроверка в хендлере заказа (SELECT активных строк, потом
+            # INSERT) — это и есть то место, которое гонится: два клика в одну
+            # секунду проходят проверку оба, а лимит частоты от них не спасает.
+            # Цена промаха максимальная: двойная работа GPU, два файла-дубля и
+            # спутанные позиции очереди. Частичный уникальный индекс закрывает
+            # окно целиком, потому что проверку делает та же транзакция, что и
+            # вставку.
+            #
+            # Предикат перечисляет статусы явно (подставить их параметром в DDL
+            # нельзя): значения берутся из констант раздела, а тест сверяет
+            # определение индекса в pg_indexes с ними же.
+            active_statuses = ", ".join(
+                f"'{status}'" for status in PRESENTATION_ACTIVE_STATUSES
+            )
+            # ГРЯЗНЫЕ ДАННЫЕ НЕ ДОЛЖНЫ РОНЯТЬ СТАРТ. На базе, пережившей гонку
+            # до появления индекса, CREATE UNIQUE INDEX упадёт — и утащил бы за
+            # собой весь init_db, то есть приложение вообще не поднялось бы, и
+            # чинить данные пришлось бы вслепую из psql. Поэтому:
+            #
+            #   1) сначала считаем блокноты с несколькими активными заказами и
+            #      при находке ПРОПУСКАЕМ создание индекса с ERROR в журнале —
+            #      тот же приём, что у отложенных SET NOT NULL ниже (там шаг
+            #      пропускается, когда бэкфиллу некого назначить владельцем);
+            #   2) сам CREATE идёт под SAVEPOINT'ом: между подсчётом и
+            #      созданием индекса соседний процесс uvicorn мог успеть
+            #      поставить заказ. Без вложенной транзакции ошибка на этом
+            #      шаге обрывает всю транзакцию init_db, включая уже сделанные
+            #      миграции; с ней — гаснет только этот шаг.
+            #
+            # CREATE INDEX CONCURRENTLY здесь неприменим: PostgreSQL запрещает
+            # его внутри транзакционного блока, а весь init_db выполняется в
+            # одной транзакции (engine.begin()). Класть его в отдельное
+            # соединение с autocommit ради онлайн-построения незачем: таблица
+            # presentation маленькая (одна строка на заказ), а блокировка на
+            # время построения — доли секунды на старте, когда очередь ещё не
+            # запущена.
+            conflicting = (
+                await conn.execute(
+                    text(
+                        f"""
+                        SELECT notebook_id, COUNT(*) AS active
+                        FROM presentation
+                        WHERE status IN ({active_statuses})
+                        GROUP BY notebook_id
+                        HAVING COUNT(*) > 1
+                        ORDER BY notebook_id
+                        """
+                    )
+                )
+            ).all()
+            if conflicting:
+                logger.error(
+                    "Unique index %s is postponed: notebooks with more than one "
+                    "active presentation: %s. Keep one order per notebook "
+                    "(DELETE FROM presentation WHERE ...) and restart; until "
+                    "then the invariant rests on the pre-check in the handler "
+                    "alone.",
+                    PRESENTATION_ACTIVE_INDEX,
+                    ", ".join(
+                        f"notebook {row[0]}: {row[1]}" for row in conflicting
+                    ),
+                )
+            else:
+                try:
+                    async with conn.begin_nested():
+                        await conn.execute(
+                            text(
+                                f"""
+                                CREATE UNIQUE INDEX IF NOT EXISTS
+                                {PRESENTATION_ACTIVE_INDEX}
+                                ON presentation (notebook_id)
+                                WHERE status IN ({active_statuses})
+                                """
+                            )
+                        )
+                except Exception as exc:  # pragma: no cover - гонка на старте
+                    logger.error(
+                        "Could not create the unique index %s: %s. The "
+                        "invariant rests on the pre-check in the handler; the "
+                        "index will be created on the next start.",
+                        PRESENTATION_ACTIVE_INDEX,
+                        exc,
+                    )
 
             # Владение источниками. Колонка добавляется отдельно от create_all,
             # потому что на существующих базах таблица document уже есть.

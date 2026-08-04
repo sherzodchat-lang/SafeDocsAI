@@ -279,6 +279,129 @@ curl -s -o /dev/null -w 'chroma=%{http_code}\n' http://localhost:8000/api/v2/hea
 
 ---
 
+## Презентации: шаблоны, файлы, очередь
+
+### Шаблоны — деплой-артефакт, а не данные
+
+Каталог `backend/templates/presentations/`: `manifest.json` плюс пара файлов на каждый шаблон — `<key>.pptx` (оформление и раскладки) и `<key>.png` (превью для формы заказа). Приезжает вместе с кодом, в `backend/data` его нет намеренно: `data` монтируется томом и переживает релиз, а шаблон обязан совпадать с рендером, который на него рассчитывает. В комплекте три ключа: `classic`, `contrast`, `minimal`.
+
+```bash
+ssh tnr-0 "ls ~/Aigov/SafeDocsAI/backend/templates/presentations/"
+# manifest.json + .pptx + .png на каждый ключ — 7 файлов на три шаблона
+ssh tnr-0 "grep -i 'presentation templates' /tmp/backend.log | tail -3"
+# → "3 of 3 entries usable (classic, contrast, minimal)"
+```
+
+Манифест читается ОДИН раз, лениво, при первом обращении к разделу, и остаётся в памяти процесса: правка манифеста на живом сервере требует перезапуска бэкенда. Битая запись (нет файла, pptx не открывается, индекс раскладки за пределами файла) не роняет ни старт, ни соседние шаблоны — она выбрасывается с ERROR в журнал, и шаблон просто не появляется в списке выбора. Отсюда и диагностика «шаблон пропал из формы»: смотреть строку `N of M entries usable` в логе, а не в интерфейсе.
+
+Превью отдаёт API (`GET /api/v1/presentations/templates/{key}/preview`), а не nginx: картинки лежат вне каталога статики. Список шаблонов и превью требуют роли `content_manager` или `admin` — той же, что и заказ.
+
+### Готовые колоды
+
+Файлы — в `backend/data/presentations/`, по `presentation_<id>.pptx` на заказ; каталог создаётся сам при первой генерации. На время сборки рядом живёт `presentation_<id>.pptx.tmp-<hex>`: файл пишется во временный и переставляется `os.replace` — атомарно и в пределах той же файловой системы. Задержавшиеся `.tmp-*` означают убитый посреди рендера процесс, удалять их безопасно:
+
+```bash
+ssh tnr-0 "ls -la ~/Aigov/SafeDocsAI/backend/data/presentations/ | head"
+ssh tnr-0 "find ~/Aigov/SafeDocsAI/backend/data/presentations -name '*.tmp-*' -mmin +30 -delete"
+```
+
+Осиротевшие файлы (строку удалили, файл остался — например, `os.remove` упал на правах) находятся сверкой каталога с колонкой `file_path`:
+
+```bash
+sudo -u postgres psql -d andozai_db -At -c \
+  "SELECT file_path FROM presentation WHERE file_path IS NOT NULL;" | sort > /tmp/in_db
+ls -d ~/Aigov/SafeDocsAI/backend/data/presentations/presentation_*.pptx | sort > /tmp/on_disk
+comm -13 /tmp/in_db /tmp/on_disk   # есть на диске, нет в базе — можно удалять
+```
+
+### Очередь
+
+Своя таблица `presentation` и свой воркер, отдельно от очереди индексации (`job`): генерация занимает минуты и держит GPU, и в одной очереди с индексацией она задерживала бы загрузку документов на всё своё время. Задача берётся атомарно (`FOR UPDATE SKIP LOCKED`), очередь общая на систему, порядок — FIFO по `created_at`. Всё, что осталось в `generating` после убитого процесса, воркер возвращает в `queued` на старте: частично собранной колоды не существует, файл появляется целиком и в самом конце.
+
+```bash
+sudo -u postgres psql -d andozai_db -c \
+  "SELECT id, notebook_id, status, progress, error_code, updated_at
+     FROM presentation ORDER BY created_at DESC LIMIT 20;"
+```
+
+Очередь стоит без выбранной embedding-модели: заказы остаются `queued` (а не падают в `error`), в журнале раз в 5 минут — ERROR `settings.embedding_model_unset`. Лечится выбором модели в админке, заказы уедут в работу сами.
+
+**Перезапуск во время генерации заказ не теряет.** `pkill -f run.py` — это SIGTERM, то есть штатное завершение: воркер отменяет текущую джобу и сам возвращает её в `queued` (в журнале «Генерация прервана остановкой сервера»), после чего заказ отработает с начала при следующем старте. Ждать выхода процесса — до `STOP_TIMEOUT_SECONDS` (30 с); `pkill -9` этот путь отрезает, и тогда строка остаётся в `generating` до `recover()` на следующем старте. Итог в обоих случаях один, разница только в том, увидит ли пользователь `generating` до перезапуска. Отсюда правило: колоду в работе не ждём, но и `-9` без нужды не даём.
+
+```bash
+ssh tnr-0 "pkill -f run.py; sleep 5; grep -E 'Генерация прервана|returned to the queue' /tmp/backend.log | tail -5"
+```
+
+**Инвариант «не больше одной активной генерации на блокнот» держит база** — частичный уникальный индекс `uq_presentation_active_notebook`: `UNIQUE (notebook_id) WHERE status IN ('queued','generating')`. Он создаётся в `init_db` вместе с остальными индексами и на грязных данных НЕ роняет старт: если в базе уже есть блокнот с двумя активными заказами, шаг пропускается с ERROR в журнале (`Unique index uq_presentation_active_notebook is postponed: ...`), а инвариант до починки держится только предпроверкой в обработчике. Найти и починить:
+
+```bash
+sudo -u postgres psql -d andozai_db -c \
+  "SELECT notebook_id, count(*), array_agg(id ORDER BY created_at)
+     FROM presentation WHERE status IN ('queued','generating')
+    GROUP BY notebook_id HAVING count(*) > 1;"
+# оставить самый ранний заказ блокнота, лишние удалить, затем перезапустить бэкенд —
+# индекс доедет на первом же старте
+```
+
+### Константы раздела (в коде, не в окружении)
+
+Переменных окружения у презентаций нет: всё, что ниже, объявлено в `backend/app/modules/presentations/constants.py` и меняется правкой кода — рядом с расчётом, из которого получено число.
+
+| Что | Значение | Почему столько |
+|---|---|---|
+| `PRESENTATION_JOB_TIMEOUT` | 600 с | запас ×6.5 к худшему замеру (91.5 с на 10 слайдах, gemma4:26b) |
+| `SLIDE_COUNT_MIN` / `MAX` / `DEFAULT` | 5 / 15 / 10 | продуктовые границы формы заказа; потолок выше 20 требует пересчёта `DESCRIPTION_MAX` |
+| `DESCRIPTION_MAX` | 1800 знаков | посчитано из бюджета план-вызова при `num_ctx` 12000 |
+| `PRESENTATION_NUM_CTX` | 12000 | то же, что в Modelfile `gemma4:26b` (волна 4) |
+| `SLIDE_RETRIEVAL_TOP_K` / `CANDIDATE_POOL` | 5 / 20 | своё, а не настроечное `retrieval_top_k`: правка в админке иначе меняла бы время джобы |
+| лимит заказов | 10 за час на адрес | заказ занимает GPU на минуты; ключ счётчика — адрес клиента |
+| `POLL_INTERVAL_SECONDS` | 2.0 | как у воркера индексации |
+| `STOP_TIMEOUT_SECONDS` | 30 с | сколько ждать воркер на SIGTERM, прежде чем бросить его; см. «Перезапуск во время генерации» выше |
+| `MAX_ERROR_TEXT` | 500 знаков | `error_text` уходит клиенту; полный текст отказа — в логе бэкенда |
+| `PRESENTATION_STORAGE_DIR` | `data/presentations` | относительно `backend/` |
+
+---
+
+## Бэкап
+
+Инстанс каждый раз новый, поэтому «бэкап» здесь означает ровно одно: что нужно унести с машины, чтобы развернуть стенд не с нуля. Незаменимы первые две строки таблицы — остальное восстанавливается работой.
+
+| Что | Где | Незаменимо? |
+|---|---|---|
+| База | `andozai_db` | да: блокноты, источники, заказы, журнал, пользователи |
+| Загруженные источники | `backend/data/uploads/` | да: исходные файлы пользователя |
+| Настройки времени выполнения | `backend/data/runtime_settings.json` | почти: выбранные модели и параметры ретривала, восстанавливается руками в админке |
+| Готовые колоды | `backend/data/presentations/` | нет, но: строки `ready` ссылаются на эти файлы, и без каталога скачивание отвечает 404 `presentation.file_missing`. Пересоздаются повторным заказом — ценой минут GPU на каждую |
+| Векторы | том `chroma_data` (docker) | нет: восстанавливаются переиндексацией источников |
+| Шаблоны презентаций | `backend/templates/presentations/` | нет: лежат в git и приезжают с кодом |
+
+```bash
+ssh tnr-0 "mkdir -p ~/backup && \
+  sudo -u postgres pg_dump andozai_db | gzip > ~/backup/andozai_db_\$(date +%F).sql.gz && \
+  tar czf ~/backup/data_\$(date +%F).tar.gz -C ~/Aigov/SafeDocsAI/backend \
+      data/uploads data/presentations data/runtime_settings.json && \
+  ls -la ~/backup"
+```
+
+Восстановление — в обратном порядке и обязательно ДО первого старта бэкенда (`init_db` на пустой базе заводит блокнот-заглушку):
+
+```bash
+ssh tnr-0 "gunzip -c ~/backup/andozai_db_ГГГГ-ММ-ДД.sql.gz | sudo -u postgres psql -d andozai_db && \
+  tar xzf ~/backup/data_ГГГГ-ММ-ДД.tar.gz -C ~/Aigov/SafeDocsAI/backend"
+```
+
+Каталог `data/presentations` можно не восстанавливать вовсе — но тогда сразу почистите ссылки, иначе пользователь увидит «готово» и получит отказ на скачивании:
+
+```bash
+sudo -u postgres psql -d andozai_db -c \
+  "UPDATE presentation SET status='error', error_code='presentation.generation_failed',
+          error_text='Файл не пережил перенос стенда, закажите колоду заново',
+          file_path=NULL, file_size=NULL
+     WHERE status='ready';"
+```
+
+---
+
 ## Если что-то сломалось
 
 **Сайт не открывается.** Сначала разделить «внутри» и «снаружи»:

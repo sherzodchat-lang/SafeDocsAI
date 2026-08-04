@@ -1,6 +1,6 @@
 """HTTP-слой раздела презентаций: шаблоны, заказ, опрос, скачивание, удаление.
 
-Три решения этого файла, которые важнее остального кода.
+Четыре решения этого файла, которые важнее остального кода.
 
 **Порядок проверок на заказе — часть контракта, а не деталь реализации.**
 Владение -> роль -> частота -> тело -> бизнес-условия. Каждый шаг стоит именно
@@ -32,6 +32,16 @@ deps.QuestionStr. Границы при этом НЕ дублируются в 
 В OpenAPI границы всё же попадают — через json_schema_extra, то есть как
 документация, а не как вторая проверка.
 
+**Инвариант «не больше одной активной колоды на блокнот» держит БАЗА.**
+Предпроверка в обработчике (SELECT активных строк, потом INSERT) — это ровно то
+место, которое гонится: два клика в одну секунду проходят её оба, а лимит
+частоты считает десятки заказов в час, а не два в секунду. Поэтому рядом стоит
+частичный уникальный индекс `uq_presentation_active_notebook` (создаётся в
+app/core/database.py), и его нарушение переводится в ТОТ ЖЕ 409
+presentation.generation_in_progress, что и предпроверка. Предпроверка при этом
+остаётся: она отвечает без нарушения целостности и без отката транзакции, то
+есть обычный повторный клик стоит дешевле.
+
 **Пути к файлам берутся из реестра и из строки БД, но никогда из запроса.**
 Превью шаблона отдаётся по КЛЮЧУ: путь ищется в реестре, который уже проверил,
 что файл лежит внутри каталога шаблонов (templates.py, _resolve_file). Обхода
@@ -46,10 +56,12 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import AfterValidator, BaseModel, Field, field_serializer
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api import deps
+from app.core.database import PRESENTATION_ACTIVE_INDEX
 from app.api.endpoints.documents import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -124,8 +136,21 @@ DOWNLOAD_NAME_TEMPLATE = "{notebook} — презентация.pptx"
 # Блокнота нет (строка пережила его в гонке) — имя без него, но осмысленное.
 DOWNLOAD_NAME_FALLBACK = "презентация.pptx"
 
-# Статусы, при которых по блокноту нельзя заказать вторую колоду.
+# Статусы, при которых по блокноту нельзя заказать вторую колоду. Ровно те же,
+# что стоят в предикате частичного уникального индекса
+# (app/core/database.PRESENTATION_ACTIVE_STATUSES): предпроверка и база обязаны
+# считать активным одно и то же множество, иначе одна из них начнёт пропускать
+# то, что отвергает другая.
 ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_GENERATING)
+
+# Текст отказа «уже генерируется» — ОДИН на обе точки отказа: предпроверку и
+# нарушение уникальности в базе. Клиент не должен различать, кто именно
+# отказал: для него это одно событие с одним действием («дождитесь или удалите
+# текущий заказ»), и вторая формулировка означала бы вторую строку перевода об
+# одном и том же.
+GENERATION_IN_PROGRESS_DETAIL = (
+    "A presentation for this notebook is already queued or being generated"
+)
 
 
 # --- Доступ ---------------------------------------------------------------
@@ -476,21 +501,60 @@ async def create_presentation(
         raise ApiError(
             409,
             PresentationErrors.GENERATION_IN_PROGRESS,
-            "A presentation for this notebook is already queued or being generated",
+            GENERATION_IN_PROGRESS_DETAIL,
         )
 
     # Создание — сервисом, а не INSERT'ом по месту: он же будит воркер и
     # нормализует язык. Вторая точка постановки в очередь однажды забыла бы
     # одно из двух.
-    presentation = await PresentationsService.create(
-        session,
-        notebook_id=notebook.id,
-        owner_id=current_user.id,
-        template_key=payload.template_key,
-        language=payload.language,
-        slide_count=payload.slide_count,
-        description=payload.description,
-    )
+    #
+    # (3) Та же проверка, но уже от БАЗЫ. Проверка (2) выше и вставка — два
+    # разных запроса, и между ними помещается весь второй запрос: два клика в
+    # одну секунду (или два процесса uvicorn) проходят предпроверку оба и
+    # ставят по заказу. Ловит это частичный уникальный индекс
+    # uq_presentation_active_notebook, и его нарушение — не 500, а ровно то же
+    # событие, что и (2): клиент не должен различать, кто отказал.
+    #
+    # Чужие нарушения целостности (например, исчезнувший блокнот — внешний
+    # ключ) сюда не попадают: они пробрасываются дальше и становятся честной
+    # ошибкой сервера, а не ложным «уже генерируется».
+    #
+    # Идентификаторы для журнала снимаются ДО вставки: неудачная вставка
+    # откатывает транзакцию сессии, а откат объявляет все её объекты
+    # устаревшими — обращение к notebook.id после него полезло бы в базу за
+    # перезагрузкой прямо из обработчика исключения (SQLAlchemy отвечает на это
+    # PendingRollbackError).
+    notebook_id, user_id = notebook.id, current_user.id
+    try:
+        presentation = await PresentationsService.create(
+            session,
+            notebook_id=notebook_id,
+            owner_id=user_id,
+            template_key=payload.template_key,
+            language=payload.language,
+            slide_count=payload.slide_count,
+            description=payload.description,
+        )
+    except IntegrityError as exc:
+        # Транзакция после нарушения уникальности оборвана: без явного отката
+        # эта же сессия ответит InternalError на любой следующий запрос —
+        # включая те, что сделает обработчик ошибки.
+        await session.rollback()
+        if PRESENTATION_ACTIVE_INDEX not in str(exc):
+            raise
+        logger.info(
+            "Duplicate presentation order for notebook %s by user %s was "
+            "rejected by %s",
+            notebook_id,
+            user_id,
+            PRESENTATION_ACTIVE_INDEX,
+        )
+        raise ApiError(
+            409,
+            PresentationErrors.GENERATION_IN_PROGRESS,
+            GENERATION_IN_PROGRESS_DETAIL,
+        ) from exc
+
     queue_position = await PresentationsService.queue_position(session, presentation)
     logger.info(
         "Presentation %s queued for notebook %s by user %s "

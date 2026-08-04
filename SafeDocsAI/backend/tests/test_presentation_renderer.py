@@ -150,6 +150,47 @@ class RenderTests(unittest.TestCase):
             for line in text.splitlines():
                 self.assertLessEqual(len(line), 500)
 
+    def test_special_characters_do_not_break_the_render(self):
+        """Спецсимволы — вторая половина правила устойчивости.
+
+        Внутри pptx лежит XML, и текст туда попадает как есть. Опасны три
+        разных вида символов, и приходят они с разных сторон:
+
+          * `&`, `<`, `>`, кавычки — из имени документа и из ответа модели.
+            Неэкранированные, они дали бы битый XML, то есть файл, который
+            PowerPoint отказывается открыть, — худший исход из возможных:
+            строка 'ready', размер больше нуля, а колоды нет;
+          * управляющие символы (`\\x00`, `\\x07`) — из ответа модели: JSON
+            умеет их записывать (`\\u0007`), а XML 1.0 не допускает вовсе;
+          * эмодзи и письменности вне BMP — из документов пользователя.
+
+        Проверяется не «как именно», а результат: файл собран, открывается и
+        текст на месте. Экранированием занимается python-pptx, и подменять его
+        своей чисткой было бы вторым правилом на ту же тему.
+        """
+        nasty = 'R&D <tag> "кавычки" & 🧾 متن'
+        texts = self.render(
+            title=nasty,
+            slides=[
+                PresentationSlide(
+                    heading=nasty,
+                    bullets=["Строка\x07с\x00управляющими", "Второй факт"],
+                    citations=[{"source_id": 1, "chunk_id": 10}],
+                )
+            ],
+            sources=[RenderedSource(source_id=1, name=nasty, pages=[3])],
+        )
+
+        self.assertEqual(len(texts), 3)
+        self.assertTrue(os.path.getsize(self.path) > 0)
+        # Файл читается обратно (значит, XML целый), и текст в нём тот самый.
+        self.assertIn("R&D <tag>", texts[0])
+        self.assertIn("🧾", texts[1])
+        self.assertIn(nasty, texts[2])
+        # Управляющие символы доехали, не уронив рендер: python-pptx
+        # записывает их как _xNNNN_, и это его дело, а не наше.
+        self.assertIn("Второй факт", texts[1])
+
     def test_tajik_deck_uses_tajik_captions(self):
         texts = self.render(language="tj")
         self.assertIn("Манбаъҳо", texts[2])
