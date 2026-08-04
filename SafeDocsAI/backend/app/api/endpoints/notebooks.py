@@ -19,7 +19,24 @@ from app.api.endpoints.documents import (
 from app.core.exceptions import ApiError, SourceErrors
 from app.core.rate_limit import RateLimiter, check_rate_limit
 from app.domain_profiles import list_domain_profiles
-from app.shared.models import Chunk, Document, Insight, Job, Log, Note, Notebook, User
+# Только константа статуса: пакет app.modules.presentations намеренно не тянет
+# за собой сервис и воркер (см. его __init__), поэтому RAG-стек сюда не
+# приезжает. Своего литерала 'generating' здесь заводить нельзя — он разъедется
+# с тем, что пишет в колонку PresentationsService.
+from app.modules.presentations import (
+    STATUS_GENERATING as PRESENTATION_STATUS_GENERATING,
+)
+from app.shared.models import (
+    Chunk,
+    Document,
+    Insight,
+    Job,
+    Log,
+    Note,
+    Notebook,
+    Presentation,
+    User,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -316,9 +333,14 @@ async def delete_notebook(
             select(Chunk.id).where(Chunk.doc_id.in_(doc_ids))
         )
         chunk_ids = [str(cid) for cid in chunks_result.all() if cid is not None]
-    # Пары (id документа, путь): id нужен только логу — по нему осиротевший
-    # файл сопоставляется с записями о его загрузке и индексации.
-    file_rows = [(row[0], row[1]) for row in doc_rows if row[1]]
+    # Тройки (сущность, id, путь): id нужен только логу — по нему осиротевший
+    # файл сопоставляется с записями о его загрузке и индексации, а имя
+    # сущности отвечает на вопрос, в какой таблице эту строку искать: файлы на
+    # диске оставляют и документы (data/uploads), и готовые презентации
+    # (data/presentations).
+    file_rows: list[tuple[str, Any, str]] = [
+        ("document", row[0], row[1]) for row in doc_rows if row[1]
+    ]
 
     # 3. Задачи блокнота.
     # Берём их не только по notebook_id: у документа, загруженного вне
@@ -360,7 +382,61 @@ async def delete_notebook(
             "Notebook is being indexed, try again later",
         )
 
-    # 5. Удаление в БД.
+    # 5. Презентации блокнота. Приём ровно тот же, что с задачами очереди, и по
+    # тем же двум причинам. FOR UPDATE: воркер презентаций забирает очередной
+    # заказ через FOR UPDATE SKIP LOCKED (presentations/service.claim_next),
+    # поэтому запертую нами 'queued' он пропустит и не начнёт генерацию по
+    # блокноту, которого через мгновение не станет; а заказ, уже перешедший в
+    # 'generating', мы гарантированно увидим именно как 'generating'.
+    #
+    # 'generating' -> 409 по тому же доводу, что и 'running'-индексация:
+    # генерация идёт в другом процессе, канала отмены у очереди нет, и удалить
+    # блокнот у неё из-под рук значит уронить джобу на пустом месте. Отказ
+    # временный: пайплайн конечен, а хвост убитого процесса очередь сама
+    # вернёт в 'queued' (presentations/service.requeue_stuck).
+    #
+    # 'queued' удаляется свободно: файла у него ещё нет, и запирать удаление
+    # блокнота из-за заказа, который никто не начал, было бы отказом на пустом
+    # месте — ровно как с 'queued'-задачей индексации.
+    presentations_result = await session.exec(
+        select(Presentation.id, Presentation.status, Presentation.file_path)
+        .where(Presentation.notebook_id == notebook_id)
+        .with_for_update()
+    )
+    presentation_rows = presentations_result.all()
+    generating = [
+        row[0]
+        for row in presentation_rows
+        if row[1] == PRESENTATION_STATUS_GENERATING
+    ]
+    if generating:
+        logger.info(
+            "Refusing to delete notebook %s: presentations %s are still generating",
+            notebook_id,
+            ", ".join(str(pid) for pid in generating),
+        )
+        # Кода «в блокноте генерируется презентация» в exceptions.py пока нет,
+        # а заводить строковый литерал по месту нельзя: клиент ищет перевод по
+        # коду. Берём ближайший существующий — тот же 409 «блокнот занят,
+        # повторите позже» с той же природой отказа (работа идёт в другом
+        # процессе и прервать её нечем). Заменить на собственный код нужно
+        # вместе с правкой exceptions.py и словарей фронта.
+        raise ApiError(
+            409,
+            SourceErrors.NOTEBOOK_BUSY_GENERATING,
+            "Notebook has a presentation being generated, try again later",
+        )
+    # Пути готовых колод читаются ЗДЕСЬ, до удаления строк: после commit
+    # file_path не хранится больше нигде, и файл стал бы неотличим от чужого.
+    # Фильтра по статусу намеренно нет: заполненная колонка file_path и есть
+    # запись о существовании файла (её пишет только mark_ready), а вторая
+    # проверка «а тот ли статус» однажды разойдётся с ней — у 'error' файл
+    # предыдущего успешного прогона остаться может, у 'queued' колонка пуста.
+    file_rows.extend(
+        ("presentation", row[0], row[2]) for row in presentation_rows if row[2]
+    )
+
+    # 6. Удаление в БД.
     # Порядок DELETE теперь задаётся здесь, а не unit of work SQLAlchemy:
     # bulk DELETE уходит в базу сразу, в порядке вызовов. Нарушить его нельзя —
     # именно на этом ловится job_source_id_fkey (см.
@@ -369,10 +445,16 @@ async def delete_notebook(
         if doc_ids:
             await _delete_rows(session, Chunk, Chunk.doc_id.in_(doc_ids))
         # insight.note_id -> note.id: инсайты уходят раньше заметок.
+        # presentation.notebook_id объявлен без ON DELETE, как и всё здесь,
+        # поэтому заказы обязаны уйти раньше самого блокнота — иначе DELETE
+        # блокнота с готовой колодой падает на presentation_notebook_id_fkey
+        # (см. tests/test_notebook_delete_presentations_db.py). Ссылок на
+        # presentation ниоткуда нет, так что место в этом списке любое.
         for model_cls, fk in (
             (Insight, Insight.notebook_id),
             (Note, Note.notebook_id),
             (Log, Log.notebook_id),
+            (Presentation, Presentation.notebook_id),
         ):
             await _delete_rows(session, model_cls, fk == notebook_id)
         # Задачи строго до документов: job.source_id ссылается на document.id
@@ -396,7 +478,7 @@ async def delete_notebook(
             "Notebook is already being deleted",
         ) from exc
 
-    # 6. Побочная очистка — только после успешного commit.
+    # 7. Побочная очистка — только после успешного commit.
     # Отказ ChromaDB здесь нельзя ни проглотить, ни превратить в 503: блокнота
     # в БД уже нет, а id чанков после commit не хранятся больше нигде. Поэтому
     # отказ переводится в задачу cleanup_embeddings — воркер повторит удаление,
@@ -427,13 +509,14 @@ async def delete_notebook(
     # на правах или read-only монтировании — то, что повтором не лечится и
     # требует человека. Наконец, список файлов, в отличие от id чанков,
     # восстановим и без задачи: каталог загрузок сверяется с колонкой
-    # document.path, всё лишнее в нём — сирота.
+    # document.path, каталог презентаций — с presentation.file_path, всё
+    # лишнее в них — сирота.
     #
     # Поэтому единственное требование к этому месту — чтобы лога хватило на
     # ручную уборку без раскопок: причина пишется по каждому файлу, а полный
     # список путей — одной строкой, готовой к вставке в rm.
     orphan_paths: list[str] = []
-    for doc_id, path in file_rows:
+    for kind, row_id, path in file_rows:
         try:
             os.remove(path)
         except FileNotFoundError:
@@ -444,10 +527,11 @@ async def delete_notebook(
         except OSError as exc:
             orphan_paths.append(path)
             logger.warning(
-                "Could not remove file %s of document %s from deleted "
+                "Could not remove file %s of %s %s from deleted "
                 "notebook %s after commit: %s",
                 path,
-                doc_id,
+                kind,
+                row_id,
                 notebook_id,
                 exc,
             )

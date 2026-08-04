@@ -82,6 +82,9 @@ const ERROR_CODE_KEYS = {
     // запрос, либо мешает незавершённая индексация — оба раза достаточно повторить.
     'source.notebook_delete_conflict': 'documents.errors.notebookDeleteConflict',
     'source.notebook_busy_indexing': 'documents.errors.notebookBusyIndexing',
+    // Отдельный код, а не общий с индексацией: пользователю надо понимать,
+    // какая именно работа мешает, иначе он ждёт окончания не того процесса.
+    'source.notebook_busy_generating': 'documents.errors.notebookBusyGenerating',
     // Коды индексации приходят не в HTTP-ответе, а в поле document.error_code,
     // но проходят через ту же таблицу, когда карточка источника показывает причину.
     'source.indexing_failed': 'documents.errors.indexingFailed',
