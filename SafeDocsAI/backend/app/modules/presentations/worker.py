@@ -27,13 +27,18 @@ from app.core.database import session_context
 from app.core.exceptions import PresentationErrors, SettingsErrors
 from app.modules.presentations.constants import (
     ERROR_BACKOFF_SECONDS,
+    LLM_CALL_ATTEMPTS,
+    LLM_CALL_TIMEOUT,
     POLL_INTERVAL_SECONDS,
-    PRESENTATION_JOB_TIMEOUT,
+    SLIDE_COUNT_MAX,
     STATUS_ERROR,
     STATUS_READY,
     STOP_TIMEOUT_SECONDS,
+    presentation_job_timeout,
 )
+from app.modules.presentations.llm_schemas import content_section_count
 from app.modules.presentations.service import (
+    CallTimings,
     GenerationResult,
     PresentationsService,
     error_code_for,
@@ -162,15 +167,18 @@ class PresentationWorker:
     async def _process(self, presentation_id: int) -> None:
         """Одна генерация целиком, со всеми возможными исходами.
 
-        Таймаут стоит на джобе ЦЕЛИКОМ, а не на отдельном вызове модели:
-        застрять она может и в ретривале, и в рендере, а пользователю важно
-        суммарное время ожидания, а не то, какой шаг оказался длинным.
+        Таймаут живёт на уровне ВЫЗОВА (LLM_CALL_TIMEOUT вокруг каждой стадии в
+        service.py), а не здесь. Потолок джобы остался, но он теперь выведенный
+        и служит страховкой от беды, которой отдельный wait_for не видит по
+        построению, — от бесконечного цикла между стадиями.
         """
         started = perf_counter()
+        timings = CallTimings()
+        ceiling = await self._job_ceiling(presentation_id)
         try:
             result = await asyncio.wait_for(
-                generate_presentation(presentation_id),
-                timeout=PRESENTATION_JOB_TIMEOUT,
+                generate_presentation(presentation_id, timings=timings),
+                timeout=ceiling,
             )
         except asyncio.CancelledError:
             # CancelledError наследуется от BaseException, и except Exception
@@ -179,10 +187,75 @@ class PresentationWorker:
             await asyncio.shield(self._release(presentation_id))
             raise
         except Exception as exc:
-            await self._fail(presentation_id, exc, started)
+            await self._fail(presentation_id, exc, started, ceiling=ceiling)
             return
+        finally:
+            # Строка статистики пишется при ЛЮБОМ исходе: у джобы, снятой на
+            # десятом слайде, вызовов ровно десять, и это те самые вызовы, ради
+            # которых в лог и смотрят.
+            self._log_call_stats(presentation_id, timings, ceiling)
         await self._record_journal(
             presentation_id, status=STATUS_READY, result=result, started=started
+        )
+
+    async def _job_ceiling(self, presentation_id: int) -> float:
+        """Потолок джобы — считается из slide_count и пишется в лог при старте.
+
+        Число слайдов читается отдельным запросом, а не приходит из захвата:
+        claim_next возвращает только id, а потолок нужен ДО первого await
+        пайплайна. Запрос дешёвый и ровно один на джобу.
+
+        Недоступная в этот момент база не должна решать судьбу заказа: берём
+        потолок самой длинной колоды. Это ошибка в длинную сторону, а
+        единственная альтернатива — ошибка в короткую, то есть таймаут по
+        значению, к заказу отношения не имеющему.
+        """
+        slide_count = SLIDE_COUNT_MAX
+        try:
+            async with session_context() as session:
+                presentation = await session.get(Presentation, presentation_id)
+            if presentation is not None:
+                slide_count = presentation.slide_count
+        except Exception as exc:
+            logger.warning(
+                "Presentation %s: число слайдов не прочитано (%s), "
+                "потолок джобы берём по самой длинной колоде (%s слайдов)",
+                presentation_id,
+                exc,
+                SLIDE_COUNT_MAX,
+            )
+        ceiling = presentation_job_timeout(slide_count)
+        logger.info(
+            "Presentation %s: старт, слайдов %s -> вызовов модели %s "
+            "× попыток %s × %sс + рендер %sс = потолок джобы %.0fс",
+            presentation_id,
+            slide_count,
+            1 + max(1, content_section_count(slide_count)),
+            LLM_CALL_ATTEMPTS,
+            LLM_CALL_TIMEOUT,
+            LLM_CALL_TIMEOUT,
+            ceiling,
+        )
+        return ceiling
+
+    def _log_call_stats(
+        self, presentation_id: int, timings: CallTimings, ceiling: float
+    ) -> None:
+        """Одна строка о том, сколько шли вызовы модели этой джобы.
+
+        Смысл тот же, что у стартовой строки про embedding-коллекцию
+        (`embedding_model=X -> коллекция Y, векторов N`, chroma_gateway.py):
+        связать поведение системы с настройкой, которую меняют из админ-панели.
+        LLM_CALL_TIMEOUT калибруется по замерам конкретной чат-модели, а
+        чат-модель меняют мышкой — и без этой строки следующая смена
+        обнаружится не в логе, а по покрасневшим заказам.
+        """
+        logger.info(
+            "Presentation %s: %s; потолок вызова %sс, потолок джобы %.0fс",
+            presentation_id,
+            timings.summary(),
+            LLM_CALL_TIMEOUT,
+            ceiling,
         )
 
     # -- терминальные состояния ------------------------------------------
@@ -203,17 +276,26 @@ class PresentationWorker:
             )
 
     async def _fail(
-        self, presentation_id: int, exc: BaseException, started: float
+        self,
+        presentation_id: int,
+        exc: BaseException,
+        started: float,
+        *,
+        ceiling: float,
     ) -> None:
         error_code = error_code_for(exc)
         error_text = error_text_for(exc)
         # Таймаут — единственный отказ, у которого в логе нет собственного
-        # трейсбека с местом падения: там просто отменённая корутина.
+        # трейсбека с местом падения: там просто отменённая корутина. Зато
+        # теперь у него есть имя стадии — его несёт error_text.
         if error_code == PresentationErrors.GENERATION_TIMEOUT:
             logger.warning(
-                "Presentation %s timed out after %ss",
+                "Presentation %s timed out: %s (потолок вызова %sс, "
+                "потолок джобы %.0fс)",
                 presentation_id,
-                PRESENTATION_JOB_TIMEOUT,
+                error_text,
+                LLM_CALL_TIMEOUT,
+                ceiling,
             )
         else:
             logger.warning(

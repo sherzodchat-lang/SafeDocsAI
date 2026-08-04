@@ -233,15 +233,32 @@ class PresentationErrors:
     # намеренно — различать их должен разработчик по error_text и логу, а
     # пользователю во всех трёх случаях остаётся одно и то же действие.
     GENERATION_FAILED = "presentation.generation_failed"
-    # Джоба не уложилась в PRESENTATION_JOB_TIMEOUT
-    # (app/modules/presentations/constants.py). Отдельно от generation_failed:
+    # Стадия не уложилась в LLM_CALL_TIMEOUT — либо джоба целиком в выведенный
+    # из него потолок (app/modules/presentations/constants.py). Один код на оба
+    # случая: стадию называет error_text. Отдельно от generation_failed:
     # здесь ничего не сломано, и повтор — осмысленное действие, особенно если
     # сократить число слайдов.
     GENERATION_TIMEOUT = "presentation.generation_timeout"
-    # Ollama не ответила. Тоже отдельно: чинится не пользователем и не
-    # содержимым блокнота, а поднятой моделью, и повторять запрос имеет смысл
-    # только после этого.
+    # Ollama не ответила НА УСТАНОВЛЕНИЕ СВЯЗИ: соединение отвергнуто, хост
+    # недостижим, процесс не поднят. Тоже отдельно: чинится не пользователем и
+    # не содержимым блокнота, а поднятым сервисом, и повторять заказ имеет
+    # смысл только после этого.
     OLLAMA_UNAVAILABLE = "presentation.ollama_unavailable"
+    # Связь есть, но ответа на вызов модели не дождались — и это НЕ то же
+    # самое, что ollama_unavailable, хотя раньше отдавалось им.
+    #
+    # Разница не косметическая. На приёмке Ollama была жива и занята: она
+    # вытеснила модель из памяти («predicted to exceed available memory,
+    # evicting») и грузила её заново — 9 с, 20.7 с, 51.9 с. Заказ упал на 76%
+    # с текстом «Ollama недоступна», то есть администратора отправили чинить
+    # работающий сервис, а пользователя — ждать, пока «поднимут» поднятое.
+    # Настоящее действие здесь другое: повторить заказ (модель уже прогрета)
+    # или заказать колоду короче.
+    #
+    # Код выставляется только ПОСЛЕ исчерпания повторов (call_with_one_retry в
+    # app/modules/presentations/service.py): одиночный медленный вызов —
+    # рабочая ситуация, а не отказ.
+    LLM_TIMEOUT = "presentation.llm_timeout"
 
     # --- HTTP-слой (app/api/endpoints/presentations.py) ---
 
@@ -421,6 +438,31 @@ class SettingsError(ValueError):
         self.error_code = error_code
 
 
+class ExternalServiceErrorKind:
+    """Природа отказа внешнего сервиса — то, по чему решается «повторять ли».
+
+    Заведено потому, что status_code на этот вопрос не отвечает. Обёртка
+    провайдера (ModelManager._wrap_provider_error) сплющивала все причины в
+    503/502, и «соединение отвергнуто» становилось неотличимо от «ответ не
+    пришёл вовремя» и от «модель не установлена». На приёмке это стоило десяти
+    минут работы: Ollama вытеснила модель и грузила её заново, клиент отвалился
+    по своему таймауту, а заказ умер с кодом «Ollama недоступна» — без повтора,
+    который почти наверняка прошёл бы.
+
+    TIMEOUT, UNAVAILABLE и SERVER_ERROR — ВРЕМЕННЫЕ по природе: то же самое
+    обращение через минуту имеет шанс пройти. REQUEST_REJECTED — осмысленный
+    отказ («нет такой модели»), повторять его значит ждать вдвое дольше ради
+    того же ответа. UNKNOWN — причина не разобрана; повторять её нельзя, потому
+    что неизвестно, что именно повторяется.
+    """
+
+    TIMEOUT = "timeout"
+    UNAVAILABLE = "unavailable"
+    SERVER_ERROR = "server_error"
+    REQUEST_REJECTED = "request_rejected"
+    UNKNOWN = "unknown"
+
+
 class ExternalServiceError(Exception):
     def __init__(
         self,
@@ -429,9 +471,33 @@ class ExternalServiceError(Exception):
         service: str,
         status_code: int = 502,
         cause: Exception | None = None,
+        kind: str = ExternalServiceErrorKind.UNKNOWN,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.service = service
         self.status_code = status_code
         self.cause = cause
+        # Умолчание — UNKNOWN, а не «временный»: политика повтора строится на
+        # РАЗОБРАННОЙ причине. Ошибка, поднятая мимо классификатора, не должна
+        # молча получать право на второй вызов модели.
+        self.kind = kind
+
+    @property
+    def is_transient(self) -> bool:
+        """Имеет ли смысл повторить то же обращение.
+
+        Свойство живёт здесь, а не у вызывающего: список временных причин один
+        на проект, и вторая его копия разошлась бы с первой на первом же новом
+        виде отказа.
+        """
+        return self.kind in _TRANSIENT_EXTERNAL_SERVICE_KINDS
+
+
+_TRANSIENT_EXTERNAL_SERVICE_KINDS = frozenset(
+    {
+        ExternalServiceErrorKind.TIMEOUT,
+        ExternalServiceErrorKind.UNAVAILABLE,
+        ExternalServiceErrorKind.SERVER_ERROR,
+    }
+)

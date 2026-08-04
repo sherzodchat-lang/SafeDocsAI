@@ -23,6 +23,7 @@ resolve_notebook_scope): вторая реализация поиска по т�
 import asyncio
 import json
 import logging
+import math
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -35,7 +36,12 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.database import session_context
-from app.core.exceptions import ApiError, ExternalServiceError, PresentationErrors
+from app.core.exceptions import (
+    ApiError,
+    ExternalServiceError,
+    ExternalServiceErrorKind,
+    PresentationErrors,
+)
 from app.modules.chat.service import (
     load_chunk_texts,
     resolve_notebook_scope,
@@ -46,6 +52,9 @@ from app.modules.chat.service import (
 # значило бы, что однажды одна из них перестанет ловить новый вид пути.
 from app.modules.documents.service import redact_server_paths
 from app.modules.presentations.constants import (
+    LLM_CALL_ATTEMPTS,
+    LLM_CALL_TIMEOUT,
+    LLM_CALL_WATCHDOG_TIMEOUT,
     MAX_ERROR_TEXT,
     PLAN_RETRIEVAL_TOP_K,
     PRESENTATION_FILE_SUFFIX,
@@ -358,6 +367,141 @@ class PresentationsService:
 # --- Вспомогательное для пайплайна ---------------------------------------
 
 
+STAGE_PLAN = "план презентации"
+STAGE_RENDER = "сборка файла"
+
+
+def slide_stage(index: int, total: int, heading: str) -> str:
+    """Человекочитаемое имя стадии одного слайда.
+
+    Уезжает в error_text, а тот виден пользователю рядом со статусом, поэтому
+    называет и стадию, и КОНКРЕТНЫЙ слайд: «вызов не уложился в отведённое
+    время» без номера слайда одинаково описывает и заказ, зависший на первой
+    минуте, и заказ, зависший на предпоследней секции.
+    """
+    heading = (heading or "").strip()
+    return f"слайд {index + 1} из {total}" + (f" — {heading}" if heading else "")
+
+
+def build_presentation_model_manager() -> ModelManager:
+    """ModelManager пути презентаций: клиент с бюджетом LLM_CALL_TIMEOUT.
+
+    Отдельная фабрика, а не ModelManager() по месту, потому что связь между
+    откалиброванным потолком вызова и таймаутом HTTP-клиента — это ровно то,
+    что однажды уже разошлось молча: клиент жил на чатовских
+    settings.OLLAMA_TIMEOUT_SECONDS = 120 с, и посчитанные здесь 300 с не
+    достигались никогда (см. комментарий у LLM_CALL_TIMEOUT в constants.py).
+
+    Значение БЕРЁТСЯ ИЗ КОНСТАНТЫ, а не выписывается числом: пока источник
+    один, «второму независимому потолку» нечему дрейфовать — величина одна,
+    просто её знают двое.
+
+    Чатовский путь остаётся на своём умолчании намеренно: 120 с — осмысленный
+    интерактивный бюджет, за ним ждёт человек. Не «унифицировать».
+    """
+    return ModelManager(timeout=LLM_CALL_TIMEOUT)
+
+
+def timeout_error(stage: str, seconds: float) -> PresentationGenerationError:
+    """Отказ по таймауту ОДНОГО вызова, с именем стадии внутри.
+
+    Код остаётся presentation.generation_timeout: для пользователя это то же
+    самое событие, что и прежний потолок джобы, — «не уложились во время», — и
+    заводить второй код ради того, что теперь мы знаем, ГДЕ не уложились,
+    значило бы завести код, у которого нет своего совета пользователю. Знание
+    уходит в error_text.
+    """
+    return PresentationGenerationError(
+        PresentationErrors.GENERATION_TIMEOUT,
+        f"Стадия «{stage}» не уложилась в отведённые {int(seconds)} с",
+    )
+
+
+def provider_error(stage: str, exc: ExternalServiceError) -> PresentationGenerationError:
+    """Отказ провайдера, ПЕРЕЖИВШИЙ все попытки, -> код и текст пользователю.
+
+    Разводит два случая, которые прежде сливались в «Ollama недоступна»:
+
+    * не дождались ответа (kind = TIMEOUT) — сервис жив и занят. Ровно это и
+      случилось на приёмке: Ollama вытесняла модель и грузила её заново, а
+      пользователя отправляли к администратору поднимать поднятое;
+    * не установили связь (kind = UNAVAILABLE) или сервис ответил 5xx — до
+      его починки повторять заказ бессмысленно.
+
+    Второй случай сохраняет прежний код: менялось только то, что таймаут
+    перестал выдавать себя за недоступность.
+    """
+    if exc.kind == ExternalServiceErrorKind.TIMEOUT:
+        return PresentationGenerationError(
+            PresentationErrors.LLM_TIMEOUT,
+            f"Стадия «{stage}»: модель не ответила вовремя "
+            f"({int(LLM_CALL_TIMEOUT)} с на вызов, попыток {LLM_CALL_ATTEMPTS})",
+        )
+    return PresentationGenerationError(
+        PresentationErrors.OLLAMA_UNAVAILABLE,
+        f"Стадия «{stage}»: {exc.message}",
+    )
+
+
+@dataclass
+class CallTimings:
+    """Длительности вызовов модели одной джобы — сырьё для строки статистики.
+
+    Заводит и читает её ВОРКЕР, а пайплайн только наполняет: строка обязана
+    попасть в журнал и при отказе, а до конца пайплайна отказ по определению не
+    доходит. Отсюда и передача сюда извне, а не поле результата.
+
+    Зачем вообще. LLM_CALL_TIMEOUT калибруется по замерам конкретной модели, а
+    модель меняют из админ-панели — формулой эту связь не закрыть. Значит,
+    закрывать её надо наблюдаемостью: p50/p90 в логе каждой джобы делают смену
+    модели видимой с одного взгляда, а не через месяц по внезапно
+    покрасневшим заказам.
+    """
+
+    durations: list[float] = field(default_factory=list)
+    plan_calls: int = 0
+    slide_calls: int = 0
+    retries: int = 0
+
+    def record(self, *, stage: str, attempt: int, seconds: float) -> None:
+        self.durations.append(seconds)
+        if stage == STAGE_PLAN:
+            self.plan_calls += 1
+        else:
+            self.slide_calls += 1
+        if attempt > 1:
+            self.retries += 1
+
+    @staticmethod
+    def percentile(values: list[float], share: float) -> float:
+        """Ближайший ранг, а не интерполяция.
+
+        Выборка тут — единицы значений (14 вызовов на самой длинной колоде), и
+        интерполяция между соседними точками рисовала бы несуществующую
+        точность. Ближайший ранг всегда возвращает НАСТОЯЩИЙ наблюдённый вызов,
+        то есть число, которое можно найти в замерах.
+        """
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        index = math.ceil(share * len(ordered)) - 1
+        return ordered[min(max(index, 0), len(ordered) - 1)]
+
+    def summary(self) -> str:
+        """Одна строка: сколько вызовов, каких и как долго они шли."""
+        if not self.durations:
+            return "вызовов модели 0"
+        return (
+            f"вызовов модели {len(self.durations)} "
+            f"(план {self.plan_calls}, слайды {self.slide_calls}, "
+            f"повторных {self.retries}) -> "
+            f"p50 {self.percentile(self.durations, 0.5):.1f}с, "
+            f"p90 {self.percentile(self.durations, 0.9):.1f}с, "
+            f"max {max(self.durations):.1f}с, "
+            f"суммарно {sum(self.durations):.1f}с"
+        )
+
+
 @dataclass
 class GenerationResult:
     """Что пайплайн успел сделать — для журнала блокнота.
@@ -454,6 +598,8 @@ async def call_with_one_retry(
     messages: list[dict[str, str]],
     validate: Callable[[str], Any],
     label: str,
+    stage: str,
+    timings: CallTimings | None = None,
 ) -> Any:
     """Вызов модели, разбор и валидация; при провале — ОДНА повторная попытка.
 
@@ -462,15 +608,86 @@ async def call_with_one_retry(
     провал — честный отказ наружу, а не «починка» ответа руками: подставить
     недостающий буллет или выбросить лишнюю цитату означало бы выдать за
     проверенный результат то, чего модель не говорила.
+
+    Повторяется не только невалидный ответ. ВРЕМЕННЫЙ отказ провайдера
+    (не дождались ответа, соединение не встало, 5xx) — тоже повод для второй
+    попытки: на приёмке Ollama вытеснила модель из памяти и грузила её заново
+    (9 с -> 20.7 с -> 51.9 с), первый же такой отказ уходил наверх без повтора
+    и хоронил заказ, сделанный на 76%. Осмысленный отказ запросу («нет такой
+    модели») не повторяется: второй вызов вернёт тот же ответ, потратив вдвое
+    больше времени.
+
+    Таймаут стоит ЗДЕСЬ, вокруг каждого обращения к модели, и у КАЖДОЙ попытки
+    он свой: повтор — это отдельный вызов, который заново генерирует весь
+    ответ, а не остаток первого. Общий на две попытки бюджет означал бы, что
+    медленная первая попытка съедает время второй, и заказ падал бы по таймауту
+    на попытке, которая сама по себе была здоровой.
+
+    Потолков времени тут два, и это не дублирование. Первым обязан сработать
+    HTTP-КЛИЕНТ (LLM_CALL_TIMEOUT, см. build_presentation_model_manager): он
+    приносит внятную ошибку с причиной, по которой видно, повторять ли вызов.
+    wait_for стоит на LLM_CALL_WATCHDOG_TIMEOUT, то есть ЗАВЕДОМО ПОЗЖЕ, и
+    остаётся страховкой второго эшелона — на зависание, которого клиент не
+    видит по построению (разбор уже полученного тела, поток, который сервер не
+    закрыл). Поменяй их местами — и вместо причины отказа снова останется
+    голая отмена корутины.
     """
     current_messages = messages
     last_error: LlmResponseError | None = None
-    for attempt in (1, 2):
-        raw = await model_manager.chat(
-            model=model,
-            messages=current_messages,
-            num_ctx=PRESENTATION_NUM_CTX,
-        )
+    for attempt in range(1, LLM_CALL_ATTEMPTS + 1):
+        started = perf_counter()
+        try:
+            raw = await asyncio.wait_for(
+                model_manager.chat(
+                    model=model,
+                    messages=current_messages,
+                    num_ctx=PRESENTATION_NUM_CTX,
+                ),
+                timeout=LLM_CALL_WATCHDOG_TIMEOUT,
+            )
+        except asyncio.TimeoutError as exc:
+            logger.warning(
+                "Presentation %s: attempt %d hit the watchdog after %ss "
+                "(the client timeout of %ss did not fire — the call hung "
+                "outside the request)",
+                label,
+                attempt,
+                LLM_CALL_WATCHDOG_TIMEOUT,
+                LLM_CALL_TIMEOUT,
+            )
+            raise timeout_error(stage, LLM_CALL_WATCHDOG_TIMEOUT) from exc
+        except ExternalServiceError as exc:
+            # Причина уже разобрана обёрткой провайдера
+            # (ModelManager._wrap_provider_error) — здесь только политика.
+            if not exc.is_transient:
+                raise
+            if attempt >= LLM_CALL_ATTEMPTS:
+                raise provider_error(stage, exc) from exc
+            logger.warning(
+                "Presentation %s: attempt %d failed transiently (%s: %s), retrying",
+                label,
+                attempt,
+                exc.kind,
+                exc.message,
+            )
+            # Промпт остаётся ИСХОДНЫМ: ответа не было вовсе, предъявлять
+            # модели нечего, а build_retry_messages рассчитан на разговор про
+            # отвергнутый ответ.
+            continue
+        finally:
+            # В статистику попадает и вызов, снятый по таймауту: его длительность
+            # известна и равна потолку, а строка с `max 300.0с` — единственное,
+            # по чему в логе видно, что заказ упёрся именно в потолок, а не
+            # просто был медленным.
+            #
+            # Ровное число в этой графе читается как «сработал чей-то потолок»,
+            # и по нему же виден ЧЕЙ: 300 с — свой (LLM_CALL_TIMEOUT), 330 с —
+            # страховка wait_for, а всё прочее ровное (памятные 120 с) означает
+            # чужой потолок, пролезший в путь презентаций.
+            if timings is not None:
+                timings.record(
+                    stage=stage, attempt=attempt, seconds=perf_counter() - started
+                )
         try:
             return validate(raw)
         except LlmResponseError as exc:
@@ -633,17 +850,23 @@ def _journal_sources(sources: list[RenderedSource]) -> str | None:
 # --- Пайплайн -------------------------------------------------------------
 
 
-async def generate_presentation(presentation_id: int) -> GenerationResult:
+async def generate_presentation(
+    presentation_id: int, *, timings: CallTimings | None = None
+) -> GenerationResult:
     """Собрать колоду для уже захваченной задачи.
 
     Ожидает, что строка уже переведена в 'generating' (claim_next). Успех
     коммитит сама; любой отказ поднимает PresentationGenerationError, а
     записывает его воркер. Возвращённый GenerationResult нужен воркеру для
     записи в журнал блокнота.
+
+    timings принадлежит воркеру и наполняется по ходу дела: строка статистики
+    по вызовам модели обязана попасть в лог и у джобы, которая до конца не
+    дошла, — а такая джоба ничего не возвращает.
     """
     started = perf_counter()
     result = GenerationResult()
-    model_manager = ModelManager()
+    model_manager = build_presentation_model_manager()
     rag_service = RAGService()
     runtime_settings = RuntimeSettingsService.get_settings()
     model = runtime_settings.get("chat_model") or runtime_settings.get("model")
@@ -741,6 +964,8 @@ async def generate_presentation(presentation_id: int) -> GenerationResult:
                 raw, slide_count=presentation.slide_count
             ),
             label=f"#{presentation_id} plan",
+            stage=STAGE_PLAN,
+            timings=timings,
         )
 
         # (в) Слайды. Прогресс: 90% делятся поровну между секциями, последние
@@ -807,6 +1032,8 @@ async def generate_presentation(presentation_id: int) -> GenerationResult:
                     raw, allowed_citations=allowed_citations
                 ),
                 label=f"#{presentation_id} slide {index + 1}",
+                stage=slide_stage(index, section_count, section.heading),
+                timings=timings,
             )
 
             slides.append(slide)
@@ -876,26 +1103,41 @@ async def _render_to_file(
     блокировка всего процесса — ровно тот дефект, который в проекте уже чинили
     для ChromaDB. Отсюда run_in_threadpool.
 
+    Рендер — такая же стадия, как вызов модели, и обёрнут тем же бюджетом:
+    зависнуть он может на записи файла (полный или отвалившийся том), и без
+    собственного таймаута эта беда ждала бы потолка джобы, то есть часами.
+    Оговорка честная: wait_for отменяет ОЖИДАНИЕ, а не поток — python-pptx
+    дописывает временный файл уже некому. Поэтому уборка ниже стоит в finally
+    и срабатывает в том числе на отменённом ожидании.
+
     Временный файл подчищается при любом исходе: без этого каждая неудачная
     генерация оставляла бы на диске мусор, который никто не ищет.
     """
     final_path, temp_path = _presentation_paths(presentation_id)
     try:
-        await run_in_threadpool(
-            render_presentation,
-            title=title,
-            slides=slides,
-            sources=sources,
-            language=language,
-            template_key=template_key,
-            notebook_name=notebook_name,
-            created_at=created_at,
-            output_path=temp_path,
+        await asyncio.wait_for(
+            run_in_threadpool(
+                render_presentation,
+                title=title,
+                slides=slides,
+                sources=sources,
+                language=language,
+                template_key=template_key,
+                notebook_name=notebook_name,
+                created_at=created_at,
+                output_path=temp_path,
+            ),
+            timeout=LLM_CALL_TIMEOUT,
         )
         file_size = os.path.getsize(temp_path)
         os.replace(temp_path, final_path)
     except PresentationGenerationError:
         raise
+    except asyncio.TimeoutError as exc:
+        # Отдельной веткой и ВЫШЕ общей: asyncio.TimeoutError — подкласс
+        # Exception, и без этой ветки понятный «стадия не уложилась» превратился
+        # бы в generation_failed с текстом «TimeoutError: ».
+        raise timeout_error(STAGE_RENDER, LLM_CALL_TIMEOUT) from exc
     except Exception as exc:
         raise PresentationGenerationError(
             PresentationErrors.GENERATION_FAILED,
@@ -922,6 +1164,13 @@ def error_code_for(exc: BaseException) -> str:
     if isinstance(exc, asyncio.TimeoutError):
         return PresentationErrors.GENERATION_TIMEOUT
     if isinstance(exc, ExternalServiceError) and exc.service == "Ollama":
+        # Отказы вызова модели сюда доходят уже с выбранным кодом
+        # (provider_error выше), а здесь остаётся всё прочее, что ходит в
+        # Ollama по дороге, — прежде всего embedding-и ретривала. Причина
+        # разбирается и у них: «не дождались ответа» и «сервиса нет» чинятся
+        # разными людьми, независимо от того, на какой стадии это случилось.
+        if exc.kind == ExternalServiceErrorKind.TIMEOUT:
+            return PresentationErrors.LLM_TIMEOUT
         return PresentationErrors.OLLAMA_UNAVAILABLE
     return PresentationErrors.GENERATION_FAILED
 
@@ -938,7 +1187,12 @@ def error_text_for(exc: BaseException) -> str:
     if isinstance(exc, PresentationGenerationError):
         message = str(exc)
     elif isinstance(exc, asyncio.TimeoutError):
-        message = "Генерация не уложилась в отведённое время"
+        # Сюда доходит только СНЯТИЕ ПО ПОТОЛКУ ДЖОБЫ: у отдельных стадий есть
+        # свой wait_for, и они называют себя сами (timeout_error выше). Значит,
+        # стадии здесь нет и быть не может — джоба не уложилась целиком, то
+        # есть повисла там, где отдельного бюджета нет: в ретривале, в цикле по
+        # секциям, в соединении с базой.
+        message = "Генерация не уложилась в общий потолок джобы"
     elif isinstance(exc, ExternalServiceError):
         message = exc.message
     else:

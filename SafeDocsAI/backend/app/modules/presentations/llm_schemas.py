@@ -67,6 +67,14 @@ _CODE_FENCE_RE = re.compile(
     re.DOTALL,
 )
 
+# Управляющие символы, которые модель ставит осмысленно: перевод строки внутри
+# буллета и табуляция внутри текста. Их не выкидываем, а приводим к тому, чем
+# они и должны были быть в JSON, — к экранированной форме. Остальным C0
+# (\x00-\x1f: ESC, \x0c, обрывки CR и прочее) в тексте слайда делать нечего:
+# они не несут смысла и доезжают до рендерера, где превращаются в видимый мусор
+# вида "_x001B_" прямо на слайде.
+_MEANINGFUL_CONTROL_ESCAPES = {"\n": "\\n", "\t": "\\t"}
+
 
 def content_section_count(slide_count: int) -> int:
     """Сколько контентных секций должен вернуть план для slide_count слайдов."""
@@ -235,6 +243,63 @@ def strip_code_fences(raw: str) -> str:
     return text
 
 
+def escape_control_characters(text: str) -> str:
+    """Привести неэкранированные управляющие символы ВНУТРИ строк к JSON-виду.
+
+    Модель регулярно отдаёт JSON, в котором внутри строкового значения стоит
+    живой перевод строки, — по стандарту это невалидный JSON, и `json.loads`
+    отвергает его целиком («Invalid control character at ...»). Отказ честный,
+    но лечится он не второй попыткой (на живом стенде оба захода упали на одном
+    и том же символе), а здесь: до разбора.
+
+    Что делаем внутри строки:
+    * `\\n` и `\\t` — экранируем. Это ровно то, что модель имела в виду, и
+      смысл текста сохраняется: перенос строки в буллете остаётся переносом.
+    * остальные C0 — выкидываем. Смысла они не несут, а доехав до рендерера,
+      становятся видимым мусором на слайде.
+
+    Вне строк управляющие символы — законный пробельный разделитель JSON, и там
+    текст не трогаем вообще. Отсюда же и главное свойство: валидный ответ
+    проходит через функцию НЕИЗМЕННЫМ, потому что в валидном JSON живых
+    управляющих символов внутри строк нет по определению.
+
+    Альтернатива — `json.loads(..., strict=False)` — отвергнута сознательно:
+    она не чистит, а разрешает, причём всему разбору сразу. Мусорный `\\x1b`
+    молча доехал бы до текста слайда, а заодно ослабла бы проверка ответов, у
+    которых с управляющими символами всё в порядке.
+    """
+    result: list[str] = []
+    in_string = False
+    after_backslash = False
+    for char in text:
+        if not in_string:
+            if char == '"':
+                in_string = True
+            result.append(char)
+            continue
+        if after_backslash:
+            # Символ под экранированием — уже часть escape-последовательности,
+            # и своего значения (в том числе «закрыть строку») не имеет.
+            result.append(char)
+            after_backslash = False
+            continue
+        if char == "\\":
+            result.append(char)
+            after_backslash = True
+            continue
+        if char == '"':
+            in_string = False
+            result.append(char)
+            continue
+        if char < " ":
+            replacement = _MEANINGFUL_CONTROL_ESCAPES.get(char)
+            if replacement is not None:
+                result.append(replacement)
+            continue
+        result.append(char)
+    return "".join(result)
+
+
 def parse_model_json(raw: str) -> dict[str, Any]:
     """Сырой ответ модели → словарь.
 
@@ -242,8 +307,11 @@ def parse_model_json(raw: str) -> dict[str, Any]:
     «Вот JSON:». Он намеренно ограничен объектом верхнего уровня: гадать по
     обрывкам, что модель имела в виду, — способ выдать испорченный ответ за
     рабочий.
+
+    Чистка управляющих символов стоит здесь же, в одном месте с ограждениями и
+    до `json.loads`, — чтобы оба прохода разбирали один и тот же текст.
     """
-    text = strip_code_fences(raw)
+    text = escape_control_characters(strip_code_fences(raw))
     if not text:
         raise LlmResponseError("model returned an empty response")
 
