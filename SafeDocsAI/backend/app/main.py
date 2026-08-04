@@ -61,6 +61,7 @@ async def lifespan(_app: FastAPI):
         )
 
     from app.modules.jobs.worker import IndexingWorker
+    from app.modules.presentations.worker import PresentationWorker
 
     worker = IndexingWorker()
     # Задачи и документы, оставшиеся от убитого процесса, приводим в
@@ -68,12 +69,27 @@ async def lifespan(_app: FastAPI):
     await worker.reconcile()
     worker.start()
     _app.state.indexing_worker = worker
+
+    # Генерация презентаций — своя очередь и свой цикл, но тот же lifespan.
+    # Отдельный воркер, а не задача в очереди индексации: генерация занимает
+    # минуты и держит GPU, и в общей очереди она задерживала бы загрузку
+    # документов ровно на своё время.
+    presentation_worker = PresentationWorker()
+    await presentation_worker.recover()
+    presentation_worker.start()
+    _app.state.presentation_worker = presentation_worker
     try:
         yield
     finally:
         # Останавливаемся штатно: воркер успевает вернуть текущую задачу
         # в очередь, а документ — из 'indexing' в 'pending'.
-        await worker.stop()
+        #
+        # Остановка презентаций идёт в своём try: отказ на одном воркере не
+        # должен оставить второй работать в уже закрывающемся приложении.
+        try:
+            await presentation_worker.stop()
+        finally:
+            await worker.stop()
 
 
 app = FastAPI(

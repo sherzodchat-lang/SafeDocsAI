@@ -19,6 +19,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY run.py .
 
+# Шаблоны презентаций: неизменяемый артефакт релиза, а не данные инстанса.
+# Отдельным слоем и рядом с app/, потому что реестр ищет их относительно
+# каталога backend (см. app/modules/presentations/templates.py). В data/ им
+# нельзя: тот каталог монтируется томом и переживает выкладку.
+COPY templates/ ./templates/
+
 # Create data directory
 RUN mkdir -p data/uploads data/chroma
 

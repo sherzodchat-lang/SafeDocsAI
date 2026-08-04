@@ -177,6 +177,61 @@ class Insight(InsightBase, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class PresentationBase(SQLModel):
+    # Ключ шаблона оформления (app/modules/presentations/templates.py). Строка,
+    # а не enum: набор шаблонов пополняется файлами в каталоге, а не миграцией.
+    template_key: str
+    # Код языка колоды. Каноническое значение — 'ru' или 'tj'
+    # (см. app/modules/presentations/constants.py: ISO был бы tg, но проект
+    # везде обозначает таджикский как tj).
+    language: str = Field(default="ru")
+    # ИТОГОВОЕ число слайдов в файле, включая титульный и «Источники»
+    # (см. RENDERER_ADDED_SLIDES в modules/presentations/llm_schemas.py).
+    slide_count: int
+    description: Optional[str] = None
+    # queued -> generating -> ready | error. Индекс по колонке нужен не сам по
+    # себе (выборку очереди покрывает составной ix_presentation_queue из
+    # init_db), а для «сколько презентаций в работе» без сканирования таблицы.
+    status: str = Field(default="queued", index=True)
+    progress: int = Field(default=0)
+    # Причина отказа: машинный код для интерфейса (PresentationErrors) и текст
+    # для человека — ровно та же пара, что у document.error_code/error_text.
+    error_code: Optional[str] = None
+    error_text: Optional[str] = None
+    # Заполняются только у status='ready': путь к .pptx на диске и его размер.
+    file_path: Optional[str] = None
+    file_size: Optional[int] = None
+
+
+class Presentation(PresentationBase, table=True):
+    """Заказ на генерацию презентации и её результат в одной строке.
+
+    Своя таблица, а не запись в job. Job сцеплен с семантикой индексации
+    (source_id, attempt_count, аренда через started_at, бюджет попыток), его
+    внешние ключи уже приходилось чинить, и путь удаления блокнота вокруг него
+    закалён. Самодостаточная строка ничего из этого не трогает и читается
+    целиком одним SELECT — включая то, что показывается пользователю.
+
+    updated_at обязан меняться при КАЖДОЙ смене статуса и на каждом шаге
+    прогресса: по нему клиент понимает, что генерация жива, а не висит. В
+    проекте уже был дефект «updated_at заявлен, но никогда не меняется»
+    (note/insight), поэтому здесь его двигает единственная точка записи —
+    PresentationsService (app/modules/presentations/service.py), а не
+    вызывающий код.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    notebook_id: int = Field(foreign_key="notebook.id", index=True)
+    # Владелец обязателен С РОЖДЕНИЯ таблицы: колонка заводится вместе с ней, и
+    # legacy-строк без владельца здесь не будет никогда. Именно из-за поздней
+    # колонки notebook.owner_id и document.owner_id проверки владения годами
+    # помнили особый случай «ничей — значит админский», а init_db до сих пор
+    # возит бэкфилл. Второй раз этот путь не проходим.
+    owner_id: int = Field(foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class JobBase(SQLModel):
     job_type: str = Field(index=True)
     status: str = Field(default="queued", index=True)

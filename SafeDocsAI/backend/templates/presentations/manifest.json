@@ -1,0 +1,47 @@
+[
+  {
+    "key": "classic",
+    "name": {
+      "ru": "Классический",
+      "tj": "Классикӣ"
+    },
+    "template_file": "classic.pptx",
+    "preview_file": "classic.png",
+    "layouts": {
+      "title": 0,
+      "section": 2,
+      "bullets": 1,
+      "sources": 3
+    }
+  },
+  {
+    "key": "contrast",
+    "name": {
+      "ru": "Контрастный",
+      "tj": "Контрастӣ"
+    },
+    "template_file": "contrast.pptx",
+    "preview_file": "contrast.png",
+    "layouts": {
+      "title": 0,
+      "section": 2,
+      "bullets": 1,
+      "sources": 3
+    }
+  },
+  {
+    "key": "minimal",
+    "name": {
+      "ru": "Минималистичный",
+      "tj": "Минималистӣ"
+    },
+    "template_file": "minimal.pptx",
+    "preview_file": "minimal.png",
+    "layouts": {
+      "title": 0,
+      "section": 2,
+      "bullets": 1,
+      "sources": 3
+    }
+  }
+]

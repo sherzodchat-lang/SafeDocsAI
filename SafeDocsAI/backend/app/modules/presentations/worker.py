@@ -1,0 +1,275 @@
+"""Фоновый воркер генерации презентаций.
+
+Отдельная корутина в том же lifespan, что и воркер индексации, со своим циклом
+и своей очередью. Общего у них только устройство: очередь живёт в БД, а не в
+памяти процесса, поэтому переживает перезапуск, а захват задачи атомарен и
+корректен при uvicorn --workers 2.
+
+Почему не задача в таблице job. Job сцеплен с семантикой индексации, его
+внешние ключи уже приходилось чинить, а путь удаления блокнота вокруг него
+закалён; самодостаточная строка presentation ничего из этого не трогает.
+Почему не тот же цикл. Генерация занимает минуты и держит GPU; поставленная в
+одну очередь с индексацией, она задержала бы загрузку документов ровно на своё
+время, а очередь индексации — самое чувствительное место продукта.
+
+Главное свойство цикла: ИСКЛЮЧЕНИЕ ВНУТРИ ДЖОБЫ ЕГО НЕ РОНЯЕТ. Упавшая
+генерация — это строка со status='error', а не остановленная очередь: воркер
+некому перезапустить до следующего рестарта сервера, и первый же неудачный
+заказ отменил бы функцию для всех остальных.
+"""
+
+import asyncio
+import contextlib
+import logging
+from time import perf_counter
+
+from app.core.database import session_context
+from app.core.exceptions import PresentationErrors, SettingsErrors
+from app.modules.presentations.constants import (
+    ERROR_BACKOFF_SECONDS,
+    POLL_INTERVAL_SECONDS,
+    PRESENTATION_JOB_TIMEOUT,
+    STATUS_ERROR,
+    STATUS_READY,
+    STOP_TIMEOUT_SECONDS,
+)
+from app.modules.presentations.service import (
+    GenerationResult,
+    PresentationsService,
+    error_code_for,
+    error_text_for,
+    generate_presentation,
+    queue_wakeup,
+    write_journal_entry,
+)
+from app.shared.models import Presentation
+
+logger = logging.getLogger(__name__)
+
+# Как часто напоминать в журнале, что очередь стоит из-за незаданной
+# embedding-модели. Значение и довод — те же, что у воркера индексации.
+UNSET_MODEL_LOG_INTERVAL_SECONDS = 300.0
+
+_INTERRUPTED = "Генерация прервана остановкой сервера"
+
+
+class PresentationWorker:
+    def __init__(self, poll_interval: float = POLL_INTERVAL_SECONDS) -> None:
+        self._poll_interval = poll_interval
+        self._task: asyncio.Task | None = None
+        self._unset_model_logged_at = float("-inf")
+
+    # -- жизненный цикл --------------------------------------------------
+    def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run(), name="presentation-worker")
+        logger.info("Presentation worker started")
+
+    async def stop(self) -> None:
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(task, timeout=STOP_TIMEOUT_SECONDS)
+        logger.info("Presentation worker stopped")
+
+    async def recover(self) -> None:
+        """Вернуть в очередь то, что осталось от убитого процесса.
+
+        Генерация не имеет промежуточного состояния на диске: файл появляется
+        целиком и в самом конце. Поэтому 'generating', переживший перезапуск, —
+        это не работа, которую можно продолжить, а работа, которую надо начать
+        заново.
+
+        Отсутствие БД на старте не должно валить приложение: следующая итерация
+        цикла всё равно ничего не захватит, а согласование повторится при
+        следующем запуске.
+        """
+        try:
+            async with session_context() as session:
+                requeued = await PresentationsService.requeue_stuck(session)
+        except Exception as exc:
+            logger.warning("Presentation reconciliation skipped: %s", exc)
+            return
+        if requeued:
+            logger.info(
+                "Presentations returned to the queue after restart: %s", requeued
+            )
+
+    # -- цикл ------------------------------------------------------------
+    async def _run(self) -> None:
+        wakeup = queue_wakeup()
+        while True:
+            try:
+                claimed = await self._claim_and_process()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Сюда доходит только беда САМОГО цикла: недоступная БД,
+                # неожиданный отказ захвата. Ошибки конкретной генерации
+                # разбираются внутри _process и до этой ветки не поднимаются.
+                logger.exception("Presentation worker iteration failed")
+                await asyncio.sleep(ERROR_BACKOFF_SECONDS)
+                continue
+            if claimed:
+                continue
+            wakeup.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(wakeup.wait(), timeout=self._poll_interval)
+
+    def _embedding_model_is_set(self) -> bool:
+        """Есть ли чем искать. Иначе задачи не берём вовсе.
+
+        Ровно то же решение, что у воркера индексации
+        (IndexingWorker._embedding_model_is_set), и по той же причине: имя
+        коллекции ChromaDB выводится из embedding-модели, а без поиска
+        презентация — это пересказ пустоты.
+
+        Захватить и провалить нельзя: у раздела нет и не должно быть кода
+        «модель не выбрана» — причина не в заказе и не в блокноте, а в одной
+        ненастроенной строке, которую админ исправит за минуту. Заказ остаётся
+        'queued' с честной позицией в очереди и уедет в работу сам, как только
+        модель выберут. Это тот же ответ по смыслу, что 503 на HTTP: «запрос
+        верный, повторим позже».
+        """
+        from app.shared.settings.runtime_settings import RuntimeSettingsService
+
+        if RuntimeSettingsService.embedding_model():
+            return True
+        now = asyncio.get_running_loop().time()
+        if now - self._unset_model_logged_at >= UNSET_MODEL_LOG_INTERVAL_SECONDS:
+            self._unset_model_logged_at = now
+            logger.error(
+                "Presentation queue is paused: embedding model is not set (%s). "
+                "Orders stay 'queued'; pick a model in the admin panel or set "
+                "OLLAMA_MODEL_EMBEDDING.",
+                SettingsErrors.EMBEDDING_MODEL_UNSET,
+            )
+        return False
+
+    async def _claim_and_process(self) -> bool:
+        if not self._embedding_model_is_set():
+            return False
+        async with session_context() as session:
+            presentation_id = await PresentationsService.claim_next(session)
+        if presentation_id is None:
+            return False
+        await self._process(presentation_id)
+        return True
+
+    async def _process(self, presentation_id: int) -> None:
+        """Одна генерация целиком, со всеми возможными исходами.
+
+        Таймаут стоит на джобе ЦЕЛИКОМ, а не на отдельном вызове модели:
+        застрять она может и в ретривале, и в рендере, а пользователю важно
+        суммарное время ожидания, а не то, какой шаг оказался длинным.
+        """
+        started = perf_counter()
+        try:
+            result = await asyncio.wait_for(
+                generate_presentation(presentation_id),
+                timeout=PRESENTATION_JOB_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            # CancelledError наследуется от BaseException, и except Exception
+            # его не видит. Без этой ветки штатный SIGTERM оставлял бы заказ в
+            # 'generating' навсегда.
+            await asyncio.shield(self._release(presentation_id))
+            raise
+        except Exception as exc:
+            await self._fail(presentation_id, exc, started)
+            return
+        await self._record_journal(
+            presentation_id, status=STATUS_READY, result=result, started=started
+        )
+
+    # -- терминальные состояния ------------------------------------------
+    async def _release(self, presentation_id: int) -> None:
+        """Прерванный заказ возвращается в очередь, а не падает в ошибку.
+
+        Остановка сервера — не вина заказа: при следующем старте он честно
+        отработает с начала.
+        """
+        try:
+            async with session_context() as session:
+                await PresentationsService.requeue(session, presentation_id)
+            logger.info("%s: presentation %s", _INTERRUPTED, presentation_id)
+        except Exception:
+            # Последний рубеж — recover() следующего запуска.
+            logger.exception(
+                "Failed to release interrupted presentation %s", presentation_id
+            )
+
+    async def _fail(
+        self, presentation_id: int, exc: BaseException, started: float
+    ) -> None:
+        error_code = error_code_for(exc)
+        error_text = error_text_for(exc)
+        # Таймаут — единственный отказ, у которого в логе нет собственного
+        # трейсбека с местом падения: там просто отменённая корутина.
+        if error_code == PresentationErrors.GENERATION_TIMEOUT:
+            logger.warning(
+                "Presentation %s timed out after %ss",
+                presentation_id,
+                PRESENTATION_JOB_TIMEOUT,
+            )
+        else:
+            logger.warning(
+                "Presentation %s failed (%s): %s",
+                presentation_id,
+                error_code,
+                error_text,
+                exc_info=True,
+            )
+        try:
+            async with session_context() as session:
+                await PresentationsService.mark_error(
+                    session,
+                    presentation_id,
+                    error_code=error_code,
+                    error_text=error_text,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to record the failure of presentation %s", presentation_id
+            )
+        await self._record_journal(
+            presentation_id,
+            status=STATUS_ERROR,
+            result=GenerationResult(),
+            started=started,
+            error_code=error_code,
+            error_text=error_text,
+        )
+
+    async def _record_journal(
+        self,
+        presentation_id: int,
+        *,
+        status: str,
+        result: GenerationResult,
+        started: float,
+        error_code: str | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        """Событие в журнал блокнота — и на успех, и на отказ."""
+        try:
+            async with session_context() as session:
+                presentation = await session.get(Presentation, presentation_id)
+        except Exception:
+            logger.exception(
+                "Failed to load presentation %s for the journal entry", presentation_id
+            )
+            return
+        if presentation is None:
+            return
+        await write_journal_entry(
+            presentation=presentation,
+            status=status,
+            error_code=error_code,
+            error_text=error_text,
+            result=result,
+            elapsed_ms=int((perf_counter() - started) * 1000),
+        )

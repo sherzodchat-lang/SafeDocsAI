@@ -97,6 +97,26 @@ async def init_db():
                 )
             )
 
+            # Очередь презентаций. Воркер на каждой итерации ищет самую раннюю
+            # строку со status='queued' (ORDER BY created_at, id), а расчёт
+            # позиции в очереди на каждый запрос статуса считает такие строки
+            # «строго раньше этой». Оба запроса без индекса — seq scan по всей
+            # истории генераций.
+            #
+            # Таблица presentation создаётся самим create_all выше (она новая,
+            # ALTER для неё не нужен), а вот составной индекс SQLModel из
+            # объявления модели не выводит: Field(index=True) умеет только
+            # одноколоночные. Отсюда явный CREATE INDEX IF NOT EXISTS — тот же
+            # приём и та же идемпотентность, что у ix_job_queue выше.
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_presentation_queue
+                    ON presentation (status, created_at)
+                    """
+                )
+            )
+
             # Владение источниками. Колонка добавляется отдельно от create_all,
             # потому что на существующих базах таблица document уже есть.
             await conn.execute(

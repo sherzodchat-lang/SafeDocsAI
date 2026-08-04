@@ -86,6 +86,7 @@ TEST_SCHEMA = os.environ.get("SAFEDOCS_TEST_SCHEMA", f"{SCHEMA_PREFIX}{os.getpid
 _TABLES = (
     "chunk",
     "job",
+    "presentation",
     "insight",
     "note",
     "log",
