@@ -89,7 +89,8 @@ class ControlCharacterRepairTests(unittest.TestCase):
 
     def test_repaired_response_reaches_the_schema(self):
         raw = (
-            '{"heading": "Ставки НДС", "bullets": ["первая' + LF + 'вторая", '
+            '{"layout": "bullets", "heading": "Ставки НДС", '
+            '"bullets": ["первая' + LF + 'вторая", '
             '"второй факт"], "citations": [{"source_id": 7, "chunk_id": 45}]}'
         )
         slide = validate_slide(raw, allowed_citations={"45": 7})

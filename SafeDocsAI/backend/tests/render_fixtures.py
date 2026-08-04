@@ -6,7 +6,7 @@
 test_presentation_print.py), и на полном пайплайне (tests/
 test_presentation_pipeline_db.py), и подготовка у них совпадает дословно.
 
-Три вещи, ради которых заведён файл:
+Четыре вещи, ради которых заведён файл:
 
   * ПОДДЕЛЬНЫЙ БРАУЗЕР. Настоящий Chrome не умеет зависать по заказу, а именно
     зависание и надо проверить: стадийный таймаут, убийство группы процессов,
@@ -17,16 +17,24 @@ test_presentation_pipeline_db.py), и подготовка у них совпа�
     шаблонов, то есть запускает Chrome четыре раза. Тестам печати это лишние
     секунды на каждом классе и лишняя зависимость от браузера там, где его
     проверять не собирались;
+  * СЛАЙДЫ ВСЕХ ПЯТИ РАСКЛАДОК. Один и тот же словарь-ответ модели годится и
+    как JSON для подмены модели в пайплайне, и как провалидированный слайд для
+    сборки контекста: фикстура одна, дорога у неё разная — и обе дороги ведут
+    через настоящий разбор (validate_slide), потому что слайд-раскладка
+    собранная руками могла бы нести поля двух раскладок сразу, чего схема не
+    пропускает;
   * ЧТЕНИЕ PDF. Проверять надо ГОТОВЫЙ PDF, а не DOM: Chrome при печати
     расставляет содержимое иначе, чем на экране, и запись, видимая в браузере, в
     файле может отсутствовать. Тест, смотрящий в HTML, подтвердил бы вёрстку,
     которой в файле нет.
 """
 
+import json
 import os
 import stat
 import sys
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,8 +46,32 @@ from app.modules.presentations.chromium import (  # noqa: E402
     CHROMIUM_BINARY_ENV,
     chromium_status,
 )
-from app.modules.presentations.llm_schemas import PresentationSlide  # noqa: E402
-from app.modules.presentations.renderer import RenderedSource  # noqa: E402
+from app.modules.presentations.llm_schemas import (  # noqa: E402
+    LAYOUT_BULLETS,
+    LAYOUT_COMPARE,
+    LAYOUT_METRIC,
+    LAYOUT_QUOTE,
+    LAYOUT_STEPS,
+    SLIDE_BULLET_MAX_CHARS,
+    SLIDE_BULLETS_MAX,
+    SLIDE_COMPARE_BULLET_MAX_CHARS,
+    SLIDE_COMPARE_BULLETS_MAX,
+    SLIDE_COMPARE_HEADING_MAX_CHARS,
+    SLIDE_HEADING_MAX_CHARS,
+    SLIDE_METRIC_CAPTION_MAX_CHARS,
+    SLIDE_METRIC_NOTE_MAX_CHARS,
+    SLIDE_METRIC_VALUE_MAX_CHARS,
+    SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS,
+    SLIDE_QUOTE_TEXT_MAX_CHARS,
+    SLIDE_STEP_TEXT_MAX_CHARS,
+    SLIDE_STEP_TITLE_MAX_CHARS,
+    SLIDE_STEPS_MAX,
+    validate_slide,
+)
+from app.modules.presentations.renderer import (  # noqa: E402
+    RenderedSource,
+    build_render_context,
+)
 from app.modules.presentations.templates import TemplateRegistry  # noqa: E402
 
 # Ключи всех шаблонов комплекта. Тесты вёрстки обязаны идти по КАЖДОМУ: порог
@@ -134,26 +166,239 @@ def real_chromium_available() -> bool:
     return chromium_status(force=True).available
 
 
-def make_slides(count: int, *, source_ids=(1,)) -> list[PresentationSlide]:
-    """Провалидированные слайды — через схему, а не голыми объектами.
+# --- Слайды всех пяти раскладок --------------------------------------------
+#
+# Тело каждой раскладки — ровно те поля, что описаны контрактом, и ничего сверх.
+# Тексты различаются от слайда к слайду (в них входит номер): проверки по
+# готовому PDF ищут текст на листе, и одинаковые слайды сделали бы такую
+# проверку неопровержимой — найденное принадлежало бы соседу.
+_LAYOUT_BODIES = {
+    LAYOUT_BULLETS: lambda index: {
+        "bullets": [f"Первый факт слайда {index}", "Второй факт"],
+    },
+    LAYOUT_COMPARE: lambda index: {
+        "left": {
+            "heading": f"Было {index}",
+            "bullets": ["Ставка 15 процентов", "Отчёт раз в квартал"],
+        },
+        "right": {
+            "heading": f"Стало {index}",
+            "bullets": ["Ставка 12 процентов", "Отчёт раз в год"],
+        },
+    },
+    LAYOUT_METRIC: lambda index: {
+        "value": f"1{index} процентов",
+        "caption": f"Доля отказов в приёме документов {index}",
+        "note": f"По данным за 202{index} год",
+    },
+    # Шагов три — нижняя граница схемы (SLIDE_STEPS_MIN): самый дешёвый слайд и
+    # единственное число, которое фикстуре не пришлось брать наугад. Поднимут
+    # границу — фикстура упадёт на разборе, а не тихо разойдётся со схемой.
+    LAYOUT_STEPS: lambda index: {
+        "steps": [
+            {
+                "title": f"Подать заявление {index}",
+                "text": "Заявление подаётся в налоговый орган по месту учёта",
+            },
+            {
+                "title": f"Приложить документы {index}",
+                "text": "К заявлению прикладывается выписка из реестра",
+            },
+            {
+                "title": f"Получить решение {index}",
+                "text": "Решение выдаётся в течение тридцати календарных дней",
+            },
+        ],
+    },
+    LAYOUT_QUOTE: lambda index: {
+        "text": f"Цитата {index}: льгота предоставляется на срок до пяти лет",
+        "attribution": f"Налоговый кодекс, статья {index}",
+    },
+}
+
+# Раскладки, под которые здесь есть тело слайда. Отдельно от SLIDE_LAYOUTS
+# схемы намеренно: сторож (tests/test_presentation_layout_render.py) сверяет два
+# набора и требует фикстуру на каждую раскладку, которую знает схема. Иначе
+# шестая раскладка приехала бы в прод, ни разу не пройдя через рендер в тестах.
+FIXTURE_LAYOUTS = tuple(_LAYOUT_BODIES)
+
+
+def slide_payload(index: int, *, layout: str = LAYOUT_BULLETS, source_ids=(1,)) -> dict:
+    """Ответ модели на один слайд — как он приходит по проводу, словарём.
+
+    Отдельно от make_slides, потому что нужен и сам по себе: пайплайн подсовывает
+    модели ИМЕННО JSON, и слайд, собранный тестом в обход разбора, проверял бы не
+    ту дорогу.
+    """
+    return {
+        "layout": layout,
+        "heading": f"Заголовок {index}",
+        **_LAYOUT_BODIES[layout](index),
+        "citations": [
+            {"source_id": source_id, "chunk_id": index * 10 + source_id}
+            for source_id in source_ids
+        ],
+    }
+
+
+# --- Слайд, набитый до пределов схемы ---------------------------------------
+#
+# Нужен двум разным проверкам, и обе про одно и то же обещание рендерера: своих
+# границ длины у него нет, за длину отвечает схема. Первая проверка спрашивает,
+# доехал ли предельный текст до шаблона дословно; вторая — уместился ли он на
+# ЛИСТЕ, то есть не расходятся ли числа схемы с вёрсткой.
+#
+# У каждой строки НЕПОВТОРИМЫЙ ХВОСТ из двух знаков, и это не украшение. Строка
+# из одинаковых букв читается одинаково с любого места, поэтому «текст виден»
+# без хвоста означало бы «видно хоть что-то из него»: строка, целиком уехавшая
+# под нижний край, нашлась бы у соседа. Хвост же стоит в КОНЦЕ — а за край
+# уезжает именно конец.
+
+
+def maxed_text(chars: int, tag: str) -> str:
+    """Строка ровно в chars знаков, оканчивающаяся на tag."""
+    return "и" * (chars - len(tag)) + tag
+
+
+_MAXED_BODIES = {
+    LAYOUT_BULLETS: lambda: {
+        "bullets": [
+            maxed_text(SLIDE_BULLET_MAX_CHARS, f"б{number}")
+            for number in range(1, SLIDE_BULLETS_MAX + 1)
+        ],
+    },
+    LAYOUT_COMPARE: lambda: {
+        "left": {
+            "heading": maxed_text(SLIDE_COMPARE_HEADING_MAX_CHARS, "лз"),
+            "bullets": [
+                maxed_text(SLIDE_COMPARE_BULLET_MAX_CHARS, f"л{number}")
+                for number in range(1, SLIDE_COMPARE_BULLETS_MAX + 1)
+            ],
+        },
+        "right": {
+            "heading": maxed_text(SLIDE_COMPARE_HEADING_MAX_CHARS, "пз"),
+            "bullets": [
+                maxed_text(SLIDE_COMPARE_BULLET_MAX_CHARS, f"п{number}")
+                for number in range(1, SLIDE_COMPARE_BULLETS_MAX + 1)
+            ],
+        },
+    },
+    LAYOUT_METRIC: lambda: {
+        "value": maxed_text(SLIDE_METRIC_VALUE_MAX_CHARS, "вл"),
+        "caption": maxed_text(SLIDE_METRIC_CAPTION_MAX_CHARS, "пд"),
+        "note": maxed_text(SLIDE_METRIC_NOTE_MAX_CHARS, "сн"),
+    },
+    LAYOUT_STEPS: lambda: {
+        "steps": [
+            {
+                "title": maxed_text(SLIDE_STEP_TITLE_MAX_CHARS, f"т{number}"),
+                "text": maxed_text(SLIDE_STEP_TEXT_MAX_CHARS, f"ш{number}"),
+            }
+            for number in range(1, SLIDE_STEPS_MAX + 1)
+        ],
+    },
+    LAYOUT_QUOTE: lambda: {
+        "text": maxed_text(SLIDE_QUOTE_TEXT_MAX_CHARS, "цт"),
+        "attribution": maxed_text(SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS, "ат"),
+    },
+}
+
+
+def maxed_slide_payload(layout: str, *, chunk_id: int = 11) -> dict:
+    """Ответ модели, в котором каждое поле раскладки — на пределе схемы.
+
+    Числа берутся из llm_schemas, а не выписываются здесь: фикстура обязана
+    следовать за правкой схемы, а не спорить с ней. Списки тоже предельные —
+    столько буллетов, шагов и строк в колонке, сколько схема разрешает МАКСИМУМ.
+    Слайд, у которого всё сразу по максимуму, и есть тот случай, ради которого
+    пределы считались; каждое поле по отдельности проверяет схема.
+    """
+    return {
+        "layout": layout,
+        "heading": maxed_text(SLIDE_HEADING_MAX_CHARS, "зг"),
+        **_MAXED_BODIES[layout](),
+        "citations": [{"source_id": 1, "chunk_id": chunk_id}],
+    }
+
+
+def _allowed_citations(payload: dict) -> dict[str, int]:
+    return {
+        str(citation["chunk_id"]): citation["source_id"]
+        for citation in payload["citations"]
+    }
+
+
+def _validated(payload: dict):
+    """Слайд из JSON — той же функцией, которой его разбирает пайплайн."""
+    return validate_slide(
+        json.dumps(payload, ensure_ascii=False),
+        allowed_citations=_allowed_citations(payload),
+    )
+
+
+def make_slide(payload: dict):
+    """Провалидированный слайд — через схему, а не голым объектом.
 
     Контекст рендера обязан собираться из ТОГО ЖЕ провалидированного JSON, что и
     в бою; фикстура, собранная в обход схемы, могла бы содержать то, чего в
-    проде не бывает, и тест проверял бы несуществующий случай.
+    проде не бывает, и тест проверял бы несуществующий случай. Для раскладок это
+    вдвойне: слайд — размеченное объединение, и собранный руками объект мог бы
+    нести поля сразу двух раскладок, чего схема не пропускает.
     """
+    return _validated(payload)
+
+
+def make_slides(count: int, *, source_ids=(1,), layout: str = LAYOUT_BULLETS) -> list:
     return [
-        PresentationSlide.model_validate(
-            {
-                "heading": f"Заголовок {index}",
-                "bullets": [f"Первый факт слайда {index}", "Второй факт"],
-                "citations": [
-                    {"source_id": source_id, "chunk_id": index * 10 + source_id}
-                    for source_id in source_ids
-                ],
-            }
-        )
+        make_slide(slide_payload(index, layout=layout, source_ids=source_ids))
         for index in range(1, count + 1)
     ]
+
+
+# Дата заказа для фикстур: колода датируется временем создания строки, и в
+# тестах она обязана быть постоянной — иначе «4 августа 2026 г.» на титуле
+# нечем проверить.
+FIXTURE_CREATED_AT = datetime(2026, 8, 4, 9, 15, tzinfo=timezone.utc)
+
+
+def structure_texts(value, skip=("layout", "citations")) -> list[str]:
+    """Все строки структуры в порядке обхода — и в ответе модели, и в контексте.
+
+    Нужна везде, где текст слайда сравнивается с ТЕМ ЖЕ текстом на другом
+    участке дороги: в контексте, в разметке, на листе PDF. Разбор по раскладкам
+    в каждом таком месте означал бы ещё одну таблицу раскладок, которая
+    разъедется со схемой молча, — а обход по структуре следует за схемой сам.
+
+    Служебное выбрасывается: layout — имя раскладки, а не текст; citations в
+    ответе модели пара чисел, а в контексте готовая метка «[1]», и сравнивать их
+    между собой бессмысленно.
+    """
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [
+            text
+            for key, nested in value.items()
+            if key not in skip
+            for text in structure_texts(nested, skip)
+        ]
+    if isinstance(value, (list, tuple)):
+        return [text for nested in value for text in structure_texts(nested, skip)]
+    return []
+
+
+def make_context(**overrides) -> dict:
+    """Контекст рендера на умолчаниях фикстур."""
+    params = {
+        "title": "Налоговые льготы",
+        "slides": make_slides(1),
+        "sources": make_sources(1),
+        "language": "ru",
+        "notebook_name": "Налоги",
+        "created_at": FIXTURE_CREATED_AT,
+    }
+    params.update(overrides)
+    return build_render_context(**params)
 
 
 # Стили имён документов. Порог обрезки один на все имена, а переносятся они

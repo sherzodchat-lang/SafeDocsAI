@@ -23,13 +23,29 @@
 (llm_schemas): через неё проходит каждое поле, и шаблоны свёрстаны именно под
 её числа. Второй набор пределов означал бы второй источник истины, который
 разойдётся с первым на первой же правке схемы, — и разойдётся молча, потому что
-обрезанный текст выглядит как текст.
+обрезанный текст выглядит как текст. С появлением раскладок правило только
+окрепло: полей, которые пишет модель, стало вчетверо больше, и у каждого свой
+предел, посчитанный от места на слайде, — свой набор чисел здесь разошёлся бы со
+схемой не в одном месте, а в четырнадцати.
 
 Исключение ровно одно, и оно вынужденное: ИМЕНА ДОКУМЕНТОВ. Схема их не видит
 (они приходят из метаданных чанков, а не от модели), слайд «Источники» не
 прокручивается, а `overflow: hidden` в HTML режет молча — в отличие от pptx, где
 текст сам уменьшался. Поэтому список источников подрезает сам рендерер, считает
 непоместившиеся и ГРОМКО об этом сообщает: см. fit_sources ниже.
+
+РАСКЛАДОК ПЯТЬ, и инвариант раздела от этого не меняется: модель пишет
+структуру, код рисует. Из ответа модели приезжает ИМЯ раскладки из закрытого
+списка и поля этой раскладки — ни HTML, ни CSS, ни выбора вёрстки. Разложить
+структуру в поля контекста — работа build_render_context; что с ними делать
+дальше, решает шаблон. См. таблицу раскладок ниже.
+
+ОДИН БИТЫЙ СЛАЙД НЕ СТОИТ ЦЕЛОЙ КОЛОДЫ. Шаблоны ветвятся по layout, а окружение
+у них строгое: слайд, в контексте которого нет полей своей ветки, роняет не
+слайд, а всю страницу — и пользователь вместо колоды получает отказ после минут
+работы модели. Поэтому неизвестная раскладка и недостающее поле здесь не
+исключение, а деградация в список с ERROR в журнале (см. _layout_fields): текст
+модели сохраняется, форма теряется, а узнаём об этом мы, а не пользователь.
 """
 
 from __future__ import annotations
@@ -65,7 +81,14 @@ from app.modules.presentations.constants import (
     SOURCES_MORE,
     normalize_language,
 )
-from app.modules.presentations.llm_schemas import PresentationSlide
+from app.modules.presentations.llm_schemas import (
+    LAYOUT_BULLETS,
+    LAYOUT_COMPARE,
+    LAYOUT_METRIC,
+    LAYOUT_QUOTE,
+    LAYOUT_STEPS,
+    PresentationSlide,
+)
 from app.modules.presentations.templates import (
     TEMPLATE_FILENAME,
     build_environment,
@@ -304,6 +327,217 @@ def source_labels(sources: list[RenderedSource]) -> dict[int, str]:
     return {source.source_id: f"[{index}]" for index, source in enumerate(sources, 1)}
 
 
+# --- Раскладки: структура слайда -> поля контекста -------------------------
+#
+# Раскладка — это ответ на вопрос «что модель нашла», а не «как это нарисовать».
+# Сравнение двух режимов налогообложения, одно число с подписью, порядок
+# действий, цитата из документа и обычный список фактов — пять РАЗНЫХ находок, и
+# до раскладок все они превращались в один и тот же список буллетов. Выбирает из
+# пяти модель, но выбирает она ИМЯ из закрытого списка; вёрстку по этому имени
+# рисует шаблон, а между ними стоит таблица ниже — какие поля контекста получает
+# шаблон для каждой раскладки.
+#
+# СПИСОК ЗАКРЫТ СХЕМОЙ, А НЕ ЗДЕСЬ, и имена раскладок приезжают ОТТУДА же —
+# отсюда импорт LAYOUT_* из llm_schemas, а не пять своих строковых констант.
+# Одним импортом, впрочем, не обойтись: разъехаться со схемой таблица может не
+# написанием, а СОСТАВОМ — раскладку, добавленную в схему и забытую здесь,
+# валидация пропустит, а нарисовать её будет нечем. Такой слайд деградирует в
+# список (см. _layout_fields), то есть теряет форму; чтобы этого не случалось,
+# полноту таблицы сторожит tests/test_presentation_layout_render.py, сверяя её
+# ключи со SLIDE_LAYOUTS.
+
+
+class _LayoutMismatch(Exception):
+    """Структура слайда разошлась с таблицей раскладок.
+
+    Внутренняя и наружу не выходит: снаружи у неё есть ровно один исход —
+    деградация слайда в список (см. _layout_fields). Отдельный тип нужен, чтобы
+    отличить «поля раскладки не хватает» от любой другой беды внутри сборки,
+    которую глушить нельзя.
+    """
+
+
+def _need(source: Any, name: str) -> Any:
+    """Обязательное поле раскладки — или несовпадение с именем поля.
+
+    Обязательность держит схема, и пустое поле доезжает сюда только при
+    расхождении её с таблицей выше. Молча отдать шаблону None значит напечатать
+    «None» посреди слайда: в строгом окружении определённая пустота ошибкой не
+    считается.
+    """
+    value = getattr(source, name, None)
+    if value is None:
+        raise _LayoutMismatch(f"в структуре слайда нет поля {name!r}")
+    return value
+
+
+def _bullets_fields(slide: Any) -> dict[str, Any]:
+    return {"bullets": list(_need(slide, "bullets"))}
+
+
+def _compare_fields(slide: Any) -> dict[str, Any]:
+    """Две колонки со своими заголовками и своими списками.
+
+    Метки цитат по колонкам НЕ разносятся и остаются у слайда целиком. В схеме
+    цитата относится к слайду, а не к столбцу; разложить её надвое можно было бы
+    только угадав, какое из утверждений на неё опиралось, — а «[1]» под левой
+    колонкой утверждает, что источник подтверждает именно её.
+    """
+    return {
+        "left": _compare_column(_need(slide, "left")),
+        "right": _compare_column(_need(slide, "right")),
+    }
+
+
+def _compare_column(column: Any) -> dict[str, Any]:
+    return {
+        "heading": _need(column, "heading"),
+        "bullets": list(_need(column, "bullets")),
+    }
+
+
+def _metric_fields(slide: Any) -> dict[str, Any]:
+    """Одно число, подпись под ним и необязательная сноска.
+
+    note — единственное необязательное поле всех пяти раскладок, и пусто здесь
+    значит пусто на слайде. Отдаётся именно None, а не пустая строка: шаблон
+    читает поле как «есть сноска или нет», и два способа сказать «нет» рано или
+    поздно разъедутся. Подставить же вместо него что-нибудь разумное («по данным
+    документа») значит написать за модель то, чего в документах не нашлось.
+    """
+    return {
+        "value": _need(slide, "value"),
+        "caption": _need(slide, "caption"),
+        # Не через _need: у необязательного поля пустота — законный ответ, а не
+        # расхождение со схемой.
+        "note": getattr(slide, "note", None) or None,
+    }
+
+
+def _steps_fields(slide: Any) -> dict[str, Any]:
+    """Шаги в том порядке, в котором их написала модель.
+
+    Номеров здесь нет: их рисует шаблон по позиции в списке. Номер, приехавший
+    полем, был бы вторым источником истины о порядке — и однажды разошёлся бы с
+    самим списком, поставив «шаг 2» третьей карточкой.
+    """
+    return {
+        "steps": [
+            {"title": _need(step, "title"), "text": _need(step, "text")}
+            for step in _need(slide, "steps")
+        ]
+    }
+
+
+def _quote_fields(slide: Any) -> dict[str, Any]:
+    return {"text": _need(slide, "text"), "attribution": _need(slide, "attribution")}
+
+
+_LAYOUT_FIELDS = {
+    LAYOUT_BULLETS: _bullets_fields,
+    LAYOUT_COMPARE: _compare_fields,
+    LAYOUT_METRIC: _metric_fields,
+    LAYOUT_STEPS: _steps_fields,
+    LAYOUT_QUOTE: _quote_fields,
+}
+
+# Служебные поля слайда: в спасённый текст они не входят. heading шаблон печатает
+# сам и отдельно, citations — идентификаторы фрагментов, layout — имя раскладки,
+# а не текст.
+_SALVAGE_SKIP = frozenset({"heading", "citations", "layout"})
+
+
+def _salvage_texts(slide: Any) -> list[str]:
+    """Текст, который модель ВСЁ ЖЕ написала, — плоским списком строк.
+
+    Ничего не сочиняет и ничего не переставляет: обходит структуру слайда и
+    берёт непустые строки в том порядке, в котором они в ней лежат. Обход общий,
+    а не по раскладкам, ровно потому, что зовут его тогда, когда раскладка
+    ОКАЗАЛАСЬ НЕ ТОЙ: разбирать по раскладке то, что раскладке не соответствует,
+    — способ потерять ещё и остаток.
+    """
+    dump = getattr(slide, "model_dump", None)
+    try:
+        structure = dump() if callable(dump) else getattr(slide, "__dict__", {})
+    except Exception:  # noqa: BLE001 - спасение не имеет права само уронить печать
+        structure = getattr(slide, "__dict__", {})
+    return _plain_texts(structure)
+
+
+def _plain_texts(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        return [
+            text
+            for key, nested in value.items()
+            if key not in _SALVAGE_SKIP
+            for text in _plain_texts(nested)
+        ]
+    if isinstance(value, (list, tuple)):
+        return [text for nested in value for text in _plain_texts(nested)]
+    return []
+
+
+def _layout_fields(slide: Any, index: int) -> dict[str, Any]:
+    """Раскладка слайда и поля ИМЕННО ЭТОЙ раскладки — с гарантией.
+
+    Гарантия здесь двойная и она принадлежит РЕНДЕРУ, а не схеме: на выходе
+    layout всегда одно из пяти известных значений, и поля этой раскладки всегда
+    на месте. Схема сегодня обещает то же самое, но обещание схемы — про ответ
+    модели, а шаблон читает контекст; между ними стоит эта функция, и держать
+    контракт шаблона обязана она.
+
+    ЧУЖАЯ РАСКЛАДКА ДЕГРАДИРУЕТ В СПИСОК, А НЕ РОНЯЕТ КОЛОДУ. Шаблоны ветвятся
+    по layout и всё незнакомое отправляют в ветку bullets — а там читается поле
+    `bullets`, которого у чужой раскладки нет. В строгом окружении это не
+    испорченный слайд, а UndefinedError на всей странице: пользователь ждал
+    минуты работы модели и не получает НИЧЕГО. Цена другого исхода несравнимо
+    ниже: один слайд теряет свою форму, но сохраняет заголовок, ссылки и весь
+    написанный моделью текст — списком.
+
+    И ГРОМКО. Деградация — это дефект СБОРКИ (схема и рендерер приехали из
+    разных релизов), а не плохой ответ модели, и увидеть его должны мы, а не
+    пользователь: в колоде он выглядит как обычный слайд-список, поэтому
+    единственное место, где о нём можно узнать, — ERROR в журнале.
+    """
+    layout = getattr(slide, "layout", None)
+    build = _LAYOUT_FIELDS.get(layout)
+    if build is not None:
+        try:
+            return {"layout": layout, **build(slide)}
+        except _LayoutMismatch as exc:
+            complaint = f"раскладка {layout!r}: {exc}"
+        except Exception as exc:  # noqa: BLE001 - гарантия здесь абсолютная
+            # Ловится ВСЁ, и это осознанно. Поля раскладки собираются из чужой
+            # структуры, и «поля нет» — не единственный способ ей не совпасть:
+            # список, оказавшийся строкой, или шаг, оказавшийся числом, дадут
+            # TypeError на ровном месте. Для колоды разницы нет — слайд всё
+            # равно нечем рисовать, — а исключение отсюда стоило бы всей
+            # страницы. Тип ошибки не теряется: он уходит в ERROR ниже.
+            complaint = f"раскладка {layout!r}: {type(exc).__name__}: {exc}"
+    else:
+        complaint = (
+            f"раскладка {layout!r} рендереру неизвестна, известны только "
+            f"{', '.join(_LAYOUT_FIELDS)}"
+        )
+
+    salvaged = _salvage_texts(slide)
+    logger.error(
+        "Presentation render: slide %d degraded to the %r layout (%s). The slide "
+        "keeps its heading, its citations and %d line(s) of what the model wrote, "
+        "but the shape it was written in is LOST. This is a build mismatch "
+        "between the response schema and the renderer, not a bad answer from the "
+        "model; the deck itself is printed to the end on purpose.",
+        index,
+        LAYOUT_BULLETS,
+        complaint,
+        len(salvaged),
+    )
+    return {"layout": LAYOUT_BULLETS, "bullets": salvaged}
+
+
 def build_render_context(
     *,
     title: str,
@@ -327,6 +561,15 @@ def build_render_context(
         значит «список полон», и шаблон по нему решает, печатать ли хвост.
         Забыть это поле нельзя: окружение шаблонов строгое (StrictUndefined),
         и отсутствие ключа роняет рендер, а не рисует пустоту.
+
+    У КАЖДОГО СЛАЙДА ЕСТЬ layout из закрытого списка и поля ИМЕННО ЭТОЙ
+    раскладки — гарантированно, чем бы ни оказался слайд на входе (см.
+    _layout_fields). Общего у всех четыре ключа — index, layout, heading,
+    citations, — остальное зависит от раскладки.
+
+    Титульный слайд и «Источники» в slides не входят вовсе: их рисует шаблон из
+    title/notebook_name/generated_on и sources, раскладки у них нет и быть не
+    может — их содержимое написала не модель.
     """
     language = normalize_language(language)
     labels = source_labels(sources)
@@ -342,8 +585,8 @@ def build_render_context(
             {
                 "index": index,
                 "heading": slide.heading,
-                "bullets": list(slide.bullets),
                 "citations": _slide_labels(slide, labels),
+                **_layout_fields(slide, index),
             }
             for index, slide in enumerate(slides, start=1)
         ],

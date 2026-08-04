@@ -58,7 +58,19 @@ from app.modules.presentations.llm_schemas import (
     SECTION_SEARCH_QUERY_MAX_CHARS,
     SLIDE_BULLETS_MAX,
     SLIDE_BULLET_MAX_CHARS,
+    SLIDE_COMPARE_BULLETS_MAX,
+    SLIDE_COMPARE_BULLET_MAX_CHARS,
+    SLIDE_COMPARE_HEADING_MAX_CHARS,
     SLIDE_HEADING_MAX_CHARS,
+    SLIDE_LAYOUTS,
+    SLIDE_METRIC_CAPTION_MAX_CHARS,
+    SLIDE_METRIC_NOTE_MAX_CHARS,
+    SLIDE_METRIC_VALUE_MAX_CHARS,
+    SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS,
+    SLIDE_QUOTE_TEXT_MAX_CHARS,
+    SLIDE_STEPS_MAX,
+    SLIDE_STEP_TEXT_MAX_CHARS,
+    SLIDE_STEP_TITLE_MAX_CHARS,
     content_section_count,
 )
 from app.modules.presentations.prompts import (
@@ -81,6 +93,9 @@ NOTEBOOK_NAME_MAX = TITLE_MAX_LENGTH
 PLAN_SECTION_SYNTAX_CHARS = 40
 PLAN_ENVELOPE_SYNTAX_CHARS = 60
 SLIDE_SYNTAX_CHARS = 200
+# Вложенный объект ответа (колонка сравнения, шаг процесса) стоит своих скобок,
+# кавычек и имён ключей сверх общей обвязки слайда.
+SLIDE_NESTED_SYNTAX_CHARS = 40
 
 # Претензия валидатора, которую получает повторная попытка (build_retry_messages
 # добавляет к ней ещё и обвязку — она входит в измеряемый текст).
@@ -144,12 +159,50 @@ class PromptBudgetFitsTheWindowTests(unittest.TestCase):
             )
         )
 
+    def slide_answer_chars_by_layout(self) -> dict[str, int]:
+        """Предельный ответ КАЖДОЙ раскладки — по её собственным полям.
+
+        Считать бюджет по одной раскладке нельзя с тех пор, как их пять:
+        самый длинный ответ даёт не bullets (1 080 знаков полей), а steps
+        (1 180 плюс обвязка пяти вложенных объектов). Проверка по bullets
+        занизила бы худший случай молча — то есть ровно тем способом, против
+        которого этот файл и написан.
+        """
+        common = SLIDE_HEADING_MAX_CHARS + SLIDE_SYNTAX_CHARS
+        return {
+            "bullets": common + SLIDE_BULLETS_MAX * SLIDE_BULLET_MAX_CHARS,
+            "compare": common
+            + 2
+            * (
+                SLIDE_COMPARE_HEADING_MAX_CHARS
+                + SLIDE_COMPARE_BULLETS_MAX * SLIDE_COMPARE_BULLET_MAX_CHARS
+                + SLIDE_NESTED_SYNTAX_CHARS
+            ),
+            "metric": common
+            + SLIDE_METRIC_VALUE_MAX_CHARS
+            + SLIDE_METRIC_CAPTION_MAX_CHARS
+            + SLIDE_METRIC_NOTE_MAX_CHARS,
+            "steps": common
+            + SLIDE_STEPS_MAX
+            * (
+                SLIDE_STEP_TITLE_MAX_CHARS
+                + SLIDE_STEP_TEXT_MAX_CHARS
+                + SLIDE_NESTED_SYNTAX_CHARS
+            ),
+            "quote": common
+            + SLIDE_QUOTE_TEXT_MAX_CHARS
+            + SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS,
+        }
+
     def slide_answer_chars(self) -> int:
-        return (
-            SLIDE_HEADING_MAX_CHARS
-            + SLIDE_BULLETS_MAX * SLIDE_BULLET_MAX_CHARS
-            + SLIDE_SYNTAX_CHARS
+        by_layout = self.slide_answer_chars_by_layout()
+        # Ни одна раскладка не должна выпасть из расчёта: добавили шестую в
+        # схему, забыли здесь — и бюджет снова считается не по худшему случаю.
+        assert set(by_layout) == set(SLIDE_LAYOUTS), (
+            "расчёт бюджета не знает про раскладки "
+            f"{sorted(set(SLIDE_LAYOUTS) - set(by_layout))}"
         )
+        return max(by_layout.values())
 
     def test_plan_call_fits(self) -> None:
         """План-вызов на предельном заказе: промпт + ответ дважды + претензия."""
@@ -200,6 +253,9 @@ class PromptBudgetFitsTheWindowTests(unittest.TestCase):
             context_block=context_block,
             allowed_citations=allowed,
             digest=digest,
+            # Последний слайд колоды видел все раскладки: блок про уже
+            # использованные тоже занимает место в окне.
+            used_layouts=SLIDE_LAYOUTS,
         )
         retry = build_retry_messages(
             messages,

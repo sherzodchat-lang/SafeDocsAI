@@ -1063,7 +1063,7 @@ async def generate_presentation(
         # 10% остаются рендеру и записи файла — они не мгновенные, и полоса,
         # застывшая на 100% до появления файла, врала бы.
         slides: list[PresentationSlide] = []
-        previous_bullets: list[list[str]] = []
+        previous_texts: list[list[str]] = []
         used_chunk_ids: set[str] = set()
         all_sources: dict[int, tuple[str, list[int]]] = {}
         section_count = len(plan.sections)
@@ -1117,7 +1117,15 @@ async def generate_presentation(
                     # (мера 2) Дайджест уже написанного: без него слайд-вызов
                     # физически не может не повторяться — он не видит
                     # предыдущих.
-                    digest=build_written_digest(previous_bullets),
+                    digest=build_written_digest(previous_texts),
+                    # То же лекарство, но от однообразия ФОРМЫ, а не фактов.
+                    # Вызовы независимы, и раскладку каждый выбирает в вакууме:
+                    # пять секций, в материале которых есть цифра, честно дадут
+                    # пять metric подряд. История передаётся СПИСКОМ, в порядке
+                    # написания и с повторами: «bullets, bullets, bullets» и
+                    # «bullets» — разные положения, и разницу между ними модель
+                    # обязана видеть.
+                    used_layouts=[written.layout for written in slides],
                 ),
                 validate=lambda raw: validate_slide(
                     raw, allowed_citations=allowed_citations
@@ -1128,7 +1136,13 @@ async def generate_presentation(
             )
 
             slides.append(slide)
-            previous_bullets.append(list(slide.bullets))
+            # Что считать текстом слайда, знает сама раскладка (digest_texts в
+            # llm_schemas): у сравнения он лежит в двух колонках, у цифры — в
+            # величине с подписью. Разбирать раскладки здесь значило бы завести
+            # вторую таблицу раскладок, и шестая попала бы в шаблоны, но не в
+            # дайджест — молча, потому что пропущенный дайджест выглядит как
+            # честно непохожие слайды.
+            previous_texts.append(slide.digest_texts())
             used_chunk_ids.update(citation.chunk_id for citation in slide.citations)
             _merge_sources(all_sources, _collect_slide_sources(slide, selected))
 

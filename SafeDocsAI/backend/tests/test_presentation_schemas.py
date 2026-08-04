@@ -25,8 +25,9 @@ from app.modules.presentations.constants import (  # noqa: E402
     SLIDE_RETRIEVAL_TOP_K,
 )
 from app.modules.presentations.llm_schemas import (  # noqa: E402
+    LAYOUT_BULLETS,
     LlmResponseError,
-    PresentationSlide,
+    SLIDE_ADAPTER,
     SlideCitation,
     validate_slide,
 )
@@ -36,6 +37,7 @@ from app.modules.presentations.service import select_slide_chunks  # noqa: E402
 
 def slide_payload(**overrides):
     payload = {
+        "layout": LAYOUT_BULLETS,
         "heading": "Ставки НДС",
         "bullets": ["Первый факт", "Второй факт"],
         "citations": [{"source_id": 7, "chunk_id": 45}],
@@ -73,7 +75,7 @@ class ChunkIdCanonicalizationTests(unittest.TestCase):
         проверка стояла до канонизации, законный ответ отвергался бы целиком.
         """
         slide = validate_slide(
-            '{"heading": "h", "bullets": ["a", "b"], '
+            '{"layout": "bullets", "heading": "h", "bullets": ["a", "b"], '
             '"citations": [{"source_id": 7, "chunk_id": 45}]}',
             allowed_citations={"45": 7},
         )
@@ -82,7 +84,7 @@ class ChunkIdCanonicalizationTests(unittest.TestCase):
     def test_subset_check_still_rejects_a_foreign_chunk(self):
         with self.assertRaises(LlmResponseError):
             validate_slide(
-                '{"heading": "h", "bullets": ["a", "b"], '
+                '{"layout": "bullets", "heading": "h", "bullets": ["a", "b"], '
                 '"citations": [{"source_id": 7, "chunk_id": 999}]}',
                 allowed_citations={"45": 7},
             )
@@ -90,7 +92,7 @@ class ChunkIdCanonicalizationTests(unittest.TestCase):
 
 class CitationDeduplicationTests(unittest.TestCase):
     def test_duplicates_collapse_preserving_first_order(self):
-        slide = PresentationSlide.model_validate(
+        slide = SLIDE_ADAPTER.validate_python(
             slide_payload(
                 citations=[
                     {"source_id": 7, "chunk_id": 45},
@@ -109,7 +111,7 @@ class CitationDeduplicationTests(unittest.TestCase):
         """Противоречие обязано дойти до проверки, а не схлопнуться в дубль."""
         with self.assertRaises(LlmResponseError):
             validate_slide(
-                '{"heading": "h", "bullets": ["a", "b"], "citations": ['
+                '{"layout": "bullets", "heading": "h", "bullets": ["a", "b"], "citations": ['
                 '{"source_id": 7, "chunk_id": 45}, {"source_id": 8, "chunk_id": 45}]}',
                 allowed_citations={"45": 7},
             )
@@ -117,16 +119,16 @@ class CitationDeduplicationTests(unittest.TestCase):
 
 class SlideBulletBoundsTests(unittest.TestCase):
     def test_two_bullets_are_enough(self):
-        slide = PresentationSlide.model_validate(slide_payload(bullets=["a", "b"]))
+        slide = SLIDE_ADAPTER.validate_python(slide_payload(bullets=["a", "b"]))
         self.assertEqual(len(slide.bullets), 2)
 
     def test_single_bullet_is_still_rejected(self):
         with self.assertRaises(Exception):
-            PresentationSlide.model_validate(slide_payload(bullets=["a"]))
+            SLIDE_ADAPTER.validate_python(slide_payload(bullets=["a"]))
 
     def test_six_bullets_are_rejected(self):
         with self.assertRaises(Exception):
-            PresentationSlide.model_validate(
+            SLIDE_ADAPTER.validate_python(
                 slide_payload(bullets=["a", "b", "c", "d", "e", "f"])
             )
 

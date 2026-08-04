@@ -19,18 +19,99 @@
 </section>
 
 {# --- 2. Содержательные -------------------------------------------------- #}
+{#
+   Раскладка выбирается полем slide.layout. Ветка обращается ТОЛЬКО к полям
+   своей раскладки: окружение строгое (StrictUndefined), и попытка прочитать
+   slide.bullets на слайде-цитате уронила бы всю колоду, а не один слайд.
+
+   default("bullets") — не «на всякий случай», а совместимость: слайд без
+   layout это ровно тот слайд, который умел этот шаблон до раскладок, и
+   отсутствие ключа обязано означать прежнее поведение, а не отказ. По той же
+   причине неизвестная раскладка попадает в ветку bullets: чужое имя лучше
+   показать буллитами, чем отдать пользователю пустой лист.
+#}
 {% for slide in slides %}
-<section class="slide slide--content">
+{% set layout = slide.layout|default("bullets", true) %}
+<section class="slide slide--content slide--{{ layout }}">
   <div class="glow"></div>
   <header class="content-head">
     <span class="index">{{ "%02d"|format(slide.index) }}</span>
     <h2 class="slide-heading">{{ slide.heading }}</h2>
   </header>
+
+  {% if layout == "compare" %}
+  {# Класс берёт БОЛЬШЕЕ число пунктов из двух сторон: переполняет карточку
+     именно длинная сторона, а ширина у них общая. #}
+  {% set rows = [slide.left.bullets|length, slide.right.bullets|length]|max %}
+  <div class="compare compare--{{ rows }}">
+    <div class="compare-side compare-side--left">
+      <h3 class="compare-heading">{{ slide.left.heading }}</h3>
+      <ul class="compare-list">
+        {% for bullet in slide.left.bullets %}
+        <li class="compare-item">{{ bullet }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {# Средник — светящаяся линия того же градиента, что и акценты колоды. #}
+    <div class="compare-rule"></div>
+    <div class="compare-side compare-side--right">
+      <h3 class="compare-heading">{{ slide.right.heading }}</h3>
+      <ul class="compare-list">
+        {% for bullet in slide.right.bullets %}
+        <li class="compare-item">{{ bullet }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+
+  {% elif layout == "metric" %}
+  {# Кегль величины выбирается по её длине: «15 %» и «1 000 000 сомонӣ» — это
+     контракт «до 24 знаков», и один кегль на оба случая либо мелок для
+     первого, либо вылезает за лист на втором. #}
+  {% set size = slide.value|length %}
+  <div class="metric metric--{{ "xl" if size <= 6 else "l" if size <= 12 else "m" if size <= 18 else "s" }}">
+    <p class="metric-value">{{ slide.value }}</p>
+    <div class="metric-rule"></div>
+    <p class="metric-caption">{{ slide.caption }}</p>
+    {% if slide.note %}
+    <p class="metric-note">{{ slide.note }}</p>
+    {% endif %}
+  </div>
+
+  {% elif layout == "steps" %}
+  {# Этапов 3..5, карточки равной ширины: класс по числу этапов задаёт кегль,
+     иначе пять карточек набираются тем же кеглем, что три, и последняя строка
+     каждой уходит под нижний край. #}
+  <ol class="steps steps--{{ slide.steps|length }}">
+    {% for step in slide.steps %}
+    <li class="step">
+      {# Номер — цифры, а не слово «Шаг N»: подписи для него в strings нет, а
+         выдумывать локализуемый текст в шаблоне нельзя. #}
+      <span class="step-num">{{ loop.index }}</span>
+      <h3 class="step-title">{{ step.title }}</h3>
+      <p class="step-text">{{ step.text }}</p>
+    </li>
+    {% endfor %}
+  </ol>
+
+  {% elif layout == "quote" %}
+  {# Кегль цитаты — по её длине: контракт допускает до 400 знаков, и на кегле,
+     которым набирают короткую фразу, такой текст не встаёт в полосу. Обратное
+     тоже верно: короткая цитата мелким кеглем перестаёт быть врезкой. #}
+  {% set said = slide.text|length %}
+  <figure class="quote quote--{{ "s" if said <= 160 else "m" if said <= 280 else "l" }}">
+    <blockquote class="quote-text">{{ slide.text }}</blockquote>
+    <figcaption class="quote-by">{{ slide.attribution }}</figcaption>
+  </figure>
+
+  {% else %}
   <ul class="bullets">
     {% for bullet in slide.bullets %}
     <li class="bullet">{{ bullet }}</li>
     {% endfor %}
   </ul>
+  {% endif %}
+
   <footer class="slide-footer">
     <span class="citations">
       {% for citation in slide.citations %}<span class="citation">{{ citation }}</span>{% endfor %}

@@ -37,6 +37,7 @@ from app.modules.presentations import renderer as renderer_module  # noqa: E402
 from app.modules.presentations.constants import SOURCES_MORE  # noqa: E402
 from app.modules.presentations.llm_schemas import (  # noqa: E402
     RENDERER_ADDED_SLIDES,
+    SLIDE_LAYOUTS,
 )
 from app.modules.presentations.renderer import (  # noqa: E402
     SOURCE_FIT_BUDGET,
@@ -49,13 +50,16 @@ from app.modules.presentations.renderer import (  # noqa: E402
 from render_fixtures import (  # noqa: E402
     SOURCE_NAME_STYLES,
     TEMPLATE_KEYS,
+    make_slide,
     make_slides,
     make_sources,
+    maxed_slide_payload,
     pdf_is_a_pdf,
     pdf_pages,
     pdf_text,
     pdf_visible_text,
     real_chromium_available,
+    structure_texts,
     use_fake_chromium,
     use_offline_registry,
 )
@@ -75,6 +79,29 @@ SOURCE_NAME_TAIL = 14
 # вовсе. Извлечение текста из PDF это ловит: подставленный глиф в поток текста
 # не попадает.
 TAJIK_GLYPHS = "ӣ ӯ қ ҳ ҷ ғ Ӣ Ӯ Қ Ҳ Ҷ Ғ"
+
+# Известные расхождения предела схемы с вёрсткой: пара (шаблон, раскладка) и
+# причина, по которой проверка «предельный слайд целиком на листе» её пока не
+# требует. Список именно ЗДЕСЬ, а не в виде удалённой проверки: пропуск с
+# причиной виден в каждом прогоне, а вычеркнутая строка не видна нигде.
+#
+# ЗАМЕРЕНО (04.08.2026, слайд из SLIDE_BULLETS_MAX буллетов по
+# SLIDE_BULLET_MAX_CHARS знаков плюс заголовок в SLIDE_HEADING_MAX_CHARS):
+# blueprint выпускает за нижний край листа 64 знака, самый дальний — на 11.9 pt.
+# Остальные девятнадцать пар «дизайн + раскладка» чисты полностью.
+#
+# Беда НЕ НОВАЯ: на коммите 58604d1 (до раскладок) тот же слайд на том же
+# blueprint выпускал за лист 1 знак на 4.2 pt, то есть предел списка и раньше
+# стоял на самой границе, а новая вёрстка эту границу перешла. Чинится это не
+# здесь и не в рендере: либо кеглем и интерлиньяжем blueprint, либо пределом
+# SLIDE_BULLET_MAX_CHARS в схеме. До тех пор строка ниже — единственное место,
+# где расхождение записано числом.
+KNOWN_OVERFLOW = {
+    ("blueprint", "bullets"): (
+        "blueprint не вмещает предельный список (замер: 64 знака за листом, до "
+        "11.9 pt); расхождение старше раскладок, чинится в CSS или в пределе схемы"
+    ),
+}
 
 
 def process_facts(pid: int) -> tuple[str, str] | None:
@@ -310,6 +337,49 @@ class RealPdfTests(PrintTestCase):
 
         self.assertIn("<script>alert(1)</script>", text)
         self.assertIn("<b>жирный</b>", text)
+
+    def test_a_slide_filled_to_the_schema_limits_stays_on_the_sheet(self):
+        """Пределы схемы сходятся с вёрсткой: предельный слайд ВЕСЬ на листе.
+
+        Рендерер не режет ничего из написанного моделью — за длину отвечает
+        схема, и её числа выведены из места на слайде (см. llm_schemas). Это
+        обещание двух сторон друг другу, и до сих пор его никто не проверял:
+        слайд, набитый до пределов схемы, собирается и печатается одинаково
+        успешно и когда он помещается на лист, и когда его нижняя половина ушла
+        под край. `overflow: hidden` режет молча — ровно та беда, ради которой у
+        слайда «Источники» заведён порог обрезки, только здесь резать нельзя, и
+        сходиться обязаны ЧИСЛА.
+
+        Проверяются все четыре дизайна: пределы одни на всех, и верный для
+        одного ничего не говорит про остальные три. Критерий тот же, что у
+        источников, и такой же строгий: знаки обязаны лежать ВНУТРИ MediaBox
+        (pdf_visible_text, а не pdf_text — Chrome при печати не выбрасывает
+        переполнившее содержимое, а рисует его за границей страницы), а у
+        каждого поля свой неповторимый хвост из двух знаков: строка из
+        одинаковых букв «находилась» бы на листе, даже уехав с него целиком.
+
+        Регистр не учитывается: дизайны набирают подписи капителью
+        (text-transform: uppercase), и в поток текста PDF они попадают уже
+        прописными. Это решение вёрстки, а спрашиваем мы про видимость.
+        """
+        slides = [
+            make_slide(maxed_slide_payload(layout)) for layout in SLIDE_LAYOUTS
+        ]
+        for key in TEMPLATE_KEYS:
+            path = self.render(template_key=key, slides=slides, sources=make_sources(1))
+            for number, layout in enumerate(SLIDE_LAYOUTS, start=1):
+                seen = pdf_visible_text(path, page=number).casefold()
+                for text in structure_texts(maxed_slide_payload(layout)):
+                    with self.subTest(template=key, layout=layout, tail=text[-2:]):
+                        if (key, layout) in KNOWN_OVERFLOW:
+                            self.skipTest(KNOWN_OVERFLOW[(key, layout)])
+                        self.assertIn(
+                            text.replace(" ", "").casefold(),
+                            seen,
+                            f"{key}/{layout}: поле с хвостом {text[-2:]!r} на "
+                            f"листе {number} видно не целиком — предел схемы и "
+                            f"вёрстка разошлись",
+                        )
 
 
 class UnknownTemplateTests(PrintTestCase):

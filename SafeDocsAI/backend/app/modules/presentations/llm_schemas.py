@@ -4,6 +4,14 @@
 Модуль заведён на этапе 0 (прототип) и на этапе 1 переехал в пайплайн без
 переписывания — правки касаются только границ и нормализации.
 
+Форма слайда — РАЗМЕЧЕННОЕ ОБЪЕДИНЕНИЕ по полю layout (см. SLIDE_LAYOUTS и
+PresentationSlide ниже). До этого вид слайда был один — {heading, bullets,
+citations}, — и колода получалась однообразной по самой простой причине: у
+модели не было слова, которым говорят «здесь сравнение», «здесь одна цифра»,
+«здесь этапы». Инвариант при этом не изменился ни на грамм: модель по-прежнему
+пишет ТОЛЬКО поля схемы, а рисует их код. Раскладка — это выбор из пяти
+закрытых значений, а не разметка.
+
 Схема — не только проверка, но и НОРМАЛИЗАТОР: приведение chunk_id к строке
 (см. SlideCitation) и схлопывание повторяющихся цитат
 (см. PresentationSlide._deduplicate_citations) объявлены частью контракта и
@@ -21,11 +29,14 @@ chunk_id, собранном при сборке промпта: ответ со
 
 import json
 import re
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
+    ConfigDict,
     Field,
+    TypeAdapter,
     ValidationError,
     ValidationInfo,
     model_validator,
@@ -61,6 +72,83 @@ SLIDE_BULLET_MAX_CHARS = 200
 # Больший корпус второй половины проблемы не лечит — он её маскирует.
 SLIDE_BULLETS_MIN = 2
 SLIDE_BULLETS_MAX = 5
+
+# --- Раскладки слайда ----------------------------------------------------
+#
+# ЗАКРЫТЫЙ список из пяти значений. До него у слайда был ровно один вид —
+# {heading, bullets, citations}, — и модель физически не могла сказать «здесь
+# сравнение», «здесь одна цифра», «здесь этапы»: в схеме не было слова, которым
+# это говорится. Колода поэтому получалась однообразной не потому, что модель
+# не видела разницы в материале, а потому, что разницу негде было записать.
+#
+# Список именно закрытый: раскладку рисует КОД, и раскладке, которой нет в
+# шаблонах, взяться на слайде неоткуда. Открытый список означал бы, что модель
+# однажды придумает шестую и слайд не отрисуется вовсе.
+LAYOUT_BULLETS = "bullets"
+LAYOUT_COMPARE = "compare"
+LAYOUT_METRIC = "metric"
+LAYOUT_STEPS = "steps"
+LAYOUT_QUOTE = "quote"
+SLIDE_LAYOUTS = (
+    LAYOUT_BULLETS,
+    LAYOUT_COMPARE,
+    LAYOUT_METRIC,
+    LAYOUT_STEPS,
+    LAYOUT_QUOTE,
+)
+
+# Пределы раскладок. Каждое число — либо ВЫВЕДЕНО из уже существующего предела
+# (тогда оно записано формулой, чтобы не разъехаться при правке исходного),
+# либо объяснено физикой слайда: сколько знаков помещается в это место листа
+# тем кеглем, которым это место набирается. Назначенных «на глаз» чисел здесь
+# нет; проверка бюджета промпта на них тоже опирается (см. constants.py и
+# tests/test_presentation_prompt_budget.py, где худший ответ считается по
+# максимуму ПО ВСЕМ раскладкам, а не по одной).
+
+# Колонка сравнения — ровно половина ширины слайда, поэтому и заголовок, и
+# строка в ней вдвое короче полноширинных. Записано делением, а не числом:
+# поправят предел заголовка слайда — колонка поедет следом сама.
+SLIDE_COMPARE_HEADING_MAX_CHARS = SLIDE_HEADING_MAX_CHARS // 2
+SLIDE_COMPARE_BULLET_MAX_CHARS = SLIDE_BULLET_MAX_CHARS // 2
+# Нижняя граница — та же двойка и по той же причине, что у обычного слайда
+# (см. SLIDE_BULLETS_MIN): требование «минимум три» — это прямое указание
+# сочинить третий. Верхняя строже пятёрки: сторон две, и 4 + 4 = 8 строк
+# половинной длины — это уже та же масса текста, что 5 полноширинных, дальше
+# слайд перестаёт читаться как сравнение и становится двумя списками.
+SLIDE_COMPARE_BULLETS_MIN = SLIDE_BULLETS_MIN
+SLIDE_COMPARE_BULLETS_MAX = 4
+
+# Величина на слайде-цифре набирается кеглем во весь слайд — это единственное,
+# ради чего слайд существует. 24 знака — предел, при котором «3,2 млрд сомонӣ»
+# (15) и «12,5 % к 2030 году» (18) ещё влезают в одну строку такого кегля;
+# всё, что длиннее, — уже не величина, а предложение, и ему место в caption.
+SLIDE_METRIC_VALUE_MAX_CHARS = 24
+# Подпись — фраза под числом, набранная как заголовок, но в две строки:
+# «Доля электронной отчётности среди юридических лиц». 120 знаков ≈ 18 слов.
+SLIDE_METRIC_CAPTION_MAX_CHARS = 120
+# Уточнение под подписью — ровно один буллет по объёму, им и записано: место
+# под него на слайде такое же, как под строку обычного списка.
+SLIDE_METRIC_NOTE_MAX_CHARS = SLIDE_BULLET_MAX_CHARS
+
+# Шагов от трёх до пяти. Два шага — это не процесс, а «до и после», то есть
+# compare; шесть карточек в ряд на слайде уже нечитаемы — их пришлось бы
+# набирать кеглем сноски.
+SLIDE_STEPS_MIN = 3
+SLIDE_STEPS_MAX = 5
+# Заголовок шага живёт в карточке, а карточка — пятая часть ширины слайда.
+# Он обязан лечь в одну строку, поэтому короче заголовка слайда.
+SLIDE_STEP_TITLE_MAX_CHARS = 60
+# Текст шага — та же строка, что и буллет, но внутри карточки, то есть с
+# полями по бокам: 160 против 200.
+SLIDE_STEP_TEXT_MAX_CHARS = 160
+
+# Цитата занимает слайд целиком и набирается крупно — это два буллета текста,
+# так и записано. Больше на слайд не влезет физически, а цитата длиннее двух
+# фраз перестаёт быть цитатой и становится пересказом куска документа.
+SLIDE_QUOTE_TEXT_MAX_CHARS = 2 * SLIDE_BULLET_MAX_CHARS
+# Атрибуция — «Налоговый кодекс, статья 12», а не имя файла: имена документов
+# рисует слайд «Источники». Тот же объём, что у подписи к величине.
+SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS = 120
 
 _CODE_FENCE_RE = re.compile(
     r"```[ \t]*[a-zA-Z0-9_+-]*[ \t]*\r?\n(?P<body>.*?)(?:\r?\n)?[ \t]*```",
@@ -155,27 +243,92 @@ class SlideCitation(BaseModel):
         return {**data, "chunk_id": str(value)}
 
 
-class PresentationSlide(BaseModel):
-    heading: str = Field(min_length=1, max_length=SLIDE_HEADING_MAX_CHARS)
-    bullets: list[str] = Field(
-        min_length=SLIDE_BULLETS_MIN, max_length=SLIDE_BULLETS_MAX
-    )
+def _reject_blank(value: str) -> str:
+    """Строка из одних пробелов — не текст, а пустое место на слайде.
+
+    min_length=1 её пропускает, а рендерер честно нарисует раскладку без
+    содержимого: величину без величины, цитату без цитаты. Молчаливая обрезка
+    здесь была бы хуже отказа — пустое поле означает, что модель не нашла
+    материала под выбранную раскладку, и лечится это другой раскладкой, а не
+    пробелом.
+    """
+    if not value.strip():
+        raise ValueError("must not be blank")
+    return value
+
+
+def _bounded_text(max_chars: int) -> Any:
+    """Тип текстового поля раскладки: непустое, не пробельное, не длиннее предела.
+
+    Отдельный конструктор, а не Field в каждом объявлении, — чтобы «непустое и
+    не из пробелов» не пришлось помнить в четырнадцати местах: одно забытое
+    место означает раскладку, которую можно отрисовать пустой.
+    """
+    return Annotated[
+        str,
+        Field(min_length=1, max_length=max_chars),
+        AfterValidator(_reject_blank),
+    ]
+
+
+def _check_bullet_list(bullets: list[str], *, layout: str, max_chars: int) -> None:
+    """Проверить список строк слайда: непустые и не длиннее предела.
+
+    Своё сообщение вместо Field-ограничения на элементе списка — ради НОМЕРА
+    строки и её настоящей длины: «сократите bullets[3], в нём 240 знаков из
+    200» модель исполняет, а «String should have at most 200 characters» без
+    номера заставляет её сокращать наугад, чаще всего не ту строку.
+
+    Одна функция на две раскладки (bullets и колонка compare), потому что
+    предел у них разный, а правило одно: разъехавшись, две копии дали бы разные
+    формулировки отказа на одну и ту же ошибку.
+    """
+    for index, bullet in enumerate(bullets):
+        if not bullet.strip():
+            raise ValueError(f"layout={layout!r}: bullets[{index}] is empty")
+        if len(bullet) > max_chars:
+            raise ValueError(
+                f"layout={layout!r}: bullets[{index}] is {len(bullet)} characters "
+                f"long, maximum is {max_chars}"
+            )
+
+
+class SlideBase(BaseModel):
+    """Общая часть ЛЮБОЙ раскладки: заголовок, цитаты и правила про цитаты.
+
+    Всё, что относится к цитатам (минимум одна, дедупликация, проверка на
+    подмножество выданных чанков), живёт здесь и наследуется всеми пятью
+    раскладками. Это не удобство, а единственный способ не потерять правило:
+    скопированная в пять классов проверка держится ровно до появления шестой
+    раскладки, которую напишут по образцу, забыв одну строку.
+
+    extra="forbid" — тоже здесь, и он несёт двойную нагрузку. Первая очевидна:
+    поле, которого нет в схеме, — это выдумка модели, и её незачем тащить
+    дальше. Вторая важнее: именно запрет лишних полей превращает раскладки в
+    ВЗАИМОИСКЛЮЧАЮЩИЕ. Без него слайд `{"layout": "metric", "bullets": [...]}`
+    прошёл бы валидацию как metric, буллеты молча исчезли бы при рендере, и мы
+    получили бы ровно то, ради чего всё затевалось наоборот: слайд, который
+    модель задумала одним, а код нарисовал другим.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    heading: _bounded_text(SLIDE_HEADING_MAX_CHARS)
     citations: list[SlideCitation] = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def _check_bullets(self, info: ValidationInfo) -> "PresentationSlide":
-        for index, bullet in enumerate(self.bullets):
-            if not bullet.strip():
-                raise ValueError(f"bullets[{index}] is empty")
-            if len(bullet) > SLIDE_BULLET_MAX_CHARS:
-                raise ValueError(
-                    f"bullets[{index}] is {len(bullet)} characters long, "
-                    f"maximum is {SLIDE_BULLET_MAX_CHARS}"
-                )
-        return self
+    def digest_texts(self) -> list[str]:
+        """Тексты слайда для дайджеста уже написанного (build_written_digest).
+
+        Раскладки хранят текст в разных полях, и «взять slide.bullets» после
+        этой волны означает потерять всё, что модель написала на слайдах других
+        раскладок, — то есть вернуть повторы, ради борьбы с которыми дайджест и
+        заведён (мера 2 правила «не добивать», см. prompts.py). Поэтому «что
+        считать текстом слайда» знает сама раскладка, а не её потребитель.
+        """
+        raise NotImplementedError
 
     @model_validator(mode="after")
-    def _deduplicate_citations(self, info: ValidationInfo) -> "PresentationSlide":
+    def _deduplicate_citations(self, info: ValidationInfo) -> "SlideBase":
         """Схлопнуть повторы цитат внутри слайда, сохранив порядок первого.
 
         Модель охотно ссылается на один и тот же фрагмент из каждого буллета, и
@@ -201,7 +354,7 @@ class PresentationSlide(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _check_citations_subset(self, info: ValidationInfo) -> "PresentationSlide":
+    def _check_citations_subset(self, info: ValidationInfo) -> "SlideBase":
         """Цитаты — только на чанки, реально переданные в промпт.
 
         allowed_citations приходит контекстом валидации: {chunk_id: source_id}
@@ -227,6 +380,189 @@ class PresentationSlide(BaseModel):
                     f"source_id={expected_source}, not {citation.source_id}"
                 )
         return self
+
+
+class BulletsSlide(SlideBase):
+    """Список независимых фактов — раскладка по умолчанию и самая частая.
+
+    Ровно то, чем слайд был до введения раскладок, поэтому и границы у него
+    прежние: менять их заодно значило бы смешать две правки в одной волне и
+    потерять возможность сказать, от какой из них изменилась колода.
+    """
+
+    layout: Literal[LAYOUT_BULLETS]
+    bullets: list[str] = Field(
+        min_length=SLIDE_BULLETS_MIN, max_length=SLIDE_BULLETS_MAX
+    )
+
+    @model_validator(mode="after")
+    def _check_bullets(self, info: ValidationInfo) -> "BulletsSlide":
+        _check_bullet_list(
+            self.bullets, layout=LAYOUT_BULLETS, max_chars=SLIDE_BULLET_MAX_CHARS
+        )
+        return self
+
+    def digest_texts(self) -> list[str]:
+        return list(self.bullets)
+
+
+class CompareColumn(BaseModel):
+    """Одна сторона сравнения: свой подзаголовок и свой короткий список."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    heading: _bounded_text(SLIDE_COMPARE_HEADING_MAX_CHARS)
+    bullets: list[str] = Field(
+        min_length=SLIDE_COMPARE_BULLETS_MIN, max_length=SLIDE_COMPARE_BULLETS_MAX
+    )
+
+    @model_validator(mode="after")
+    def _check_bullets(self, info: ValidationInfo) -> "CompareColumn":
+        _check_bullet_list(
+            self.bullets,
+            layout=LAYOUT_COMPARE,
+            max_chars=SLIDE_COMPARE_BULLET_MAX_CHARS,
+        )
+        return self
+
+
+class CompareSlide(SlideBase):
+    """Две стороны одного вопроса: было/стало, два режима, план/факт.
+
+    Сторон ровно две и они именованные (left/right), а не список: сравнение
+    трёх и более колонок — это таблица, а таблица на слайде набирается кеглем,
+    которым её никто не прочитает. Список из двух элементов дал бы ту же форму,
+    но потерял бы имена, а рендеру нужно знать, какая сторона слева.
+    """
+
+    layout: Literal[LAYOUT_COMPARE]
+    left: CompareColumn
+    right: CompareColumn
+
+    def digest_texts(self) -> list[str]:
+        # Подзаголовки колонок входят в дайджест наравне с их строками: «было /
+        # стало» — это и есть содержание слайда, а не разметка.
+        return [
+            self.left.heading,
+            *self.left.bullets,
+            self.right.heading,
+            *self.right.bullets,
+        ]
+
+
+class MetricSlide(SlideBase):
+    """Одна величина, ради которой существует весь слайд.
+
+    Величина остаётся СТРОКОЙ, а не числом, и это осознанно: «12,5 %»,
+    «3,2 млрд сомонӣ», «с 1 января 2027» — в документах величина неотделима от
+    единицы измерения и от способа её записи. Число плюс поле «единица» модель
+    заполняла бы гаданием, а рендер собирал бы обратно, теряя запятую как
+    десятичный разделитель и пробел как разделитель разрядов.
+    """
+
+    layout: Literal[LAYOUT_METRIC]
+    value: _bounded_text(SLIDE_METRIC_VALUE_MAX_CHARS)
+    caption: _bounded_text(SLIDE_METRIC_CAPTION_MAX_CHARS)
+    # Уточнения может не быть — и это законный ответ, а не недоработка модели:
+    # «12,5 %» под подписью часто исчерпывающи. Ключ разрешено не писать вовсе,
+    # умолчание то же самое.
+    note: _bounded_text(SLIDE_METRIC_NOTE_MAX_CHARS) | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_note_means_none(cls, data: Any) -> Any:
+        """Пустая строка в note — это "уточнения нет", а не ошибка.
+
+        В остальных полях пробельная строка отвергается (см. _reject_blank):
+        там она означает нарисованную пустоту. Здесь пустоту рисовать не надо —
+        поле необязательное, и "" с null совпадают по смыслу дословно. Отказ
+        целого слайда из-за выбора между двумя способами сказать «ничего» —
+        цена, за которую мы не получаем ничего.
+        """
+        if not isinstance(data, dict):
+            return data
+        note = data.get("note")
+        if isinstance(note, str) and not note.strip():
+            return {**data, "note": None}
+        return data
+
+    def digest_texts(self) -> list[str]:
+        # Величина входит в дайджест вместе с подписью: без неё следующий слайд
+        # не увидит, что эта цифра уже названа, и назовёт её второй раз.
+        texts = [f"{self.value} — {self.caption}"]
+        if self.note:
+            texts.append(self.note)
+        return texts
+
+
+class SlideStep(BaseModel):
+    """Один шаг процесса: чем он называется и что в нём происходит."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: _bounded_text(SLIDE_STEP_TITLE_MAX_CHARS)
+    text: _bounded_text(SLIDE_STEP_TEXT_MAX_CHARS)
+
+
+class StepsSlide(SlideBase):
+    """Упорядоченная последовательность: этапы, сроки, порядок действий.
+
+    Порядок несёт смысл — им отличается процедура от списка, — поэтому шаги
+    хранятся списком, а не словарём, и рендер обязан рисовать их в том порядке,
+    в котором они пришли. Номера шагов модель не пишет: их ставит код, иначе
+    «Шаг 2» из текста и вторая позиция в списке однажды разъедутся.
+    """
+
+    layout: Literal[LAYOUT_STEPS]
+    steps: list[SlideStep] = Field(
+        min_length=SLIDE_STEPS_MIN, max_length=SLIDE_STEPS_MAX
+    )
+
+    def digest_texts(self) -> list[str]:
+        return [f"{step.title}: {step.text}" for step in self.steps]
+
+
+class QuoteSlide(SlideBase):
+    """Формулировка из документа, которая важна дословно.
+
+    attribution — источник СЛОВАМИ («Налоговый кодекс, статья 12»), и это не
+    дубликат цитат: citations остаются машинной ссылкой на фрагмент и рисуются
+    слайдом «Источники», а attribution — это подпись под цитатой, которую
+    читает человек. Имена файлов и служебные идентификаторы в неё не попадают
+    (см. правило про идентификаторы в prompts.py).
+    """
+
+    layout: Literal[LAYOUT_QUOTE]
+    text: _bounded_text(SLIDE_QUOTE_TEXT_MAX_CHARS)
+    attribution: _bounded_text(SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS)
+
+    def digest_texts(self) -> list[str]:
+        return [self.text]
+
+
+# Слайд — это РАЗМЕЧЕННОЕ объединение по полю layout, а не одна схема со
+# множеством необязательных полей.
+#
+# Разница не косметическая. Схема с необязательными полями принимает
+# {"layout": "metric", "value": ..., "steps": [...]} и оставляет решение
+# «что рисовать» рендереру — то есть тому, кто узнаёт о противоречии последним
+# и молча. Размеченное объединение отвергает такой ответ на входе, а сообщение
+# об отказе называет и раскладку, и поле ("metric.steps: Extra inputs are not
+# permitted"), и потому годится для повторного промпта.
+#
+# Умолчания у layout нет НАМЕРЕННО. Молчаливый фолбэк на bullets вернул бы
+# ровно ту колоду, ради которой всё это и затевалось наоборот — одинаковые
+# слайды, — и скрыл бы главный симптом: модель не поняла, что от неё хотят.
+# Отсутствие layout обязано быть видно как отказ.
+PresentationSlide = Annotated[
+    BulletsSlide | CompareSlide | MetricSlide | StepsSlide | QuoteSlide,
+    Field(discriminator="layout"),
+]
+
+# Размеченное объединение — не класс, и model_validate у него нет. Разбор идёт
+# через TypeAdapter; он собирается ОДИН раз на модуль, потому что сборка схемы
+# pydantic не бесплатна, а слайд-вызовов в колоде до тринадцати.
+SLIDE_ADAPTER = TypeAdapter(PresentationSlide)
 
 
 def strip_code_fences(raw: str) -> str:
@@ -340,10 +676,40 @@ def parse_model_json(raw: str) -> dict[str, Any]:
 
 
 def format_validation_error(exc: ValidationError) -> str:
-    """ValidationError → одна строка для повторного промпта."""
+    """ValidationError → одна строка для повторного промпта.
+
+    Текст обязан называть РАСКЛАДКУ и ПОЛЕ: он — единственная подсказка второй
+    попытки, и «response does not match the required schema» отправляет модель
+    гадать заново по всей схеме из пяти раскладок.
+
+    С раскладками это выходит само: loc размеченного объединения начинается с
+    тега, то есть «metric.value: String should have at most 24 characters» и
+    «steps.steps.1.title: Field required» получаются без нашего участия.
+    Отдельной обработки требует лишь одна ошибка — отсутствие самого layout:
+    pydantic сообщает о ней с ПУСТЫМ loc («не смог извлечь тег»), и в общем
+    виде она превратилась бы в «<root>: Unable to extract tag...», где не
+    названо ни поле, ни допустимые значения.
+    """
     parts: list[str] = []
     for error in exc.errors():
         location = ".".join(str(item) for item in error["loc"]) or "<root>"
+        if error["type"] in ("union_tag_not_found", "union_tag_invalid"):
+            discriminator = str((error.get("ctx") or {}).get("discriminator", "")).strip(
+                "'"
+            )
+            # Обе ошибки про одно поле, и обе приходят с пустым loc: неизвестный
+            # тег («layout: table») своё сообщение уже несёт, ему хватает
+            # правильного имени места, а вот отсутствующий обязан ещё и
+            # перечислить допустимые значения.
+            if discriminator:
+                location = discriminator
+            # Список значений подставляется только для СВОЕГО дискриминатора:
+            # появится в модуле второе размеченное объединение — оно получит
+            # родное сообщение pydantic, а не чужие имена раскладок.
+            if error["type"] == "union_tag_not_found" and discriminator == "layout":
+                expected = ", ".join(repr(name) for name in SLIDE_LAYOUTS)
+                parts.append(f"layout: field required, expected one of {expected}")
+                continue
         parts.append(f"{location}: {error['msg']}")
     return "; ".join(parts) or "response does not match the required schema"
 
@@ -360,14 +726,16 @@ def validate_plan(raw: str, *, slide_count: int) -> PresentationPlan:
         raise LlmResponseError(format_validation_error(exc)) from exc
 
 
-def validate_slide(raw: str, *, allowed_citations: dict[str, int]) -> PresentationSlide:
-    """Ответ модели → слайд, цитаты которого лежат внутри allowed_citations.
+def validate_slide(raw: str, *, allowed_citations: dict[str, int]) -> SlideBase:
+    """Ответ модели → слайд ОДНОЙ из раскладок, с цитатами внутри allowed_citations.
 
     allowed_citations — {chunk_id: source_id} тех чанков, что ушли в промпт.
+    Какая раскладка вернулась, потребитель узнаёт по полю layout; общее у всех —
+    heading, citations и digest_texts().
     """
     payload = parse_model_json(raw)
     try:
-        return PresentationSlide.model_validate(
+        return SLIDE_ADAPTER.validate_python(
             payload,
             context={"allowed_citations": allowed_citations},
         )

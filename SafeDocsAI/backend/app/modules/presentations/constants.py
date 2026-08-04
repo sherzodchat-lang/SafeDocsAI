@@ -14,14 +14,43 @@
 """
 
 from app.modules.presentations.llm_schemas import (
+    LAYOUT_BULLETS,
+    LAYOUT_COMPARE,
+    LAYOUT_METRIC,
+    LAYOUT_QUOTE,
+    LAYOUT_STEPS,
     PLAN_TITLE_MAX_CHARS,
     RENDERER_ADDED_SLIDES,
     SECTION_HEADING_MAX_CHARS,
     SECTION_SEARCH_QUERY_MAX_CHARS,
     SLIDE_BULLETS_MAX,
+    SLIDE_BULLETS_MIN,
     SLIDE_BULLET_MAX_CHARS,
+    SLIDE_COMPARE_BULLETS_MAX,
+    SLIDE_COMPARE_BULLETS_MIN,
+    SLIDE_COMPARE_BULLET_MAX_CHARS,
+    SLIDE_COMPARE_HEADING_MAX_CHARS,
+    SLIDE_HEADING_MAX_CHARS,
+    SLIDE_LAYOUTS,
+    SLIDE_METRIC_CAPTION_MAX_CHARS,
+    SLIDE_METRIC_NOTE_MAX_CHARS,
+    SLIDE_METRIC_VALUE_MAX_CHARS,
+    SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS,
+    SLIDE_QUOTE_TEXT_MAX_CHARS,
+    SLIDE_STEPS_MAX,
+    SLIDE_STEPS_MIN,
+    SLIDE_STEP_TEXT_MAX_CHARS,
+    SLIDE_STEP_TITLE_MAX_CHARS,
     content_section_count,
 )
+
+# Пределы раскладок объявлены в llm_schemas.py и переэкспортированы отсюда, а
+# не наоборот. Причина механическая: constants.py импортирует llm_schemas
+# (см. выше), и обратный импорт замкнул бы кольцо. Причина по существу та же,
+# по какой здесь уже лежат SLIDE_BULLETS_MAX и SLIDE_BULLET_MAX_CHARS: число,
+# которым СХЕМА отвергает ответ, обязано стоять в схеме — иначе валидация и
+# описание в промпте держатся на двух разных значениях, — а этот модуль
+# остаётся единственным местом, куда за ним ходят промпты, рендер и тесты.
 
 # --- Языки ---------------------------------------------------------------
 #
@@ -222,11 +251,21 @@ CHARS_PER_TOKEN = 3.6
 #      съедается первым же документом с числами;
 #   2) описание уезжает не только в план: оно повторяется в КАЖДОМ слайд-вызове
 #      рядом с дайджестом написанного, который к концу колоды сам стоит около
-#      3 300 токенов (см. DIGEST_MAX_CHARS). Проверка по слайд-вызову: 350
-#      (система, измерено — 1 239 знаков) + 4 280 (5 чанков по 800 токенов с
-#      обвязкой) + 500 (описание) + 720 (ответ слайда 1 300 знаков, дважды) +
-#      60 (претензия) + 3 330 (дайджест) ≈ 9 240 из 12 000 — влезает с запасом
-#      около 23%;
+#      3 300 токенов (см. DIGEST_MAX_CHARS). Проверка по слайд-вызову:
+#      1 250 (система, измерено — 4 485 знаков) + 4 280 (5 чанков по 800
+#      токенов с обвязкой) + 500 (описание) + 880 (худший ответ слайда — 1 580
+#      знаков раскладки steps, дважды) + 60 (претензия) + 3 330 (дайджест)
+#      ≈ 10 400 из 12 000 — влезает с запасом около 13%.
+#
+#      Запас был около 23%, пока слайд имел ровно один вид. Съели его
+#      РАСКЛАДКИ: описание пяти штук в системном промпте — это 2 885 знаков
+#      (≈ 800 токенов), и они уходят в каждый слайд-вызов. Плата осознанная и
+#      разовая: описание раскладок не растёт ни от длины колоды, ни от размера
+#      корпуса, а список закрыт (SLIDE_LAYOUTS в llm_schemas.py), то есть
+#      шестой раскладки, которая съест следующие 400 токенов, не появится
+#      незаметно. 13% — это по-прежнему полтора чанка запаса на ХУДШЕМ входе,
+#      которого в бою не бывает: предельное описание, предельный дайджест,
+#      пять предельных чанков и предельный ответ одновременно;
 #   3) описание — это запрос пользователя, а не документ. 1 800 знаков — около
 #      270 слов, и всё, что длиннее, — вставленный целиком текст, который
 #      вытесняет из окна собственно источники. Довод тот же, что у предела
@@ -235,6 +274,13 @@ DESCRIPTION_MAX = 1800
 
 # Потолок дайджеста уже написанного (тексты буллетов предыдущих слайдов,
 # см. build_written_digest в prompts.py).
+#
+# Считается по раскладке bullets, и после введения раскладок это по-прежнему
+# верно с точностью до пренебрежимого: самый «текстовый» слайд теперь steps
+# (5 шагов по 60 + 160 знаков = 1 110 знаков против 1 000 у пяти буллетов), то
+# есть на слайд приходится на десятую часть больше. На потолок это не влияет —
+# он и стоит затем, чтобы длина дайджеста не зависела от того, что именно
+# написали выше по колоде.
 #
 # Без потолка дайджест растёт линейно по колоде: 17 контентных слайдов (счёт по
 # бюджетному потолку в 20 слайдов, а не по продуктовому SLIDE_COUNT_MAX — так
@@ -482,6 +528,11 @@ __all__ = [
     "LANGUAGE_NAMES",
     "LANGUAGE_RU",
     "LANGUAGE_TJ",
+    "LAYOUT_BULLETS",
+    "LAYOUT_COMPARE",
+    "LAYOUT_METRIC",
+    "LAYOUT_QUOTE",
+    "LAYOUT_STEPS",
     "LLM_CALL_ATTEMPTS",
     "LLM_CALL_TIMEOUT",
     "LLM_CALL_WATCHDOG_MARGIN",
@@ -502,12 +553,28 @@ __all__ = [
     "SECTION_HEADING_MAX_CHARS",
     "SECTION_SEARCH_QUERY_MAX_CHARS",
     "SLIDE_BULLETS_MAX",
+    "SLIDE_BULLETS_MIN",
     "SLIDE_BULLET_MAX_CHARS",
+    "SLIDE_COMPARE_BULLETS_MAX",
+    "SLIDE_COMPARE_BULLETS_MIN",
+    "SLIDE_COMPARE_BULLET_MAX_CHARS",
+    "SLIDE_COMPARE_HEADING_MAX_CHARS",
     "SLIDE_COUNT_DEFAULT",
     "SLIDE_COUNT_MAX",
     "SLIDE_COUNT_MIN",
+    "SLIDE_HEADING_MAX_CHARS",
+    "SLIDE_LAYOUTS",
+    "SLIDE_METRIC_CAPTION_MAX_CHARS",
+    "SLIDE_METRIC_NOTE_MAX_CHARS",
+    "SLIDE_METRIC_VALUE_MAX_CHARS",
+    "SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS",
+    "SLIDE_QUOTE_TEXT_MAX_CHARS",
     "SLIDE_RETRIEVAL_CANDIDATE_POOL",
     "SLIDE_RETRIEVAL_TOP_K",
+    "SLIDE_STEPS_MAX",
+    "SLIDE_STEPS_MIN",
+    "SLIDE_STEP_TEXT_MAX_CHARS",
+    "SLIDE_STEP_TITLE_MAX_CHARS",
     "SOURCES_HEADING",
     "SOURCES_MORE",
     "STATUS_ERROR",

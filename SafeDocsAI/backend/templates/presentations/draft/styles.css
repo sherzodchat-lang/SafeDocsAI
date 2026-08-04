@@ -74,6 +74,9 @@ body {
 
 .deck-title {
   margin: 0 0 24px;
+  /* Заголовок колоды приходит от пользователя: одно длинное слово без переносов
+     иначе уезжает за правый край листа и обрезается вместе со смыслом. */
+  overflow-wrap: anywhere;
   font-size: 52px;
   font-weight: 700;
   line-height: 1.15;
@@ -82,6 +85,7 @@ body {
 
 .deck-notebook {
   margin: 0 0 8px;
+  overflow-wrap: anywhere;
   font-size: 24px;
   font-weight: 400;
   color: #333333;
@@ -97,6 +101,9 @@ body {
 
 .slide-heading {
   margin: 0 0 24px;
+  /* Заголовок слайда — пользовательский текст: без anywhere длинный термин
+     уходит за край листа и обрезается молча. */
+  overflow-wrap: anywhere;
   padding-bottom: 12px;
   border-bottom: 3px solid #111111;
   font-size: 34px;
@@ -117,8 +124,11 @@ body {
   font-size: 20px;
   line-height: 1.45;
   /* Переносы в русском и таджикском бывают длинными словами; без этого
-     длинный термин уезжает за край слайда. */
-  overflow-wrap: break-word;
+     длинный термин уезжает за край слайда. ANYWHERE, а не break-word: разница
+     проявляется не здесь (блок в обычном потоке шире слова), а в раскладках
+     ниже, где текст лежит в колонках сетки. Правило одно на весь шаблон,
+     чтобы при переносе разметки не унаследовать более слабый вариант. */
+  overflow-wrap: anywhere;
 }
 
 .bullet::before {
@@ -129,6 +139,292 @@ body {
   width: 8px;
   height: 8px;
   background: #111111;
+}
+
+/* --- Раскладка «две колонки» ------------------------------------------- */
+
+/* Средник здесь ЛИНИЯ, а не пустота: две колонки, разведённые одним пробелом,
+   читаются как один текст в два столбца, а не как противопоставление «было —
+   стало». Линия и есть весь приём этого шаблона: ни рамок, ни заливок. */
+/* Средник тянется на всю высоту полосы, а не по высоте текста: колонка «было»
+   почти всегда короче колонки «стало», и линия по короткой из них
+   разваливается на огрызок. Оттого слайд и растянут флексом. */
+.slide--compare {
+  display: flex;
+  flex-direction: column;
+}
+
+.compare {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding-bottom: 44px;
+}
+
+/* min-width: 0 обязателен: колонка 1fr по умолчанию не сжимается ниже
+   min-content своего содержимого, и одно длинное слово в пункте раздвинуло бы
+   сетку шире слайда. Вместе с overflow-wrap: anywhere ниже это и держит
+   колонку в своих границах. */
+.compare-side {
+  box-sizing: border-box;
+  min-width: 0;
+  padding-right: 44px;
+}
+
+.compare-side--right {
+  padding-right: 0;
+  padding-left: 44px;
+  border-left: 3px solid #111111;
+}
+
+.compare-heading {
+  margin: 0 0 18px;
+  padding-top: 12px;
+  border-top: 7px solid #111111;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.22;
+  overflow-wrap: anywhere;
+}
+
+.compare-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compare-item {
+  position: relative;
+  margin: 0 0 13px;
+  padding-left: 22px;
+  font-size: 18px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* Тире вместо квадрата: маркер колонки отличается от маркера обычного списка,
+   иначе раскладки различаются только средником. */
+.compare-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 11px;
+  width: 13px;
+  height: 2px;
+  background: #111111;
+}
+
+/* Кегль по числу пунктов в самой длинной стороне: колонка вдвое уже полосы, и
+   четыре-пять пунктов по 200 знаков в ней прежним кеглем не стоят. */
+.compare--4 .compare-item {
+  margin-bottom: 11px;
+  font-size: 17px;
+}
+
+.compare--5 .compare-item {
+  margin-bottom: 7px;
+  font-size: 15px;
+  line-height: 1.32;
+}
+
+.compare--5 .compare-heading {
+  margin-bottom: 14px;
+  font-size: 21px;
+}
+
+/* --- Раскладка «величина» ---------------------------------------------- */
+
+/* Слайд с одним числом центрируется по вертикали: заголовок остаётся сверху,
+   а всё остальное поле отдано величине. Флексом, а не фиксированной высотой —
+   заголовок бывает в две строки, и высота блока обязана подстроиться сама. */
+.slide--metric,
+.slide--quote {
+  display: flex;
+  flex-direction: column;
+}
+
+.metric {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-bottom: 40px;
+}
+
+/* Кегль величины задаётся классом metric--*: контракт допускает до 24 знаков,
+   и на 168px такая строка занимает больше двух ширин листа. Перенос её не
+   спасёт — «1 000 000 сомонӣ» в две строки перестаёт читаться как одно число,
+   поэтому кегль падает ступенями по длине. */
+.metric-value {
+  margin: 0;
+  font-size: 168px;
+  font-weight: 700;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+  overflow-wrap: anywhere;
+}
+
+.metric--l .metric-value {
+  font-size: 118px;
+}
+
+.metric--m .metric-value {
+  font-size: 84px;
+}
+
+.metric--s .metric-value {
+  font-size: 60px;
+}
+
+.metric-caption {
+  margin: 26px 0 0;
+  padding-top: 18px;
+  border-top: 3px solid #111111;
+  max-width: 920px;
+  font-size: 27px;
+  line-height: 1.32;
+  overflow-wrap: anywhere;
+}
+
+.metric-note {
+  margin: 20px 0 0;
+  padding-left: 18px;
+  border-left: 7px solid #111111;
+  max-width: 900px;
+  font-size: 18px;
+  line-height: 1.42;
+  color: #333333;
+  overflow-wrap: anywhere;
+}
+
+/* --- Раскладка «этапы» -------------------------------------------------- */
+
+/* Этапы стоят В РЯД, а не столбиком: порядок действий обязан читаться как
+   последовательность слева направо, иначе от нумерованного списка он ничем не
+   отличается. Колонки равной ширины, число известно из разметки. */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  column-gap: 32px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps--4 {
+  grid-template-columns: repeat(4, 1fr);
+  column-gap: 26px;
+}
+
+.steps--5 {
+  grid-template-columns: repeat(5, 1fr);
+  column-gap: 22px;
+}
+
+.step {
+  box-sizing: border-box;
+  min-width: 0;
+  padding-top: 14px;
+  border-top: 7px solid #111111;
+}
+
+.step-num {
+  display: block;
+  font-size: 36px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.step-title {
+  margin: 12px 0 8px;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.24;
+  overflow-wrap: anywhere;
+}
+
+.step-text {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.4;
+  color: #333333;
+  overflow-wrap: anywhere;
+}
+
+/* Колонка пятого этапа вдвое уже колонки третьего — кегль идёт следом. */
+.steps--4 .step-num {
+  font-size: 32px;
+}
+
+.steps--4 .step-title {
+  font-size: 18px;
+}
+
+.steps--4 .step-text {
+  font-size: 16px;
+}
+
+.steps--5 .step-num {
+  font-size: 28px;
+}
+
+.steps--5 .step-title {
+  font-size: 17px;
+}
+
+.steps--5 .step-text {
+  font-size: 15px;
+  line-height: 1.38;
+}
+
+/* --- Раскладка «цитата» ------------------------------------------------- */
+
+/* Врезка: жирная вертикаль слева и крупный кегль во всю полосу. Ни рамки, ни
+   заливки — в этом шаблоне цитату от списка отличает вес линии и воздух. */
+.quote {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  margin: 0;
+  padding: 0 0 40px 36px;
+  border-left: 14px solid #111111;
+  max-width: 1000px;
+}
+
+.quote-text {
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.36;
+  overflow-wrap: anywhere;
+}
+
+.quote-by {
+  margin: 26px 0 0;
+  font-size: 19px;
+  color: #333333;
+  overflow-wrap: anywhere;
+}
+
+/* Тире перед автором — знак препинания, а не слово: локализовать нечего, и
+   подпись в strings под него не нужна. */
+.quote-by::before {
+  content: "— ";
+}
+
+/* Кегль цитаты по её длине: 400 знаков (потолок контракта) тем же кеглем, что
+   короткая фраза, не встают в полосу, а короткая фраза мелким кеглем перестаёт
+   быть врезкой. */
+.quote--s .quote-text {
+  font-size: 40px;
+  line-height: 1.32;
+}
+
+.quote--l .quote-text {
+  font-size: 27px;
+  line-height: 1.4;
 }
 
 .slide-footer {
@@ -172,7 +468,7 @@ body {
   margin-bottom: 10px;
   padding-bottom: 8px;
   border-bottom: 1px solid #999999;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   break-inside: avoid;
 }
 

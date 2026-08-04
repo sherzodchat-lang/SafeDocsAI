@@ -92,7 +92,7 @@ body {
   font-weight: 700;
   color: #1d1a15;
   max-width: 900px;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 /* В колонтитуле содержательных слайдов — многоточие: осознанное ВИДИМОЕ
@@ -126,6 +126,10 @@ body {
 }
 
 .hairline {
+  /* flex: 0 0 auto — и для титула, и для раскладок ниже: в колонке флекса
+     линейка высотой 1–6px иначе схлопывается сжатием, и от приёма шаблона не
+     остаётся ничего. */
+  flex: 0 0 auto;
   height: 6px;
   background: #1d1a15;
 }
@@ -141,7 +145,7 @@ body {
   font-weight: 700;
   line-height: 1.14;
   letter-spacing: -0.015em;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 .colophon {
@@ -173,7 +177,7 @@ body {
   font-size: 34px;
   font-weight: 700;
   line-height: 1.18;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 .citations {
@@ -196,8 +200,12 @@ body {
 /* Текст набирается в две колонки — это и есть «издательский» приём, и он же
    решает арифметику: контракт разрешает 5 буллитов по 200 знаков, то есть до
    1000 знаков на слайд. В одну колонку такой объём при кегле 22 не влезает в
-   720 пикселей, в две — влезает с запасом. Высота колонок задана жёстко:
-   переполнение обязано быть видно на смоуке, а не обрезаться молча. */
+   720 пикселей, в две — влезает.
+   Высота колонок задана жёстко, и это НЕ ловушка для переполнения, как
+   считалось раньше: многоколоночник фиксированной высоты при печати не
+   обрезает лишнее, а открывает ТРЕТЬЮ колонку за краем листа. Пункт из неё
+   пропадает целиком и молча. Ёмкость двух колонок конечна, поэтому кегль
+   зависит от числа пунктов — см. .bullets--4/.bullets--5 ниже. */
 .bullets {
   margin: 26px 0 0;
   padding: 0;
@@ -218,7 +226,11 @@ body {
      headless Chrome нет (словарей для ru/tj в образе не стоит), и выключка
      растягивает пробелы. Ровный левый край честнее. */
   text-align: left;
-  overflow-wrap: break-word;
+  /* ANYWHERE, а не break-word: в колонке фиксированной ширины разница не
+     видна, но в раскладках ниже текст лежит в ячейках сетки, где от неё
+     зависит, останется ли длинное слово внутри колонки. Правило одно на весь
+     шаблон, чтобы при переносе разметки не унаследовать более слабый вариант. */
+  overflow-wrap: anywhere;
   /* Пункт не разрывается между колонками: половина фразы внизу левой колонки
      и половина вверху правой читается как две разные мысли. */
   break-inside: avoid;
@@ -232,6 +244,355 @@ body {
   width: 12px;
   height: 1px;
   background: #9c3b1f;
+}
+
+/* Пять пунктов по 200 знаков — потолок контракта: при кегле 19 такой пункт
+   занимает пять строк, в колонку высотой 420px их встаёт два, и пятый пункт
+   уезжал в третью колонку за краем листа. Замерено по готовому PDF, а не по
+   DOM: на экране полоса сходится. 17px/1.42 держат три пункта в колонке. */
+.bullets--4 .bullet {
+  margin-bottom: 15px;
+  font-size: 18px;
+}
+
+.bullets--5 .bullet {
+  margin-bottom: 13px;
+  font-size: 16.5px;
+  line-height: 1.4;
+}
+
+/* --- Раскладки: общая механика ----------------------------------------- */
+
+/* Полосам со средником, величиной и врезкой нужна вся высота: линейка обязана
+   идти от заголовка до низа, а величина — стоять по центру поля. Флексом, а не
+   фиксированной высотой: заголовок бывает в две строки. */
+.slide--compare,
+.slide--metric,
+.slide--quote {
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Раскладка «две колонки» ------------------------------------------- */
+
+/* Средник — тонкая линейка на всю высоту полосы, как в газетном развороте.
+   Она же и есть противопоставление: без неё две колонки читаются как один
+   текст, набранный в два столбца. */
+/* Отбивки урезаны в пользу колонок: у этого шаблона самая высокая «шапка» из
+   четырёх (колонтитул, фолио, заголовок, линейка), и на две колонки остаётся
+   меньше места, чем у остальных. Каждые отданные 10px — это одна строка
+   пункта, которая иначе уехала бы под нижний край полосы. */
+.slide--compare .folio {
+  margin: 18px 0 10px;
+}
+
+.compare {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 12px;
+  padding-bottom: 8px;
+}
+
+/* min-width: 0 обязателен: колонка 1fr не сжимается ниже min-content своего
+   содержимого, и одно длинное слово раздвинуло бы сетку шире полосы. Вместе с
+   overflow-wrap: anywhere ниже это и держит колонку в своих границах. */
+.compare-side {
+  box-sizing: border-box;
+  min-width: 0;
+  padding-right: 46px;
+}
+
+.compare-side--right {
+  padding-right: 0;
+  padding-left: 46px;
+  border-left: 1px solid #a8a094;
+}
+
+/* Подзаголовок колонки набран гротеском в разрядку: в этом шаблоне так
+   выглядят все служебные строки — колонтитул, фолио, номера страниц. */
+.compare-heading {
+  margin: 0 0 16px;
+  padding-bottom: 9px;
+  border-bottom: 3px solid #1d1a15;
+  font-family: "Noto Sans", sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.compare-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.compare-item {
+  position: relative;
+  margin: 0 0 13px;
+  padding-left: 22px;
+  font-size: 18px;
+  line-height: 1.44;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.compare-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 12px;
+  width: 12px;
+  height: 1px;
+  background: #9c3b1f;
+}
+
+/* Кегль по числу пунктов в самой длинной стороне: колонка вдвое уже полосы, и
+   четыре-пять пунктов по 200 знаков в ней прежним кеглем не стоят. */
+.compare--4 .compare-item {
+  margin-bottom: 11px;
+  font-size: 17px;
+}
+
+/* 13.5px — не вкус, а замер: пять пунктов по 200 знаков на сторону, в которых
+   почти всё занимает одно неразрывное слово, при 14px уходили за нижний край
+   листа (и Chrome при печати не обрезал их, а рисовал ЗА MediaBox). На 13.5px
+   тот же случай встаёт в полосу целиком. Случай крайний — обычная проза
+   набирается кеглем выше по .compare--4. */
+.compare--5 .compare-item {
+  margin-bottom: 5px;
+  font-size: 13.5px;
+  line-height: 1.3;
+}
+
+.compare--5 .compare-heading {
+  margin-bottom: 12px;
+  font-size: 15px;
+}
+
+/* --- Раскладка «величина» ---------------------------------------------- */
+
+.metric {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-bottom: 54px;
+}
+
+/* Кегль величины задаётся классом metric--*: контракт допускает до 24 знаков,
+   и на 150px такая строка занимает почти две ширины полосы. Перенос её не
+   спасёт — «1 000 000 сомонӣ» в две строки перестаёт читаться как одно число,
+   поэтому кегль падает ступенями по длине. */
+.metric-value {
+  margin: 0 0 20px;
+  font-size: 150px;
+  font-weight: 700;
+  line-height: 1.02;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+
+.metric--l .metric-value {
+  font-size: 108px;
+}
+
+.metric--m .metric-value {
+  font-size: 78px;
+}
+
+.metric--s .metric-value {
+  font-size: 56px;
+}
+
+.metric-caption {
+  margin: 20px 0 0;
+  max-width: 900px;
+  font-size: 25px;
+  line-height: 1.36;
+  overflow-wrap: anywhere;
+}
+
+/* Примечание — редакционная сноска: гротеск, киноварная вертикаль, кегль
+   заметно мельче подписи, но не мельче 15px (тоньше печать не держит). */
+.metric-note {
+  margin: 22px 0 0;
+  padding-left: 16px;
+  border-left: 3px solid #9c3b1f;
+  max-width: 860px;
+  font-family: "Noto Sans", sans-serif;
+  font-size: 15px;
+  line-height: 1.44;
+  color: #4a4238;
+  overflow-wrap: anywhere;
+}
+
+/* --- Раскладка «этапы» -------------------------------------------------- */
+
+/* Этапы стоят В РЯД и разделены линейками — так в журнале набирают рубрики
+   «шаг за шагом». Порядок действий обязан читаться слева направо, иначе от
+   нумерованного списка он ничем не отличается. */
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 28px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps--4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.steps--5 {
+  grid-template-columns: repeat(5, 1fr);
+}
+
+.step {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 0 24px;
+  border-left: 1px solid #a8a094;
+}
+
+.step:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+/* Инициал-цифра киноварью: в этом шаблоне так открывают рубрику. */
+.step-num {
+  display: block;
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  color: #9c3b1f;
+}
+
+.step-title {
+  margin: 12px 0 9px;
+  font-family: "Noto Sans", sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  overflow-wrap: anywhere;
+}
+
+.step-text {
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.44;
+  overflow-wrap: anywhere;
+}
+
+/* Колонка пятого этапа вдвое уже колонки третьего — кегль идёт следом. */
+.steps--4 .step {
+  padding: 0 18px;
+}
+
+.steps--4 .step-num {
+  font-size: 42px;
+}
+
+.steps--4 .step-text {
+  font-size: 16px;
+}
+
+.steps--5 .step {
+  padding: 0 14px;
+}
+
+.steps--5 .step-num {
+  font-size: 36px;
+}
+
+.steps--5 .step-title {
+  font-size: 14px;
+  letter-spacing: 0.08em;
+}
+
+.steps--5 .step-text {
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+/* --- Раскладка «цитата» ------------------------------------------------- */
+
+/* Врезка по центру полосы: кавычка-инициал, жирная линейка сверху и тонкая
+   снизу — так набирают вынос из текста. Курсива в комплекте нет (в шрифтовом
+   наборе только прямые начертания), и синтетический наклон был бы подделкой:
+   выделение здесь даёт кегль и линейки. */
+.quote {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  margin: 0 auto;
+  padding: 0 0 54px;
+  max-width: 960px;
+  text-align: center;
+}
+
+/* Кавычка — знак препинания, а не слово: локализовать нечего, подписи в
+   strings она не требует. */
+.quote::before {
+  content: "«";
+  display: block;
+  margin-bottom: 10px;
+  font-size: 84px;
+  line-height: 0.9;
+  color: #9c3b1f;
+}
+
+.quote-text {
+  margin: 0;
+  padding: 26px 0 24px;
+  border-top: 3px solid #1d1a15;
+  border-bottom: 1px solid #1d1a15;
+  font-size: 31px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.quote-by {
+  margin: 22px 0 0;
+  font-family: "Noto Sans", sans-serif;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #4a4238;
+  overflow-wrap: anywhere;
+}
+
+.quote-by::before {
+  content: "— ";
+}
+
+/* Кегль цитаты по её длине: 400 знаков (потолок контракта) тем же кеглем, что
+   короткая фраза, не встают в полосу, а короткая фраза мелким кеглем перестаёт
+   быть врезкой. Кавычка-инициал уменьшается вместе с текстом: иначе на длинной
+   цитате она забирает высоту у самой цитаты. */
+.quote--s .quote-text {
+  font-size: 38px;
+  line-height: 1.34;
+}
+
+.quote--l .quote-text {
+  padding: 22px 0 20px;
+  font-size: 25px;
+  line-height: 1.44;
+}
+
+.quote--l::before {
+  margin-bottom: 4px;
+  font-size: 58px;
 }
 
 /* --- Источники --------------------------------------------------------- */
@@ -261,7 +622,7 @@ body {
   margin-bottom: 11px;
   font-size: 16px;
   line-height: 1.32;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   break-inside: avoid;
 }
 

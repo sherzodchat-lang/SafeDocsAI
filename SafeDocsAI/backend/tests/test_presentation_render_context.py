@@ -32,7 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.modules.presentations.constants import SOURCES_MORE  # noqa: E402
 from app.modules.presentations.llm_schemas import (  # noqa: E402
-    PresentationSlide,
+    LAYOUT_BULLETS,
+    SLIDE_ADAPTER,
     validate_slide,
 )
 from app.modules.presentations.renderer import (  # noqa: E402
@@ -106,7 +107,7 @@ class ContextContractTests(unittest.TestCase):
     def test_the_context_is_built_from_a_validated_answer(self):
         """Тот же путь, что в бою: сырой ответ модели -> схема -> контекст."""
         slide = validate_slide(
-            '{"heading": "Кто имеет право", '
+            '{"layout": "bullets", "heading": "Кто имеет право", '
             '"bullets": ["Первый факт", "Второй факт"], '
             '"citations": [{"source_id": 1, "chunk_id": 10}]}',
             allowed_citations={"10": 1},
@@ -137,8 +138,9 @@ class CitationLabelTests(unittest.TestCase):
         ссылки на разные фрагменты одного документа доезжают сюда обе. Напечатать
         «[1] [1]» значило бы показать пользователю бессмыслицу.
         """
-        slide = PresentationSlide.model_validate(
+        slide = SLIDE_ADAPTER.validate_python(
             {
+                "layout": LAYOUT_BULLETS,
                 "heading": "Заголовок",
                 "bullets": ["Факт", "Ещё факт"],
                 "citations": [

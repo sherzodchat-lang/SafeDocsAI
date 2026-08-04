@@ -53,12 +53,18 @@ from render_fixtures import (  # noqa: E402
     pdf_pages,
     pdf_text,
     real_chromium_available,
+    slide_payload,
+    structure_texts,
     use_offline_registry,
 )
 
 from app.core.exceptions import ExternalServiceError, PresentationErrors  # noqa: E402
 from app.modules.presentations.constants import (  # noqa: E402
+    LAYOUT_BULLETS,
+    LAYOUT_COMPARE,
+    RENDERER_ADDED_SLIDES,
     SLIDE_COUNT_MIN,
+    SLIDE_LAYOUTS,
     STATUS_ERROR,
     STATUS_GENERATING,
     STATUS_QUEUED,
@@ -110,12 +116,43 @@ PLAN_JSON = json.dumps(
 def slide_json(heading: str, bullets: list[str], chunk_id: int) -> str:
     return json.dumps(
         {
+            # Раскладка обязательна: слайд без неё схема отвергает, и
+            # фикстура без неё проверяла бы недостижимый в бою ответ.
+            "layout": LAYOUT_BULLETS,
             "heading": heading,
             "bullets": bullets,
             "citations": [{"source_id": 1, "chunk_id": chunk_id}],
         },
         ensure_ascii=False,
     )
+
+
+# --- Колода из всех пяти раскладок ------------------------------------------
+#
+# Секций ровно столько, сколько раскладок: колода, в которой каждая раскладка
+# встречается по разу, — единственная, про которую можно сказать, что печатается
+# КАЖДАЯ. Число слайдов заказа отсюда и выводится, а не выписывается рядом.
+LAYOUT_DECK_SLIDES = len(SLIDE_LAYOUTS) + RENDERER_ADDED_SLIDES
+LAYOUT_PLAN_SECTIONS = [
+    {"heading": f"Секция {index}", "search_query": f"запрос {index}"}
+    for index in range(1, len(SLIDE_LAYOUTS) + 1)
+]
+LAYOUT_PLAN_JSON = json.dumps(
+    {"title": "Налоговые льготы", "sections": LAYOUT_PLAN_SECTIONS},
+    ensure_ascii=False,
+)
+
+
+def layout_slide_json(layout: str, *, index: int, chunk_id: int) -> str:
+    """Ответ модели на слайд ЛЮБОЙ раскладки — из общей фикстуры раскладок.
+
+    Тело слайда берётся оттуда же, откуда его берут проверки сборки контекста
+    (render_fixtures): колода обязана печататься из того же материала, на котором
+    проверялся контекст, иначе расхождение между ними будет видно только на глаз.
+    """
+    payload = slide_payload(index, layout=layout)
+    payload["citations"] = [{"source_id": 1, "chunk_id": chunk_id}]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 class FakeModelManager:
@@ -383,6 +420,29 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
         # И правило про два буллета стоит в системной части.
         self.assertIn("give exactly two bullets", second_slide[0]["content"])
 
+    async def test_repeated_layouts_reach_the_next_call_with_their_repeats(self):
+        """История раскладок — список, а не множество.
+
+        Эта колода написана тремя списками подряд, и третий вызов обязан увидеть
+        именно «bullets, bullets»: схлопнутое до одного значения множество
+        сказало бы модели «список в колоде был», хотя сказать надо «в колоде уже
+        два списка подряд» — а это единственное, что отличает разнообразную
+        колоду от однообразной.
+        """
+        await self.run_one_job()
+
+        _plan, _first, second_slide, third_slide = self.model_calls
+
+        self.assertIn(
+            f"<layouts_already_used>{LAYOUT_BULLETS}</layouts_already_used>",
+            second_slide[1]["content"],
+        )
+        self.assertIn(
+            f"<layouts_already_used>{LAYOUT_BULLETS}, {LAYOUT_BULLETS}"
+            "</layouts_already_used>",
+            third_slide[1]["content"],
+        )
+
     async def test_each_section_is_retrieved_by_its_own_query(self):
         await self.run_one_job()
         # Первый вызов — обзорный под план, дальше по одному на секцию.
@@ -407,6 +467,112 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
         self.assertIn(str(row.slide_count), entry.question)
         self.assertIn(STATUS_READY, entry.answer)
         self.assertIn("Кодекс.pdf", entry.sources or "")
+
+
+class LayoutDeckTests(PresentationPipelineTestCase):
+    """Колода, в которой каждая раскладка встречается ровно раз.
+
+    Дорога раскладки длинная: JSON модели -> схема -> контекст рендера -> ветка
+    шаблона -> лист PDF. Каждый её участок проверен и по отдельности (схема —
+    tests/test_presentation_layouts.py, контекст и разметка —
+    tests/test_presentation_layout_render.py), но СТЫКИ видны только здесь:
+    правильно собранный контекст и собравшийся без ошибок шаблон всё ещё могут
+    дать лист, на котором содержимого нет.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.use_retrieval()
+        self.use_model(
+            [
+                LAYOUT_PLAN_JSON,
+                *[
+                    # Чанк выбирается по кругу из тех трёх, что отдаёт ретривал:
+                    # цитата обязана лежать внутри выданного набора, иначе слайд
+                    # отвергнет схема — и упадёт заказ, а не проверка вёрстки.
+                    layout_slide_json(layout, index=number, chunk_id=1 + number % 3)
+                    for number, layout in enumerate(SLIDE_LAYOUTS, start=1)
+                ],
+            ]
+        )
+        await self.prepare(slide_count=LAYOUT_DECK_SLIDES)
+
+    @unittest.skipUnless(
+        real_chromium_available(), "на машине нет headless Chrome — печатать нечем"
+    )
+    async def test_every_layout_reaches_its_own_page_of_the_pdf(self):
+        """Каждая раскладка напечаталась, и напечаталась на СВОЁМ листе.
+
+        Проверка идёт по листам, а не по всему файлу: текст, найденный где-то в
+        колоде, не отличает «раскладка отрисована» от «шаблон свалил всё на один
+        слайд». Лист считается так же, как его считает пользователь: титул
+        первый, дальше секции по порядку плана.
+        """
+        row = await self.run_one_job()
+
+        self.assertEqual(row.status, STATUS_READY, row.error_text)
+        self.assertTrue(pdf_is_a_pdf(row.file_path), "на выходе не PDF")
+        self.assertEqual(pdf_pages(row.file_path), row.slide_count)
+
+        for number, layout in enumerate(SLIDE_LAYOUTS, start=1):
+            page = pdf_text(row.file_path, page=number)
+            for text in structure_texts(slide_payload(number, layout=layout)):
+                with self.subTest(layout=layout, text=text):
+                    self.assertIn(
+                        text,
+                        page,
+                        f"раскладка {layout}: текста нет на листе {number}",
+                    )
+
+    async def test_the_digest_carries_the_text_of_any_layout(self):
+        """Дайджест уже написанного не зависит от раскладки.
+
+        Слайд-сравнение хранит весь свой текст внутри колонок, слайд-цифра — в
+        величине с подписью. Сборка «взять slide.bullets» отдала бы для них
+        пустоту, и следующая секция пересказала бы их заново, не подозревая, что
+        они были: повтор вернулся бы ровно там, где раскладок больше всего.
+        """
+        await self.run_one_job()
+
+        # Вызовы идут подряд: model_calls[0] — план, дальше по вызову на слайд в
+        # порядке SLIDE_LAYOUTS. Значит, вызов слайда N — это model_calls[N], а
+        # дайджест сравнения обязан быть виден уже в СЛЕДУЮЩЕМ за ним.
+        compare_number = SLIDE_LAYOUTS.index(LAYOUT_COMPARE) + 1
+        compare = slide_payload(compare_number, layout=LAYOUT_COMPARE)
+        next_call = self.model_calls[compare_number + 1][1]["content"]
+
+        self.assertIn("<already_written>", next_call)
+        for text in structure_texts(compare, skip=("layout", "citations", "heading")):
+            with self.subTest(text=text):
+                self.assertIn(text, next_call)
+
+    async def test_each_slide_call_sees_the_layouts_already_written(self):
+        """Провод разнообразия: вызов слайда знает, каких форм колода уже набрала.
+
+        Слайд-вызовы независимы, и без этого списка правило промпта «если две
+        раскладки подходят одинаково, бери ту, которой ещё не было» ссылалось бы
+        на то, чего в бою не существует: параметр есть, а передавать его некому.
+        Обрыв этот бесшумный — колода соберётся, просто окажется однообразной,
+        то есть ровно такой, ради борьбы с которой волна и затевалась.
+
+        Порядок в блоке — порядок написания, и он проверяется целиком: множество
+        вместо списка потеряло бы и очерёдность, и повторы.
+        """
+        await self.run_one_job()
+
+        slide_calls = [messages[1]["content"] for messages in self.model_calls[1:]]
+        self.assertEqual(len(slide_calls), len(SLIDE_LAYOUTS))
+
+        # У первого слайда истории нет по определению — и блока быть не должно.
+        self.assertNotIn("layouts_already_used", slide_calls[0])
+        for number, call in enumerate(slide_calls[1:], start=1):
+            with self.subTest(slide=number + 1):
+                self.assertIn(
+                    "<layouts_already_used>"
+                    f"{', '.join(SLIDE_LAYOUTS[:number])}"
+                    "</layouts_already_used>",
+                    call,
+                )
 
 
 class MissingSourcesTests(PresentationPipelineTestCase):

@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.modules.presentations.constants import LANGUAGE_TJ  # noqa: E402
 from app.modules.presentations.llm_schemas import (  # noqa: E402
-    PresentationSlide,
+    LAYOUT_BULLETS,
+    SLIDE_ADAPTER,
     validate_slide,
 )
 from app.modules.presentations.prompts import (  # noqa: E402
@@ -136,7 +137,7 @@ class PresentationCitationsSurviveTests(unittest.TestCase):
 
     def test_structured_citation_still_validates(self):
         slide = validate_slide(
-            '{"heading": "h", "bullets": ["a", "b"], '
+            '{"layout": "bullets", "heading": "h", "bullets": ["a", "b"], '
             '"citations": [{"source_id": 7, "chunk_id": 45}]}',
             allowed_citations={"45": 7},
         )
@@ -147,7 +148,7 @@ class PresentationCitationsSurviveTests(unittest.TestCase):
 
         with self.assertRaises(LlmResponseError):
             validate_slide(
-                '{"heading": "h", "bullets": ["a", "b"], '
+                '{"layout": "bullets", "heading": "h", "bullets": ["a", "b"], '
                 '"citations": [{"source_id": 7, "chunk_id": 999}]}',
                 allowed_citations={"45": 7},
             )
@@ -166,8 +167,9 @@ class DisobedientAnswerStillParsesTests(unittest.TestCase):
         self.assertEqual(sanitize_answer_text(BROKEN_TAJIK_ANSWER), BROKEN_TAJIK_ANSWER)
 
     def test_slide_with_an_identifier_in_a_bullet_still_validates(self):
-        slide = PresentationSlide.model_validate(
+        slide = SLIDE_ADAPTER.validate_python(
             {
+                "layout": LAYOUT_BULLETS,
                 "heading": "Роҳсозӣ",
                 "bullets": ["Нақшаҳо (source_id: 35, chunk_id: 45)", "Дуюм далел"],
                 "citations": [{"source_id": 7, "chunk_id": 45}],
