@@ -43,9 +43,18 @@ presentation.generation_in_progress, что и предпроверка. Пре�
 есть обычный повторный клик стоит дешевле.
 
 **Пути к файлам берутся из реестра и из строки БД, но никогда из запроса.**
-Превью шаблона отдаётся по КЛЮЧУ: путь ищется в реестре, который уже проверил,
-что файл лежит внутри каталога шаблонов (templates.py, _resolve_file). Обхода
-каталога тут нет по построению, а не по фильтрации ввода.
+Превью шаблона отдаётся по КЛЮЧУ: путь ищется в реестре, который уже запер его
+в своём каталоге — исходники шаблона в templates/presentations, нарисованное
+Chrome превью в data/presentation_previews (templates.py: default_templates_dir
+и default_preview_dir). Обхода каталога тут нет по построению, а не по
+фильтрации ввода.
+
+**Тип и имя скачиваемого файла выводятся из ХРАНИМОГО ПУТИ, а не из константы.**
+Колоды печатает headless Chrome, и новые файлы — .pdf; но на дисках лежат
+колоды, собранные прежним рендерером в .pptx, и это пользовательские файлы,
+которые никто не мигрирует. Константа «тип презентации» отдала бы им чужой
+MIME, то есть сломала бы уже выданное обещание «скачается как было». Поэтому
+расширение читается у файла, а таблица DOWNLOAD_MEDIA_TYPES переводит его в тип.
 """
 
 import logging
@@ -54,6 +63,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import AfterValidator, BaseModel, Field, field_serializer
 from sqlalchemy.exc import IntegrityError
@@ -70,6 +80,12 @@ from app.api.endpoints.documents import (
 )
 from app.core.exceptions import ApiError, PresentationErrors
 from app.core.rate_limit import RateLimiter, check_rate_limit
+# Проверка браузера — из модуля рендера, своей копии здесь нет: «чем печатаем»
+# знает он, а слой API только переводит его отказ в HTTP-код.
+from app.modules.presentations.chromium import (
+    RendererUnavailable,
+    ensure_chromium_available,
+)
 from app.modules.presentations.constants import (
     DEFAULT_LANGUAGE,
     DESCRIPTION_MAX,
@@ -118,6 +134,22 @@ PPTX_MEDIA_TYPE = (
     "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 )
 
+# Расширение хранимого файла -> тип, с которым он отдаётся. Таблица, а не одна
+# константа, потому что на дисках одновременно живут колоды двух поколений:
+# новые печатает Chrome в .pdf, старые собрал прежний рендерер в .pptx. Мигрировать
+# старые нечем и незачем — это пользовательские файлы, которые кто-то уже ждёт в
+# «Загрузках», — а один общий тип «презентация» назвал бы половину из них чужим
+# именем, и открыть скачанное не удалось бы ни PowerPoint'у, ни просмотрщику PDF.
+#
+# Неизвестное расширение отдаётся octet-stream, а не угадывается: путь пишет наш
+# же рендерер, и файл с расширением не из этого списка означает, что что-то
+# пошло не по плану — пусть браузер спросит пользователя, а не сделает вид.
+DOWNLOAD_MEDIA_TYPES = {
+    ".pdf": "application/pdf",
+    ".pptx": PPTX_MEDIA_TYPE,
+}
+FALLBACK_MEDIA_TYPE = "application/octet-stream"
+
 # Тип картинки превью по расширению файла из манифеста. Неизвестное расширение
 # отдаётся octet-stream, а не угадывается: манифест — наш артефакт, и появление
 # в нём .svg (который браузер выполняет как документ со скриптами) должно
@@ -131,10 +163,13 @@ PREVIEW_MEDIA_TYPES = {
 }
 
 # Как называется скачиваемый файл. Имя блокнота подставляется целиком: именно
-# по нему пользователь узнаёт колоду в папке «Загрузки».
-DOWNLOAD_NAME_TEMPLATE = "{notebook} — презентация.pptx"
+# по нему пользователь узнаёт колоду в папке «Загрузки». Расширение —
+# подставляемое, и берётся оно у самого файла (см. _download_filename): имя
+# «...презентация.pdf» на .pptx-файле было бы прямой ложью, и открыть такую
+# «презентацию» не смог бы никто.
+DOWNLOAD_NAME_TEMPLATE = "{notebook} — презентация{suffix}"
 # Блокнота нет (строка пережила его в гонке) — имя без него, но осмысленное.
-DOWNLOAD_NAME_FALLBACK = "презентация.pptx"
+DOWNLOAD_NAME_FALLBACK = "презентация{suffix}"
 
 # Статусы, при которых по блокноту нельзя заказать вторую колоду. Ровно те же,
 # что стоят в предикате частичного уникального индекса
@@ -427,10 +462,25 @@ def get_presentation_template_preview(
     """Картинка превью по ключу шаблона.
 
     Путь к файлу берётся ИЗ РЕЕСТРА, а не из запроса, и это единственное, что
-    здесь про безопасность: реестр при чтении манифеста уже проверил, что файл
-    существует и лежит внутри каталога шаблонов (templates._resolve_file).
-    Ключ, которого в реестре нет, отвергается до всякой работы с файловой
-    системой, поэтому «../../etc/passwd» здесь — просто неизвестный ключ.
+    здесь про безопасность: реестр отдаёт только пути, которые сам же запер в
+    своих каталогах — исходники в templates/presentations, превью в
+    data/presentation_previews. Ключ, которого в реестре нет, отвергается до
+    всякой работы с файловой системой, поэтому «../../etc/passwd» здесь —
+    просто неизвестный ключ.
+
+    Два разных 404, потому что это две разные беды. Неизвестный ключ —
+    unsupported_template: такого шаблона нет, и заказывать по нему нечего.
+    Известный ключ без картинки — file_missing: шаблон рабочий и остаётся
+    выбираемым, отсутствует только превью (его рисует Chrome, и без браузера
+    рисовать некому — см. TemplateInfo.preview_file: Path | None).
+
+    Именно 404, а не заглушка-картинка и не 500. Пятисотка была бы неправдой:
+    сервер цел, а шаблон доступен для заказа — галерея из-за отсутствующей
+    картинки падать не должна. Подставная картинка была бы неправдой другого
+    рода: клиент показал бы её как превью дизайна, то есть соврал бы о том, как
+    выглядит колода. 404 говорит ровно то, что есть, и клиент это уже умеет —
+    галерея тянет превью XHR'ом и на любой отказ рисует «Превью недоступно»
+    (PresentationTemplateGallery.jsx).
     """
     info: TemplateInfo | None = template_registry.get(template_key)
     if info is None:
@@ -438,6 +488,12 @@ def get_presentation_template_preview(
             404,
             PresentationErrors.UNSUPPORTED_TEMPLATE,
             f"Unknown presentation template {template_key!r}",
+        )
+    if info.preview_file is None:
+        raise ApiError(
+            404,
+            PresentationErrors.FILE_MISSING,
+            f"Presentation template {template_key!r} has no rendered preview",
         )
     media_type = PREVIEW_MEDIA_TYPES.get(
         info.preview_file.suffix.lower(), "application/octet-stream"
@@ -468,6 +524,39 @@ async def create_presentation(
     Ответ — тот же объект, что отдаёт опрос, вместе с местом в очереди: клиенту
     не нужен второй запрос, чтобы показать «вы третий».
     """
+    # (0) Есть ли ЧЕМ печатать. Колоду печатает headless Chrome, и это внешний
+    # бинарник: его может не быть на машине вовсе. Проверка стоит первой среди
+    # бизнес-условий, потому что она единственная не ходит в базу (ответ
+    # закэширован с проверки на старте, chromium_status) и потому что при
+    # отсутствующем браузере остальные вопросы бессмысленны: даже блокнот с
+    # источниками и свободной очередью напечатать нечем.
+    #
+    # Проверка своя, а не «пусть упадёт генерация»: без неё заказ встаёт в
+    # очередь, доходит до рендера через минуты ожидания и падает
+    # generation_failed — то есть пользователь платит временем за то, что было
+    # известно в момент клика, а администратор получает жалобу «презентации
+    # ломаются» вместо «браузер не установлен».
+    #
+    # ERROR в журнал с настоящей причиной (какой путь, что ответил бинарник)
+    # пишет сам ensure_chromium_available; наружу причина не уходит: имена
+    # каталогов сервера пользователю не нужны и ни на что не влияют.
+    #
+    # Через run_in_threadpool, хотя обычно это попадание в прогретый кэш и
+    # стоит наносекунды. Прогревает кэш старт приложения — и ровно тогда,
+    # когда старт этого не смог, проверка форкает процесс и ждёт ответа
+    # бинарника, до двадцати секунд. То есть синхронный вызов блокировал бы
+    # event loop именно в том случае, ради которого он здесь и стоит: браузер
+    # сломан или висит. Дешёвая страховка от отказа, наступающего только в
+    # плохой день, — тот же довод, что у рендера и клиента ChromaDB.
+    try:
+        await run_in_threadpool(ensure_chromium_available)
+    except RendererUnavailable as exc:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            PresentationErrors.RENDERER_UNAVAILABLE,
+            "Presentation renderer is unavailable on the server",
+        ) from exc
+
     # (1) Есть ли из чего собирать колоду. Проверка ДУБЛИРУЕТСЯ в пайплайне и
     # это не лишнее: там она про момент генерации (источники могли удалить,
     # пока задача стояла), а здесь — про момент заказа. Без неё пользователь
@@ -651,8 +740,18 @@ async def get_presentation(
 # --- Скачивание -----------------------------------------------------------
 
 
-def _download_filename(notebook: Notebook | None) -> str:
-    """Человеческое имя файла: «{имя блокнота} — презентация.pptx».
+def _stored_suffix(path: str) -> str:
+    """Расширение хранимого файла в нижнем регистре ('.pdf', '.pptx', '')."""
+    return os.path.splitext(path)[1].lower()
+
+
+def _download_filename(notebook: Notebook | None, suffix: str) -> str:
+    """Человеческое имя файла: «{имя блокнота} — презентация.pdf».
+
+    Расширение приходит параметром, а не вписано в шаблон: у файла, собранного
+    прежним рендерером, оно .pptx, и колода обязана скачаться ровно тем, чем
+    лежит. Имя и тип берутся из одного места — из пути на диске, — поэтому
+    разойтись между собой они не могут.
 
     Чистится и обрезается теми же средствами, что имя источника
     (SourceService.sanitize_display_name -> truncate_name_bytes): имя блокнота
@@ -665,7 +764,8 @@ def _download_filename(notebook: Notebook | None) -> str:
     осмысленность и длина имени — наша.
     """
     name = (notebook.name or "").strip() if notebook is not None else ""
-    raw = DOWNLOAD_NAME_TEMPLATE.format(notebook=name) if name else DOWNLOAD_NAME_FALLBACK
+    template = DOWNLOAD_NAME_TEMPLATE if name else DOWNLOAD_NAME_FALLBACK
+    raw = template.format(notebook=name, suffix=suffix)
     # Один вызов делает обе работы: sanitize_display_name внутри себя зовёт
     # truncate_name_bytes(..., MAX_NAME_BYTES) и сохраняет при обрезке
     # расширение. Дублировать обрезку по месту не нужно — это была бы вторая
@@ -678,7 +778,7 @@ async def download_presentation(
     presentation: Presentation = Depends(get_owned_presentation),
     session: AsyncSession = Depends(deps.get_session),
 ) -> FileResponse:
-    """Готовый .pptx.
+    """Готовый файл колоды: .pdf у новых, .pptx у собранных прежним рендерером.
 
     Три исхода вместо одного 404, потому что действия пользователя разные:
     чужая или несуществующая строка — 404 (перебором id ничего не узнать),
@@ -705,10 +805,14 @@ async def download_presentation(
             404, PresentationErrors.FILE_MISSING, "Presentation file not found on disk"
         )
     notebook = await session.get(Notebook, presentation.notebook_id)
+    # Тип — по расширению ФАЙЛА, а не по тому, что рендерер печатает сегодня:
+    # колоды, собранные до перехода на HTML->PDF, лежат в .pptx и обязаны
+    # скачиваться ровно как раньше.
+    suffix = _stored_suffix(path)
     return FileResponse(
         path,
-        media_type=PPTX_MEDIA_TYPE,
-        filename=_download_filename(notebook),
+        media_type=DOWNLOAD_MEDIA_TYPES.get(suffix, FALLBACK_MEDIA_TYPE),
+        filename=_download_filename(notebook, suffix),
     )
 
 

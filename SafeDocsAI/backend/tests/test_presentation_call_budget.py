@@ -253,7 +253,31 @@ class CallStatisticsTests(unittest.TestCase):
         self.assertIn("max 69.9с", summary)
 
     def test_summary_of_a_job_that_never_called_the_model(self) -> None:
-        self.assertEqual(CallTimings().summary(), "вызовов модели 0")
+        # Стадия рендера названа и здесь: у джобы, не дошедшей ни до модели, ни
+        # до печати, обе половины строки обязаны сказать «ничего не было», а не
+        # молча исчезнуть. Пустое место читалось бы как «прошло мгновенно».
+        self.assertEqual(
+            CallTimings().summary(), "вызовов модели 0; рендер не выполнялся"
+        )
+
+    def test_summary_names_the_render_stage_separately(self) -> None:
+        """Длительность печати — своё поле, а не ещё одно значение в замерах.
+
+        Природа у них разная: вызовы модели измеряют скорость чат-модели (её
+        меняют из админ-панели), рендер — скорость внешнего браузера и диска.
+        Смешав их в одном p50, мы получили бы число, не описывающее ни то, ни
+        другое, и перестали бы замечать, что печать колоды поехала.
+        """
+        timings = CallTimings()
+        timings.record(stage="план презентации", attempt=1, seconds=69.9)
+        timings.render_seconds = 4.25
+
+        summary = timings.summary()
+
+        self.assertIn("рендер 4.2с", summary)
+        # И не попала в статистику вызовов модели: их по-прежнему один.
+        self.assertIn("вызовов модели 1", summary)
+        self.assertIn("max 69.9с", summary)
 
     def test_unclassified_failures_show_up_next_to_the_retries(self) -> None:
         """Счётчик неразобранных причин — в той же строке, что и повторы.

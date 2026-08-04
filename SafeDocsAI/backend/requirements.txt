@@ -19,3 +19,8 @@ passlib[bcrypt]
 pdf2image
 python-docx
 python-pptx
+# Шаблоны презентаций — Jinja2 (app/modules/presentations/templates.py). До сих
+# пор пакет приезжал только как зависимость torch; на этом и держался рендер,
+# пока не был назван здесь. Смена версии torch унесла бы Jinja2 с собой, и
+# сломалось бы то, к чему torch отношения не имеет.
+jinja2

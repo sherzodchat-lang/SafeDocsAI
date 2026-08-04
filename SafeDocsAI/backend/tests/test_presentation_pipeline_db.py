@@ -6,8 +6,9 @@ Ollama и ChromaDB не поднимаются: подменены ретрив�
 её же настоящую проверяет сторож связи потолков (tests/
 test_presentation_call_timeout_single_source.py).
 
-Всё остальное настоящее, включая рендер
-python-pptx, запись файла и строку в журнале блокнота: именно на стыке «файл
+Всё остальное настоящее, включая рендер: страницу верстают настоящие шаблоны, а
+печатает её настоящий headless Chrome — на выходе PDF, который открывается.
+Запись файла и строка в журнале блокнота тоже настоящие: именно на стыке «файл
 на диске — строка в базе» и живут интересные ошибки.
 
 Что проверяется:
@@ -19,6 +20,9 @@ python-pptx, запись файла и строку в журнале блок�
 * временный файл подчищается при любом исходе;
 * коды отказов: generation_failed, ollama_unavailable, generation_timeout —
   и то, что снятая таймаутом джоба не оставляет за собой файлов;
+* стадия рендера ограничена своим бюджетом: зависший Chrome снимается
+  таймаутом печати, а не потолком джобы, и упавший заказ не останавливает
+  воркер — следующая задача уезжает в работу;
 * таймаут живёт на уровне ВЫЗОВА, а не джобы: зависший вызов снимается своим
   бюджетом, повторная попытка имеет собственный, и error_text называет стадию
   и номер слайда. Подменённая модель не ходит по HTTP, поэтому здесь работает
@@ -36,12 +40,21 @@ import sys
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
+from pathlib import Path
 from time import perf_counter
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dbfixtures import DatabaseBackedTestCase  # noqa: E402
+from render_fixtures import (  # noqa: E402
+    fake_chromium,
+    pdf_is_a_pdf,
+    pdf_pages,
+    pdf_text,
+    real_chromium_available,
+    use_offline_registry,
+)
 
 from app.core.exceptions import ExternalServiceError, PresentationErrors  # noqa: E402
 from app.modules.presentations.constants import (  # noqa: E402
@@ -53,6 +66,7 @@ from app.modules.presentations.constants import (  # noqa: E402
     presentation_job_timeout,
 )
 from app.modules.presentations.llm_schemas import content_section_count  # noqa: E402
+from app.modules.presentations import renderer as renderer_module  # noqa: E402
 from app.modules.presentations import service as presentation_service  # noqa: E402
 from app.modules.presentations.worker import PresentationWorker  # noqa: E402
 from app.shared.models import (  # noqa: E402
@@ -72,6 +86,11 @@ EMBEDDING_MODEL = "qwen3-embedding:8b"
 # выписано: разъедься они, план не прошёл бы валидацию, и тест ловил бы это
 # как «модель вернула не то».
 DECK_SLIDES = SLIDE_COUNT_MIN
+
+# Шаблон НАСТОЯЩИЙ, из комплекта: рендер здесь не подменяется, и печатать надо
+# то же, что печатается в бою. Выдуманный ключ реестр не отдаст, и пайплайн
+# честно упал бы — но упал бы не на том, что проверяет этот файл.
+TEMPLATE_KEY = "draft"
 
 PLAN_SECTIONS = [
     {"heading": "Кто имеет право", "search_query": "право на льготу"},
@@ -175,6 +194,11 @@ class PresentationPipelineTestCase(DatabaseBackedTestCase):
         runtime_settings.get_settings.return_value = {"chat_model": "test-model"}
         self.addCleanup(settings_patcher.stop)
 
+        # Реестр шаблонов — настоящий (те же четыре каталога, что поедут в
+        # прод), но без генерации превью: галерея к печати заказа отношения не
+        # имеет, а четыре запуска Chrome на каждый класс тестов — это минуты.
+        use_offline_registry(self)
+
         self.model_calls: list = []
         self.retrieval_queries: list[str] = []
         self.worker = PresentationWorker(poll_interval=0.05)
@@ -228,7 +252,7 @@ class PresentationPipelineTestCase(DatabaseBackedTestCase):
         fields = {
             "notebook_id": self.notebook.id,
             "owner_id": self.user.id,
-            "template_key": "classic",
+            "template_key": TEMPLATE_KEY,
             "language": "ru",
             "slide_count": DECK_SLIDES,
             "description": "Обзор льгот",
@@ -318,28 +342,32 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
 
         self.assertEqual(observed, [True])
 
-    async def test_deck_has_the_ordered_slides_and_a_sources_slide(self):
-        from pptx import Presentation as PptxPresentation
+    @unittest.skipUnless(
+        real_chromium_available(), "на машине нет headless Chrome — печатать нечем"
+    )
+    async def test_the_job_ends_with_a_real_pdf_of_the_ordered_length(self):
+        """Полный пайплайн с подменённой моделью даёт НАСТОЯЩИЙ PDF.
 
+        Проверяется файл, а не разметка: пользователь скачивает PDF, и всё,
+        что до него не доехало, — не сделано. Отсюда три утверждения подряд:
+        файл начинается с %PDF, страниц в нём ровно столько, сколько заказано
+        (slide_count), и он не пустой.
+        """
         row = await self.run_one_job()
-        deck = PptxPresentation(row.file_path)
-        texts = [
-            "\n".join(
-                shape.text_frame.text for shape in slide.shapes if shape.has_text_frame
-            )
-            for slide in deck.slides
-        ]
 
-        self.assertEqual(len(texts), row.slide_count)
-        self.assertIn("Налоговые льготы", texts[0])
-        self.assertIn("Налоги", texts[0])  # имя блокнота
-        self.assertIn("Кто имеет право", texts[1])
-        self.assertIn("Как оформить", texts[2])
-        self.assertIn("Куда обращаться", texts[3])
-        self.assertIn("Источники", texts[-1])
-        # Уникальные документы с именами и страницами.
-        self.assertIn("Кодекс.pdf", texts[-1])
-        self.assertIn("стр. 7", texts[-1])
+        self.assertTrue(pdf_is_a_pdf(row.file_path), "на выходе не PDF")
+        self.assertEqual(pdf_pages(row.file_path), row.slide_count)
+        self.assertGreater(os.path.getsize(row.file_path), 0)
+
+        text = pdf_text(row.file_path)
+        self.assertIn("Налоговые льготы", text)
+        self.assertIn("Налоги", text)  # имя блокнота
+        for section in PLAN_SECTIONS:
+            self.assertIn(section["heading"], text)
+        # Источники: имя документа и страница, на которую сослались.
+        self.assertIn("Источники", pdf_text(row.file_path, page=row.slide_count - 1))
+        self.assertIn("Кодекс.pdf", text)
+        self.assertIn("стр. 7", text)
 
     async def test_digest_of_written_bullets_reaches_the_next_slide(self):
         """Мера 2: слайд-вызов видит, что уже сказано на предыдущих."""
@@ -374,7 +402,7 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
         entry = logs[0]
         self.assertEqual(entry.user_id, self.user.id)
         self.assertEqual(entry.notebook_id, self.notebook.id)
-        self.assertIn("classic", entry.question)
+        self.assertIn(TEMPLATE_KEY, entry.question)
         self.assertIn("ru", entry.question)
         self.assertIn(str(row.slide_count), entry.question)
         self.assertIn(STATUS_READY, entry.answer)
@@ -758,6 +786,136 @@ class FailureTests(PresentationPipelineTestCase):
         # Захватывать нечего: строки нет.
         self.assertFalse(await self.worker._claim_and_process())
         self.assertFalse(await self.exists(Presentation, self._presentation_id))
+
+
+class RenderStageTests(PresentationPipelineTestCase):
+    """Стадия печати внутри полного пайплайна: свой бюджет и живой воркер."""
+
+    def full_answers(self) -> list:
+        return [
+            PLAN_JSON,
+            slide_json("Кто имеет право", ["Факт", "Ещё факт"], 1),
+            slide_json("Как оформить", ["Факт", "Ещё факт"], 2),
+            slide_json("Куда обращаться", ["Факт", "Ещё факт"], 3),
+        ]
+
+    async def test_a_hanging_browser_fails_the_job_and_the_worker_lives_on(self):
+        """Упавший рендер — это строка 'error', а не остановленная очередь.
+
+        Проверяется ровно то, ради чего у стадии печати есть свой бюджет и своё
+        убийство группы процессов: заказ, на котором завис Chrome, умирает сам и
+        за отведённое время, а СЛЕДУЮЩИЙ заказ уезжает в работу и доходит до
+        настоящего PDF. Без этого первый же зависший браузер отменил бы функцию
+        для всех остальных до перезапуска сервера.
+
+        Бюджет печати здесь — доли секунды при подделке, висящей минуту: если бы
+        зависание ждал потолок джобы, тест не уложился бы и близко
+        (presentation_job_timeout для этой колоды — десятки минут).
+        """
+        self.use_retrieval()
+        self.use_model([*self.full_answers(), *self.full_answers()])
+        await self.prepare()
+        first_id = self._presentation_id
+
+        started = perf_counter()
+        with fake_chromium(Path(self.storage.name) / "fake-chrome", "sleep 60"):
+            with patch.object(renderer_module, "RENDER_PRINT_TIMEOUT", 0.5):
+                failed = await self.run_one_job()
+        elapsed = perf_counter() - started
+
+        self.assertLess(
+            elapsed,
+            20.0,
+            "зависшую печать ждал потолок джобы "
+            f"({presentation_job_timeout(DECK_SLIDES):.0f} с), а не бюджет стадии",
+        )
+        self.assertEqual(failed.status, STATUS_ERROR)
+        self.assertEqual(failed.error_code, PresentationErrors.GENERATION_FAILED)
+        # Причина названа: пользователь видит error_text рядом со статусом, и
+        # «не уложилась» отличает зависший браузер от битого шаблона.
+        self.assertIn("не уложилась", failed.error_text)
+        self.assertNotIn("Traceback", failed.error_text)
+        # Ни колоды, ни временного файла: строка ничего не обещает.
+        self.assertIsNone(failed.file_path)
+        self.assertEqual(self.storage_files(), ["fake-chrome"])
+
+        # А теперь — главное: воркер жив и берёт следующую задачу.
+        if not real_chromium_available():
+            self.skipTest("на машине нет headless Chrome — вторую колоду не напечатать")
+        second = await self.make_presentation()
+        self._presentation_id = second.id
+        recovered = await self.run_one_job()
+
+        self.assertEqual(recovered.status, STATUS_READY)
+        self.assertTrue(pdf_is_a_pdf(recovered.file_path))
+        self.assertEqual(pdf_pages(recovered.file_path), recovered.slide_count)
+        self.assertNotEqual(recovered.id, first_id)
+
+    async def test_a_broken_browser_does_not_leave_a_half_written_deck(self):
+        """Chrome вышел с ошибкой — файла нет, строка не обещает его.
+
+        Отдельно от зависания: код возврата и таймаут — разные ветки рендерера, и
+        общего у них только требование «после отказа на диске пусто».
+        """
+        self.use_retrieval()
+        self.use_model(self.full_answers())
+        await self.prepare()
+
+        with fake_chromium(
+            Path(self.storage.name) / "fake-chrome",
+            "echo 'Fatal: cannot open display' >&2\nexit 21",
+        ):
+            row = await self.run_one_job()
+
+        self.assertEqual(row.status, STATUS_ERROR)
+        self.assertEqual(row.error_code, PresentationErrors.GENERATION_FAILED)
+        # Хвост stderr браузера доехал до пользователя: без него отказ печати
+        # неотличим от любого другого.
+        self.assertIn("cannot open display", row.error_text)
+        self.assertIsNone(row.file_path)
+        self.assertEqual(self.storage_files(), ["fake-chrome"])
+
+    @unittest.skipUnless(
+        real_chromium_available(), "на машине нет headless Chrome — печатать нечем"
+    )
+    async def test_the_render_duration_reaches_the_statistics_line(self):
+        """Длительность рендера — отдельное поле статистической строки.
+
+        С переходом на печать браузером рендер перестал быть мгновенным: это
+        внешний процесс, который грузит шрифты и верстает страницу. Без своего
+        поля его время растворилось бы в общем «суммарно» по вызовам модели —
+        то есть перестало бы быть наблюдаемым ровно тогда, когда стало важным.
+        """
+        self.use_retrieval()
+        self.use_model(self.full_answers())
+        await self.prepare()
+
+        timings = presentation_service.CallTimings()
+        await self.run_pipeline(timings=timings)
+
+        self.assertIsNotNone(timings.render_seconds)
+        self.assertGreater(timings.render_seconds, 0.0)
+        summary = timings.summary()
+        self.assertIn("рендер", summary)
+        self.assertIn(f"{timings.render_seconds:.1f}с", summary)
+
+    async def test_a_job_that_never_reached_the_render_says_so(self):
+        """«Рендера не было» и «рендер занял ноль» — разные факты.
+
+        Пустое место в строке читалось бы как мгновенная печать, а это ровно
+        противоположный вывод: у джобы, упавшей на плане, стадии печати не было
+        вовсе, и причину надо искать выше.
+        """
+        self.use_retrieval()
+        self.use_model(["не json", "тоже не json"])
+        await self.prepare()
+
+        timings = presentation_service.CallTimings()
+        with self.assertRaises(presentation_service.PresentationGenerationError):
+            await self.run_pipeline(timings=timings)
+
+        self.assertIsNone(timings.render_seconds)
+        self.assertIn("рендер не выполнялся", timings.summary())
 
 
 if __name__ == "__main__":

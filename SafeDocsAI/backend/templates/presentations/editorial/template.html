@@ -1,0 +1,70 @@
+{# lang берётся из html_lang, а не из language: внутренний код проекта "tj"
+   не существует в BCP-47, таджикский там "tg". Атрибут стоит один раз на
+   документе — секции наследуют его. #}
+<html lang="{{ html_lang }}">
+<meta charset="utf-8">
+<title>{{ title }}</title>
+<link rel="stylesheet" href="styles.css">
+
+{# --- 1. Титульный ------------------------------------------------------- #}
+<section class="slide slide--title">
+  <div class="masthead">
+    <span class="masthead-name">{{ notebook_name }}</span>
+    <span class="masthead-date">{{ generated_on }}</span>
+  </div>
+  <div class="title-body">
+    <div class="hairline"></div>
+    <h1 class="deck-title">{{ title }}</h1>
+    <div class="hairline hairline--thin"></div>
+  </div>
+  <div class="colophon">{{ slides|length }}</div>
+</section>
+
+{# --- 2. Содержательные -------------------------------------------------- #}
+{% for slide in slides %}
+<section class="slide slide--content">
+  <div class="running-head">
+    <span class="running-name">{{ notebook_name }}</span>
+    <span class="running-num">{{ slide.index }}</span>
+  </div>
+  <span class="folio">{{ "%02d"|format(slide.index) }}</span>
+  <h2 class="slide-heading">{{ slide.heading }}</h2>
+  <div class="hairline hairline--thin"></div>
+  <ul class="bullets">
+    {% for bullet in slide.bullets %}
+    <li class="bullet">{{ bullet }}</li>
+    {% endfor %}
+  </ul>
+  {% if slide.citations %}
+  <p class="citations">
+    {% for citation in slide.citations %}<span class="citation">{{ citation }}</span>{% endfor %}
+  </p>
+  {% endif %}
+</section>
+{% endfor %}
+
+{# --- 3. Источники ------------------------------------------------------- #}
+<section class="slide slide--sources{% if sources_truncated > 0 %} is-truncated{% endif %}">
+  <div class="running-head">
+    <span class="running-name">{{ notebook_name }}</span>
+    <span class="running-num">{{ generated_on }}</span>
+  </div>
+  <h2 class="sources-heading">{{ strings.sources_heading }}</h2>
+  <div class="hairline hairline--thin"></div>
+  <ul class="sources">
+    {% for source in sources %}
+    <li class="source">
+      <span class="source-label">{{ source.label }}</span>
+      <span class="source-name">{{ source.name }}</span>
+      <span class="leader"></span>
+      <span class="source-pages">{{ source.pages_text }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {# Хвост печатается ТОЛЬКО когда рендерер сам сообщил о недоборе. Список
+     приезжает уже подрезанным, и без этой строки полоса молча выдавала бы
+     неполный перечень за полный. #}
+  {% if sources_truncated > 0 %}
+  <p class="sources-more">{{ strings.sources_more.format(count=sources_truncated) }}</p>
+  {% endif %}
+</section>

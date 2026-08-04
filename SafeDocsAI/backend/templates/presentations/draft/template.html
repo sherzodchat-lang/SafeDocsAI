@@ -1,0 +1,56 @@
+{# lang берётся из html_lang, а не из language: внутренний код проекта "tj" не
+   существует в BCP-47, таджикский там "tg". Атрибут стоит один раз на
+   документе — секции наследуют его. #}
+<html lang="{{ html_lang }}">
+<meta charset="utf-8">
+<title>{{ title }}</title>
+<link rel="stylesheet" href="styles.css">
+
+{# --- 1. Титульный слайд ------------------------------------------------ #}
+<section class="slide slide--title">
+  <div class="title-block">
+    <h1 class="deck-title">{{ title }}</h1>
+    <p class="deck-notebook">{{ notebook_name }}</p>
+    <p class="deck-date">{{ generated_on }}</p>
+  </div>
+</section>
+
+{# --- 2. Содержательные слайды ------------------------------------------ #}
+{% for slide in slides %}
+<section class="slide slide--content">
+  <h2 class="slide-heading">{{ slide.heading }}</h2>
+  <ul class="bullets">
+    {% for bullet in slide.bullets %}
+    <li class="bullet">{{ bullet }}</li>
+    {% endfor %}
+  </ul>
+  <footer class="slide-footer">
+    {% if slide.citations %}
+    <span class="citations">
+      {% for citation in slide.citations %}<span class="citation">{{ citation }}</span>{% endfor %}
+    </span>
+    {% endif %}
+    <span class="slide-number">{{ slide.index }}</span>
+  </footer>
+</section>
+{% endfor %}
+
+{# --- 3. Источники ------------------------------------------------------- #}
+<section class="slide slide--sources{% if sources_truncated > 0 %} is-truncated{% endif %}">
+  <h2 class="slide-heading">{{ strings.sources_heading }}</h2>
+  <ul class="sources">
+    {% for source in sources %}
+    <li class="source">
+      <span class="source-label">{{ source.label }}</span>
+      <span class="source-name">{{ source.name }}</span>
+      <span class="source-pages">{{ source.pages_text }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {# Хвост печатается ТОЛЬКО когда рендерер сам сообщил о недоборе. Список
+     приезжает уже подрезанным, и без этой строки слайд молча выдавал бы
+     неполный перечень за полный. #}
+  {% if sources_truncated > 0 %}
+  <p class="sources-more">{{ strings.sources_more.format(count=sources_truncated) }}</p>
+  {% endif %}
+</section>

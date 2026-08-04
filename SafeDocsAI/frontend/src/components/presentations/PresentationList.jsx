@@ -35,7 +35,13 @@ const STATUS_BADGE_CLASSES = {
 // Имя файла из Content-Disposition, если сервер его прислал. Своё имя клиент
 // придумывает только когда заголовка нет: расширение и транслитерация — дело
 // сервера, а не браузера.
-const FALLBACK_FILENAME_SUFFIX = '.pptx';
+//
+// .pdf — потому что колоды печатает headless Chrome. Расширение здесь ЗАПАСНОЕ
+// и не сверяется с содержимым: колоды, собранные прежним рендерером, приходят
+// в .pptx, но приходят они со своим Content-Disposition, до этой строки дело не
+// доходит. Сюда попадают только ответы без заголовка вовсе — то есть случай,
+// которого в норме не бывает.
+const FALLBACK_FILENAME_SUFFIX = '.pdf';
 
 const resolveDownloadFilename = (response, presentationId) => {
     const disposition = String(response?.headers?.['content-disposition'] || '');

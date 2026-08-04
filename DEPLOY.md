@@ -281,6 +281,28 @@ curl -s -o /dev/null -w 'chroma=%{http_code}\n' http://localhost:8000/api/v2/hea
 
 ## Презентации: шаблоны, файлы, очередь
 
+### Chromium — обязательная зависимость рендера
+
+Колоды печатаются из HTML в PDF headless-браузером. Без него раздел не работает: бэкенд поднимется и напишет ERROR, но заказы будут отклоняться с `presentation.renderer_unavailable`.
+
+```bash
+# apt-овый chromium-browser в Ubuntu 22.04 — заглушка, тянущая snap, а snapd
+# в этом поде нет. Ставим Chrome из репозитория Google: обычный deb со своими
+# зависимостями, без snap.
+curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+  | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+  | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt-get update -qq
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable fonts-noto-core
+
+google-chrome-stable --version   # проверено на 151.0.7922.71
+```
+
+`fonts-noto-core` нужен не браузеру, а шаблонам: из `NotoSans-Regular.ttf` собираются woff2, вшиваемые в PDF. Системных шрифтов на чистом инстансе нет вообще, и без них кириллица печатается квадратами.
+
+**Печать идёт с `--no-sandbox`, и это осознанная уступка.** В этом поде нельзя создать user namespace, без флага Chrome падает с `Failed to move to new namespace ... Operation not permitted` и PDF не создаётся. Компенсация — в том, что рендерится: только локально собранный Jinja-шаблон с `autoescape`, без JS и без внешних ресурсов (стартовый линт отвергает `http://` и `https://` в шаблоне и стилях), а пользовательский текст попадает внутрь экранированными данными, а не разметкой. Флаг убирается, когда изменится среда запуска, — не раньше.
+
 ### Шаблоны — деплой-артефакт, а не данные
 
 Каталог `backend/templates/presentations/`: `manifest.json` плюс пара файлов на каждый шаблон — `<key>.pptx` (оформление и раскладки) и `<key>.png` (превью для формы заказа). Приезжает вместе с кодом, в `backend/data` его нет намеренно: `data` монтируется томом и переживает релиз, а шаблон обязан совпадать с рендером, который на него рассчитывает. В комплекте три ключа: `classic`, `contrast`, `minimal`.

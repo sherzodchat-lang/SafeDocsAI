@@ -1,0 +1,417 @@
+/* Blueprint — техническая подача: миллиметровка, чернильная рейка слева,
+   моноширинные номера пунктов, таблица источников.
+   Сетка нарисована градиентами (никаких растровых картинок) и намеренно
+   контрастнее «дизайнерской»: линия #ccd6e4 переживает печать, #eef2f6 — нет. */
+
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("fonts/NotoSans-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("fonts/NotoSans-Bold.woff2") format("woff2");
+}
+
+/* Моноширинный — ТОЛЬКО для служебных ASCII-подписей: номер слайда, «1/7»,
+   метки цитат «[1]», нумерация пунктов, знак §. Пользовательский текст сюда
+   не попадает НИКОГДА, и это не стилистика, а вынужденное решение:
+   моноширинного шрифта с полной таджикской кириллицей в системе нет. В
+   DejaVu Sans Mono отсутствуют ҷ и Ҷ — буквы, без которых по-таджикски не
+   написать даже «Ҷумҳурӣ».
+
+   Поэтому сабсет намеренно обрезан по ASCII: кириллицы в файле нет ВООБЩЕ.
+   Неполная кириллица дала бы худший из исходов — подстановку одной буквы из
+   чужого семейства посреди слова. Пустой диапазон даёт честный откат всей
+   строки на Noto Sans, который стоит следующим в стеке. */
+@font-face {
+  font-family: "Deck Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("fonts/DejaVuSansMono-Ascii.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Deck Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("fonts/DejaVuSansMono-Ascii-Bold.woff2") format("woff2");
+}
+
+@page {
+  size: 1280px 720px;
+  margin: 0;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #ffffff;
+}
+
+body {
+  font-family: "Noto Sans", sans-serif;
+  color: #0f1c2e;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.slide {
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  width: 1280px;
+  height: 720px;
+  overflow: hidden;
+  background: #ffffff;
+  break-after: page;
+  break-inside: avoid;
+}
+
+.slide:last-of-type {
+  break-after: auto;
+}
+
+/* Чернильная рейка с номером слайда. */
+.rail {
+  position: relative;
+  flex: 0 0 96px;
+  background: #0f1c2e;
+  color: #ffffff;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 40px;
+}
+
+.rail::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  background: #0090b5;
+}
+
+.rail-num {
+  font-family: "Deck Mono", "Noto Sans", monospace;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #4fd1ec;
+}
+
+.rail--title {
+  align-items: center;
+}
+
+/* Код языка вертикально: длина известна (две буквы), обрезать нечего. */
+.rail-mark {
+  font-family: "Deck Mono", "Noto Sans", monospace;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  color: #4fd1ec;
+  writing-mode: vertical-rl;
+  white-space: nowrap;
+}
+
+/* Рабочее поле с миллиметровкой. */
+.sheet {
+  position: relative;
+  flex: 1 1 auto;
+  box-sizing: border-box;
+  padding: 48px 56px 48px;
+  background-color: #f7fafc;
+  background-image:
+    repeating-linear-gradient(0deg, #dce6f0 0 1px, transparent 1px 40px),
+    repeating-linear-gradient(90deg, #dce6f0 0 1px, transparent 1px 40px),
+    repeating-linear-gradient(0deg, #ccd6e4 0 1px, transparent 1px 200px),
+    repeating-linear-gradient(90deg, #ccd6e4 0 1px, transparent 1px 200px);
+}
+
+/* --- Титульный --------------------------------------------------------- */
+
+.slide--title .sheet {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.crosshair {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  border-color: #0090b5;
+  border-style: solid;
+}
+
+.crosshair--tl {
+  top: 34px;
+  left: 40px;
+  border-width: 3px 0 0 3px;
+}
+
+.crosshair--br {
+  right: 40px;
+  bottom: 34px;
+  border-width: 0 3px 3px 0;
+}
+
+.stamp {
+  position: absolute;
+  top: 34px;
+  right: 40px;
+  display: flex;
+  gap: 10px;
+  font-family: "Deck Mono", "Noto Sans", monospace;
+  font-size: 14px;
+  color: #0f1c2e;
+}
+
+.stamp-row {
+  padding: 4px 10px;
+  border: 2px solid #0f1c2e;
+  background: #ffffff;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.deck-title {
+  margin: 0;
+  max-width: 940px;
+  font-size: 56px;
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+  overflow-wrap: break-word;
+}
+
+.specline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 26px;
+  padding-top: 18px;
+  border-top: 2px solid #0f1c2e;
+  /* Имя блокнота и дата — пользовательский текст: моноширинный сюда нельзя. */
+  font-family: "Noto Sans", sans-serif;
+  font-size: 17px;
+  color: #24445f;
+  max-width: 940px;
+}
+
+.spec {
+  overflow-wrap: break-word;
+}
+
+/* --- Содержательный ---------------------------------------------------- */
+
+.slide-heading {
+  margin: 0;
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.18;
+  letter-spacing: -0.01em;
+  overflow-wrap: break-word;
+}
+
+.underscore {
+  width: 160px;
+  height: 5px;
+  margin: 14px 0 24px;
+  background: #0090b5;
+}
+
+/* Текст лежит на сплошной панели поверх миллиметровки. Сетка под буквами
+   читается как зачёркивание — а осветлить её до незаметности нельзя, тонкая
+   светло-серая линия всё равно пропадёт при печати, и от приёма не осталось
+   бы ничего. Панель решает обе задачи: сетка остаётся контрастной там, где
+   она декор, и не мешает там, где текст. */
+.panel {
+  background: #ffffff;
+  border: 2px solid #cbd8e6;
+  border-left: 6px solid #0090b5;
+  padding: 22px 26px;
+  box-sizing: border-box;
+}
+
+.bullets {
+  margin: 0;
+  list-style: none;
+  max-width: 1000px;
+}
+
+.bullets .bullet:last-child {
+  margin-bottom: 0;
+}
+
+.bullet {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 14px;
+  font-size: 20px;
+  line-height: 1.44;
+}
+
+.marker {
+  flex: 0 0 auto;
+  padding-top: 4px;
+  font-family: "Deck Mono", "Noto Sans", monospace;
+  font-size: 16px;
+  font-weight: 700;
+  color: #0090b5;
+  font-variant-numeric: tabular-nums;
+}
+
+.bullet-text {
+  flex: 1 1 auto;
+  overflow-wrap: break-word;
+}
+
+.slide-footer {
+  position: absolute;
+  left: 56px;
+  right: 56px;
+  bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: "Deck Mono", "Noto Sans", monospace;
+  font-size: 15px;
+  color: #24445f;
+}
+
+.ref {
+  margin-right: 6px;
+  padding: 2px 7px;
+  border: 2px solid #0090b5;
+  background: #ffffff;
+  font-weight: 700;
+  color: #0f1c2e;
+}
+
+.pager {
+  font-weight: 700;
+  color: #0f1c2e;
+}
+
+/* --- Источники --------------------------------------------------------- */
+
+/* Просвет между таблицами и внутренние поля ячеек урезаны в пользу колонки
+   имени: на этом слайде дефицитна именно она, а не воздух между столбцами.
+   Каждые отданные ей 10px — это минус одна строка переноса у длинного имени. */
+.sources-pair {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+/* Кегль и интерлиньяж здесь — не типографский вкус, а ЁМКОСТЬ. Колонка имени в
+   этом шаблоне самая узкая из четырёх дизайнов: рейка забирает 96px, поля
+   листа — 112px, панель — ещё 60px, и на имя остаётся около 330px против ~490px
+   у остальных. При 17px имя в 148 знаков (потолок SOURCE_NAME_MAX_CHARS)
+   набиралось в шесть строк, строка занимала 150px, четыре строки в столбце
+   требовали 600px при доступных 490 — и последняя запись каждого столбца молча
+   уезжала под нижний край листа. 16px/1.3 держат то же имя в четыре-пять строк
+   и оставляют запас даже на самых рваных именах из длинных слов. */
+.sources {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.source td {
+  padding: 6px;
+  border-bottom: 2px solid #ccd6e4;
+  vertical-align: baseline;
+}
+
+.source-label {
+  width: 46px;
+  font-family: "Deck Mono", "Noto Sans", monospace;
+  font-size: 15px;
+  font-weight: 700;
+  color: #0090b5;
+  white-space: nowrap;
+}
+
+/* ANYWHERE, а не break-word, и это ровно та разница, из-за которой шаблон
+   ломался на именах сканов («skanirovannyy_dokument_...» в 148 знаков одним
+   словом). break-word разрешает разрыв слова при вёрстке СТРОКИ, но на
+   вычисление min-content ширины не влияет — а таблица с table-layout: auto
+   именно по min-content и раздувается и уже не сжимается. Неразрывное слово
+   распирало первую таблицу на всю панель, вторая уезжала за край листа, и
+   Chrome при печати выбрасывал её целиком: из восьми источников на лист
+   попадали четыре, без единого следа об остальных.
+   anywhere учитывается в min-content: слово рвётся по любому месту, таблица
+   остаётся в своих границах, обе колонки на месте. Имя с разрывом посреди
+   слова читается; отсутствующее имя — нет. */
+.source-name {
+  overflow-wrap: anywhere;
+}
+
+/* pages_text приходит локализованным («стр. 12–14», «саҳ. 12–14»),
+   то есть кириллицей — моноширинный ASCII-сабсет его не покроет.
+   Ширина — ПОЖЕЛАНИЕ, а не предел: при table-layout: auto колонка с nowrap
+   всё равно вырастет под длинную строку вроде «стр. 3–5, 12, 44, 121». 84px
+   отдают имени всё, что не нужно номерам страниц, — а имя здесь дефицитнее. */
+.source-pages {
+  width: 84px;
+  font-family: "Noto Sans", sans-serif;
+  font-size: 14px;
+  color: #24445f;
+  white-space: nowrap;
+  text-align: right;
+}
+
+/* --- Хвост «…и ещё N» -------------------------------------------------- */
+
+/* Штамп на чертеже: чернильная заливка, цианевая рамка — та же пара, что у
+   рейки, но плотнее всего остального на листе. Текст пользовательский и
+   кириллический, поэтому шрифт здесь Noto Sans, а не «Deck Mono»: в
+   моноширинном ASCII-сабсете таджикских букв нет вовсе.
+   Абсолют поверх таблицы: строка о недоборе обязана остаться видимой даже
+   тогда, когда сама таблица в лист не уместилась. */
+.sources-more {
+  position: absolute;
+  left: 56px;
+  right: 56px;
+  bottom: 26px;
+  margin: 0;
+  padding: 11px 16px;
+  border: 3px solid #0090b5;
+  background: #0f1c2e;
+  font-family: "Noto Sans", sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #ffffff;
+}
+
+/* Место под штамп берётся не у источников, а у воздуха между строками: в
+   подрезанном состоянии таблица набирается плотнее ровно на высоту штампа.
+   Иначе хвост сам вытолкнул бы за край пару строк — и молчаливая потеря
+   вернулась бы, только уже из-за сообщения о ней. Обычный лист
+   (sources_truncated = 0) не меняется. */
+.slide--sources.is-truncated .sources {
+  font-size: 15px;
+  line-height: 1.24;
+}
+
+.slide--sources.is-truncated .source td {
+  padding: 4px 6px;
+}

@@ -1,56 +1,162 @@
-"""Сборка .pptx из провалидированной структуры.
+"""Печать колоды: провалидированная структура -> HTML шаблона -> PDF из Chrome.
 
-Рендер — единственное место пайплайна, где работает python-pptx, и он
-СИНХРОННЫЙ: библиотека распаковывает и пакует zip, а это блокирует поток.
-Поэтому звать его можно только через run_in_threadpool (см. service.py) —
-тот же дефект в проекте уже чинили для ChromaDB.
+Модуль делает ровно две вещи, и разделение между ними принципиально:
 
-Модуль ничего не знает ни о базе, ни о модели: на вход — план, слайды и
-источники, на выход — файл по указанному пути. Из-за этого его можно проверить
-без PostgreSQL и без Ollama.
+  * СОБИРАЕТ КОНТЕКСТ (build_render_context) — чистая функция из плана, слайдов
+    и источников в словарь, который ждут шаблоны. Ни файлов, ни процессов, ни
+    базы: её можно проверить без браузера и без PostgreSQL, и почти всё, что в
+    рендере способно соврать, живёт именно здесь;
+  * ПЕЧАТАЕТ (render_presentation) — раскладывает страницу рядом с ресурсами
+    шаблона и отдаёт её headless Chrome.
 
-Правило устойчивости: длинная строка обрезается, а не роняет рендер. Схема
-ответа модели уже держит границы (heading 80, буллет 200), но в рендер
-приходят ещё и имена документов, имя блокнота и заголовок плана — их длину
-никто не обещал.
+Почему HTML, а не pptx. Прежний рендерер собирал .pptx через python-pptx:
+позиционирование фигур кодом, шрифты из темы, никакой типографики сложнее
+абзаца. Вёрстка колоды — задача вёрстки, и решается она CSS'ом; браузер при
+этом остаётся ВНЕШНИМ инструментом, а не библиотекой в процессе, и это меняет
+устройство отказов. Библиотека бросает исключение, а внешний процесс умеет
+зависнуть, наплодить детей и уйти в своп — поэтому здесь есть стадийный таймаут
+и убийство ГРУППЫ процессов, которых у прежнего рендерера быть не могло.
+
+ГРАНИЦЫ ДЛИНЫ СЮДА НЕ ВОЗВРАЩАЮТСЯ. У прежнего рендерера был свой набор
+пределов (заголовок 120, буллет 300, строка источника 200) — защитная обрезка
+внутри сборки файла. Настоящая граница всего, что пишет модель, — схема ответа
+(llm_schemas): через неё проходит каждое поле, и шаблоны свёрстаны именно под
+её числа. Второй набор пределов означал бы второй источник истины, который
+разойдётся с первым на первой же правке схемы, — и разойдётся молча, потому что
+обрезанный текст выглядит как текст.
+
+Исключение ровно одно, и оно вынужденное: ИМЕНА ДОКУМЕНТОВ. Схема их не видит
+(они приходят из метаданных чанков, а не от модели), слайд «Источники» не
+прокручивается, а `overflow: hidden` в HTML режет молча — в отличие от pptx, где
+текст сам уменьшался. Поэтому список источников подрезает сам рендерер, считает
+непоместившиеся и ГРОМКО об этом сообщает: см. fit_sources ниже.
 """
 
+from __future__ import annotations
+
 import logging
+import os
+import signal
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from app.modules.presentations.constants import (
-    PAGES_LABEL,
-    SOURCES_HEADING,
-    SLIDES_WORD,
+from jinja2 import TemplateError
+
+from app.modules.presentations.chromium import (
+    KILL_DRAIN_SECONDS,
+    STDERR_NOISE,
+    describe_failure,
+    ensure_chromium_available,
+    kill_process_group,
+    pdf_command,
 )
-from app.modules.presentations.llm_schemas import (
-    PresentationSlide,
-    RENDERER_ADDED_SLIDES,
+from app.modules.presentations.constants import (
+    DATE_TEMPLATE,
+    HTML_LANG,
+    MONTH_NAMES,
+    PAGES_LABEL,
+    RENDER_PRINT_TIMEOUT,
+    RENDER_STDERR_TAIL,
+    SOURCES_HEADING,
+    SOURCES_MORE,
+    normalize_language,
+)
+from app.modules.presentations.llm_schemas import PresentationSlide
+from app.modules.presentations.templates import (
+    TEMPLATE_FILENAME,
+    build_environment,
+    stage_page,
+    template_registry,
 )
 from app.shared.models import as_utc
 
 logger = logging.getLogger(__name__)
 
-# Пределы длины НА РЕНДЕРЕ. Схема ответа модели свои границы уже проверила;
-# эти относятся к тому, что в схеме не описано, — именам документов, имени
-# блокнота, заголовку плана.
-TITLE_MAX_CHARS = 120
-SUBTITLE_MAX_CHARS = 200
-HEADING_MAX_CHARS = 120
-BULLET_MAX_CHARS = 300
-SOURCE_LINE_MAX_CHARS = 200
-# Слайд «Источники» не умеет прокручиваться: строки сверх этого числа не
-# поместятся на нём физически, поэтому последняя строка честно говорит,
-# сколько документов не показано, вместо молчаливого обрезания списка.
-MAX_SOURCE_LINES = 18
 
-# Раскладки, которыми пайплайн пользуется, когда реестра шаблонов ещё нет
-# (модуль templates.py делается отдельно) или в нём нет запрошенного ключа.
-# Индексы — из стандартной темы python-pptx: 0 «Title Slide», 1 «Title and
-# Content», 2 «Section Header».
-_FALLBACK_LAYOUTS = {"title": 0, "section": 2, "bullets": 1, "sources": 1}
+class RenderError(RuntimeError):
+    """Колоду собрать не удалось, и причина известна.
+
+    Отдельный тип, а не голый RuntimeError: сервис переводит его в
+    generation_failed с текстом БЕЗ дополнительной обёртки, потому что текст уже
+    написан для человека — «печать не уложилась в 270 с» плюс хвост stderr
+    Chrome. Всё прочее, что может прилететь из рендера (OSError на записи,
+    падение Jinja), сервис оборачивает сам и подписывает типом исключения.
+
+    От RendererUnavailable (chromium.py) отличается смыслом: там «инструмента
+    нет вовсе» — состояние машины, чинит администратор; здесь «инструмент
+    отработал плохо» на конкретном заказе.
+    """
+
+
+# --- Источники: сколько их влезает на слайд -------------------------------
+#
+# Слайд «Источники» не прокручивается, а `overflow: hidden` режет МОЛЧА. Это
+# тихая потеря данных: пользователь получает список, который выглядит полным.
+# Значит, решать, сколько записей поместится, обязан код — до печати и вслух.
+#
+# ЗАМЕРЫ, а не назначенное число. Потолки сняты по ГОТОВОМУ PDF (не по DOM:
+# Chrome при печати расставляет многоколоночник иначе, чем на экране, и запись,
+# видимая в браузере, в файле может отсутствовать), с критерием «запись
+# уместилась, только если видны и её метка, и её последняя строка»:
+#
+#     длина имени | draft | aurora | editorial | blueprint
+#     60 знаков   |   18  |   16   |    20     |    12
+#     90 знаков   |   12  |   12   |    14     |    10
+#     148 знаков  |   10  |   10   |    10     |     8
+#
+# ОБЩИЙ порог по худшему дизайну, а не своё число на шаблон. Порог на шаблон
+# пришлось бы держать в реестре — то есть превратить манифест оформления в
+# код, который надо пересчитывать после каждой правки CSS, и который однажды
+# разойдётся с этим самым CSS. Худший столбец (здесь blueprint во всех трёх
+# строках) даёт число, верное для всех четырёх дизайнов сразу; остальные просто
+# показывают меньше, чем могли бы, и это честная цена за один источник истины.
+#
+# ЗАМЕР ОБЯЗАН ВКЛЮЧАТЬ ОДНОСЛОВНЫЕ ИМЕНА, иначе он завышен. Таблица выше снята
+# на именах ИЗ СЛОВ — самом добром для вёрстки случае: браузеру есть где
+# перенести строку. Из базы приходит и другое: скан «skan_2026_final_v3…»,
+# URL-подобное имя файла, слитная кириллица без единого пробела. Точек переноса
+# там нет вовсе, и пока в .source-name не стоял overflow-wrap: anywhere,
+# blueprint при тех же 60/90/148 знаках вмещал 6, 5 и 0 записей вместо 12, 10 и
+# 8 — то есть замер на словах завышал ёмкость вдвое, а порог, снятый с него,
+# молча срезал половину списка. Потому потолок берётся как МИНИМУМ и по
+# дизайнам, и по стилям имени; сторожит это tests/test_presentation_print.py
+# ::test_every_source_the_renderer_kept_is_actually_visible — он печатает все
+# четыре шаблона на четырёх стилях имени и требует, чтобы каждая оставленная
+# порогом запись целиком лежала внутри листа.
+#
+# Строку под хвост «не показано ещё N» вычитать НЕ НАДО: в состоянии
+# sources_truncated > 0 шаблоны уплотняют список ровно на высоту плашки, и
+# ёмкость от появления хвоста не падает (проверено обеими сторонами).
+SOURCE_FIT_MEASURED = ((60, 12), (90, 10), (148, 8))
+
+# Бюджет слайда в условных единицах. 120 — НОК замеренных ёмкостей (12, 10, 8),
+# поэтому цена записи получается целой при каждом замере, а не приблизительной:
+# арифметика с плавающей точкой на границе (120 / 12.0 -> 9.999...) отняла бы
+# ровно одну запись, и понять, почему, было бы невозможно.
+SOURCE_FIT_BUDGET = 120
+
+# Цена одной записи выводится из замера, а не выписывается рядом с ним: два
+# набора чисел про одно и то же — это то, чему предстоит разойтись. Округление
+# ВВЕРХ, потому что ошибаться можно только в сторону «показали меньше»: обратная
+# ошибка — молча срезанная браузером запись.
+_SOURCE_COSTS = tuple(
+    (length, -(-SOURCE_FIT_BUDGET // capacity))
+    for length, capacity in SOURCE_FIT_MEASURED
+)
+
+# Длиннее самого длинного ЗАМЕРЕННОГО имени не бывает: имя подрезается.
+#
+# Это не «защитная обрезка на всякий случай», а граница знания. Ёмкость слайда
+# измерена до 148 знаков; для имени в 255 (столько допускает Document.name)
+# ответа нет, а экстраполяция прямой уводит ёмкость в отрицательные числа. Из
+# двух честных вариантов — подрезать имя или гадать о ёмкости — выбран первый:
+# он виден пользователю (многоточие в конце имени), а второй проявился бы
+# исчезнувшими без следа источниками.
+SOURCE_NAME_MAX_CHARS = SOURCE_FIT_MEASURED[-1][0]
 
 
 @dataclass
@@ -62,158 +168,213 @@ class RenderedSource:
     pages: list[int] = field(default_factory=list)
 
 
-def fit(value: str, limit: int) -> str:
-    """Строка не длиннее limit. Обрезка, а не отказ.
+def source_cost(name_length: int) -> int:
+    """Во сколько единиц бюджета обходится запись с именем такой длины.
 
-    Уронить готовую колоду из-за длинного имени файла — худший из возможных
-    исходов: работа модели уже сделана и оплачена временем пользователя.
+    Между замерами — линейная интерполяция с округлением вверх. Прямая здесь
+    не модель физики, а способ не выдумывать: между 60 и 90 знаками ёмкость
+    никто не мерил, и любая кривая была бы такой же догадкой, только менее
+    понятной. Округление вверх делает догадку консервативной.
     """
-    text = " ".join((value or "").split())
-    if len(text) <= limit:
+    previous_length, previous_cost = _SOURCE_COSTS[0]
+    if name_length <= previous_length:
+        return previous_cost
+    for length, cost in _SOURCE_COSTS[1:]:
+        if name_length <= length:
+            grown = (cost - previous_cost) * (name_length - previous_length)
+            return previous_cost + -(-grown // (length - previous_length))
+        previous_length, previous_cost = length, cost
+    # Сюда доезжает только имя длиннее замеренного, а такого не бывает: имена
+    # подрезаны до SOURCE_NAME_MAX_CHARS. Отдаём цену самой дорогой записи.
+    return previous_cost
+
+
+def fit_name(name: str) -> str:
+    """Имя документа одной строкой и не длиннее замеренной границы."""
+    text = " ".join((name or "").split())
+    if len(text) <= SOURCE_NAME_MAX_CHARS:
         return text
-    return text[: limit - 1].rstrip() + "…"
+    return text[: SOURCE_NAME_MAX_CHARS - 1].rstrip() + "…"
 
 
-def resolve_template(template_key: str) -> Any | None:
-    """TemplateInfo из реестра шаблонов или None.
+def format_pages(pages: list[int], language: str) -> str:
+    """«стр. 12–14, 41»: подряд идущие страницы схлопываются в диапазон.
 
-    Импорт отложенный и защищённый намеренно. Реестр (templates.py) делается
-    параллельно, и до его появления пайплайн обязан оставаться рабочим:
-    отсутствие оформления — это повод нарисовать колоду темой по умолчанию, а
-    не повод не отдать пользователю ничего. Как только модуль появится, этот
-    же код начнёт брать шаблон из него без единой правки.
+    Схлопывание не украшение, а ёмкость: документ, процитированный на десяти
+    страницах подряд, иначе съедает строку целиком и вытесняет соседей со
+    слайда. Пустой список даёт пустую строку — шаблон печатает её как есть, и
+    отдельной ветки «страниц нет» ему не нужно.
     """
-    try:
-        from app.modules.presentations.templates import template_registry
-    except ImportError:
-        logger.warning(
-            "Template registry is not available yet, rendering with the default "
-            "python-pptx theme (template_key=%r)",
-            template_key,
-        )
-        return None
-    template = template_registry.get(template_key)
-    if template is None:
-        logger.warning(
-            "Unknown presentation template %r, rendering with the default theme",
-            template_key,
-        )
-    return template
+    ordered = sorted(
+        {page for page in pages if isinstance(page, int) and not isinstance(page, bool)}
+    )
+    if not ordered:
+        return ""
 
-
-def _new_presentation(template: Any | None):
-    from pptx import Presentation
-
-    if template is None:
-        return Presentation(), dict(_FALLBACK_LAYOUTS)
-    presentation = Presentation(str(template.template_file))
-    layouts = dict(_FALLBACK_LAYOUTS)
-    # Ключи реестра перекрывают умолчания по одному: шаблон, у которого не
-    # объявлена, скажем, раскладка section, всё равно рисуется — просто на
-    # раскладке по умолчанию.
-    layouts.update(getattr(template, "layouts", None) or {})
-    return presentation, layouts
-
-
-def _layout(presentation, layouts: dict[str, int], name: str):
-    """Раскладка по имени из реестра, с откатом на первую доступную.
-
-    Индекс из реестра может не совпасть с содержимым файла (шаблон
-    перерисовали, раскладку удалили). Это повод нарисовать слайд не тем
-    макетом, а не уронить генерацию.
-    """
-    available = presentation.slide_layouts
-    index = layouts.get(name, _FALLBACK_LAYOUTS.get(name, 0))
-    if not isinstance(index, int) or index < 0 or index >= len(available):
-        logger.warning(
-            "Layout %r resolves to index %r, which the template does not have; "
-            "falling back to layout 0",
-            name,
-            index,
-        )
-        index = 0
-    return available[index]
-
-
-def _set_title(slide, text: str) -> None:
-    title = getattr(slide.shapes, "title", None)
-    if title is None:
-        # Раскладка без заголовка — редкость, но встречается в чужих шаблонах.
-        # Заголовок важнее оформления, поэтому кладём его в тело.
-        frame = _body_frame(slide)
-        if frame is not None:
-            frame.paragraphs[0].text = text
-        return
-    title.text = text
-
-
-def _is_title(placeholder, title) -> bool:
-    """Тот ли это плейсхолдер, что и заголовок слайда.
-
-    Сравнение по shape_id, а НЕ по `is`: python-pptx создаёт новый объект-обёртку
-    на каждое обращение к фигуре, поэтому `placeholder is slide.shapes.title`
-    ложно даже для одного и того же элемента. С таким сравнением заголовок не
-    исключался из перебора, и текст тела затирал его — на титульном слайде
-    вместо названия презентации оставалась подпись.
-    """
-    if title is None:
-        return False
-    try:
-        return placeholder.shape_id == title.shape_id
-    except AttributeError:  # pragma: no cover - защита от чужой реализации
-        return placeholder is title
-
-
-def _body_frame(slide):
-    """Текстовое поле слайда: первый плейсхолдер, который не заголовок.
-
-    По индексу 1 обращаться нельзя: в чужих шаблонах у раскладки бывает другой
-    набор плейсхолдеров, и обращение по индексу роняет рендер KeyError'ом.
-    """
-    title = getattr(slide.shapes, "title", None)
-    for placeholder in slide.placeholders:
-        if _is_title(placeholder, title):
+    spans: list[str] = []
+    start = previous = ordered[0]
+    for page in ordered[1:]:
+        if page == previous + 1:
+            previous = page
             continue
-        if placeholder.has_text_frame:
-            return placeholder.text_frame
-    # Плейсхолдера нет вовсе — рисуем собственную рамку. Оформление хуже, чем
-    # у шаблона, но текст слайда доходит до пользователя. Размеры в дюймах, а
-    # не в долях слайда: до размеров слайда из объекта слайда надо идти через
-    # package, и эта дорога зависит от версии python-pptx сильнее, чем сама
-    # рамка того стоит.
-    from pptx.util import Inches
-
-    box = slide.shapes.add_textbox(Inches(0.8), Inches(1.8), Inches(8.4), Inches(4.5))
-    return box.text_frame
+        spans.append(str(start) if start == previous else f"{start}–{previous}")
+        start = previous = page
+    spans.append(str(start) if start == previous else f"{start}–{previous}")
+    return f"{PAGES_LABEL[language]} {', '.join(spans)}"
 
 
-def _fill_bullets(slide, bullets: list[str], limit: int) -> None:
-    frame = _body_frame(slide)
-    if frame is None:  # pragma: no cover - _body_frame всегда что-то возвращает
-        return
-    frame.clear()
-    for index, bullet in enumerate(bullets or ["—"]):
-        paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
-        paragraph.text = fit(bullet, limit)
-        paragraph.level = 0
+def format_date(moment: datetime, language: str) -> str:
+    """Дата титульного слайда словами на языке колоды.
+
+    Через таблицу месяцев, а не strftime («%d.%m.%Y» или «%B»): цифровая дата
+    на титуле выглядит машинной, а «%B» зависит от локали, установленной в
+    образе, — то есть оформление колоды менялось бы от состава пакетов.
+    """
+    local = as_utc(moment)
+    return DATE_TEMPLATE[language].format(
+        day=local.day, month=MONTH_NAMES[language][local.month - 1], year=local.year
+    )
 
 
-def format_source_line(source: RenderedSource, language: str) -> str:
-    """Строка списка источников: «Имя документа — стр. 3, 5»."""
-    name = fit(source.name or f"#{source.source_id}", SOURCE_LINE_MAX_CHARS - 40)
-    pages = [page for page in sorted(set(source.pages)) if isinstance(page, int)]
-    if not pages:
-        return name
-    label = PAGES_LABEL.get(language, PAGES_LABEL["ru"])
-    return fit(f"{name} — {label} {', '.join(str(page) for page in pages)}", SOURCE_LINE_MAX_CHARS)
+def fit_sources(
+    sources: list[RenderedSource], language: str
+) -> tuple[list[dict[str, Any]], int]:
+    """Подрезанный список источников и число НЕпоместившихся.
+
+    Записи набираются по порядку, пока хватает бюджета слайда, и в этом порядке
+    же им розданы метки — поэтому недобор всегда приходится на ХВОСТ списка, а
+    метки оставшихся записей не съезжают. Иначе перенумерация меняла бы смысл
+    ссылок на уже написанных слайдах: «[3]» указывал бы на другой документ.
+
+    Отбрасывание — WARNING в журнал, и это не перестраховка. Пользователь видит
+    на слайде честное «не показано ещё N», а вот ПОЧЕМУ их столько (длинные
+    имена файлов? слишком много документов в блокноте?) видно только по логу с
+    самой длинной строкой. Тихая обрезка тут была бы потерей данных, о которой
+    никто не узнал бы.
+    """
+    prepared: list[RenderedSource] = [
+        RenderedSource(
+            source_id=source.source_id,
+            name=fit_name(source.name) or f"#{source.source_id}",
+            pages=list(source.pages),
+        )
+        for source in sources
+    ]
+
+    spent = 0
+    kept: list[dict[str, Any]] = []
+    for position, source in enumerate(prepared, start=1):
+        cost = source_cost(len(source.name))
+        if spent + cost > SOURCE_FIT_BUDGET:
+            break
+        spent += cost
+        kept.append(
+            {
+                "label": f"[{position}]",
+                "name": source.name,
+                "pages": sorted({page for page in source.pages if isinstance(page, int)}),
+                "pages_text": format_pages(source.pages, language),
+            }
+        )
+
+    truncated = len(prepared) - len(kept)
+    if truncated:
+        logger.warning(
+            "Presentation render: the sources slide fits %d of %d documents, "
+            "%d are hidden (budget %d units spent %d, longest name %d chars). "
+            "The deck says so on the slide, but the list IS incomplete.",
+            len(kept),
+            len(prepared),
+            truncated,
+            SOURCE_FIT_BUDGET,
+            spent,
+            max(len(source.name) for source in prepared),
+        )
+    return kept, truncated
 
 
-def build_source_lines(sources: list[RenderedSource], language: str) -> list[str]:
-    lines = [format_source_line(source, language) for source in sources]
-    if len(lines) <= MAX_SOURCE_LINES:
-        return lines or ["—"]
-    hidden = len(lines) - MAX_SOURCE_LINES
-    return [*lines[:MAX_SOURCE_LINES], f"… +{hidden}"]
+def source_labels(sources: list[RenderedSource]) -> dict[int, str]:
+    """source_id -> метка «[N]» по порядку списка источников.
+
+    Метки раздаются по ПОЛНОМУ списку, до подрезки: слайд, сославшийся на
+    документ, который не поместился в перечень, обязан сохранить его номер.
+    Ссылка на строку, которой не видно, — это честное «список неполон»;
+    перенумерованная ссылка на ЧУЖОЙ документ — это ложь.
+    """
+    return {source.source_id: f"[{index}]" for index, source in enumerate(sources, 1)}
+
+
+def build_render_context(
+    *,
+    title: str,
+    slides: list[PresentationSlide],
+    sources: list[RenderedSource],
+    language: str,
+    notebook_name: str,
+    created_at: datetime,
+) -> dict[str, Any]:
+    """Контекст шаблона из того же провалидированного JSON, что и раньше.
+
+    Инвариант раздела не меняется: модель пишет структуру, код рисует. Сюда
+    приходят PresentationPlan/PresentationSlide, уже прошедшие схему, и ни одно
+    поле контекста не берётся из сырого ответа модели.
+
+    Контракт полей зафиксирован и его читают все четыре шаблона. Два поля в нём
+    существуют только ради шаблонов и заслуживают отдельного слова:
+
+      * html_lang — код BCP-47, то есть "tg" там, где внутри проекта "tj";
+      * sources_truncated — сколько источников не поместилось. Ноль здесь
+        значит «список полон», и шаблон по нему решает, печатать ли хвост.
+        Забыть это поле нельзя: окружение шаблонов строгое (StrictUndefined),
+        и отсутствие ключа роняет рендер, а не рисует пустоту.
+    """
+    language = normalize_language(language)
+    labels = source_labels(sources)
+    fitted, truncated = fit_sources(sources, language)
+
+    return {
+        "title": title,
+        "notebook_name": notebook_name,
+        "generated_on": format_date(created_at, language),
+        "language": language,
+        "html_lang": HTML_LANG[language],
+        "slides": [
+            {
+                "index": index,
+                "heading": slide.heading,
+                "bullets": list(slide.bullets),
+                "citations": _slide_labels(slide, labels),
+            }
+            for index, slide in enumerate(slides, start=1)
+        ],
+        "sources": fitted,
+        "sources_truncated": truncated,
+        "strings": {
+            "sources_heading": SOURCES_HEADING[language],
+            "sources_more": SOURCES_MORE[language],
+        },
+    }
+
+
+def _slide_labels(slide: PresentationSlide, labels: dict[int, str]) -> list[str]:
+    """Готовые метки «[1]» слайда: без повторов, в порядке первого упоминания.
+
+    Схема уже схлопнула цитаты по паре (source_id, chunk_id), но на слайде
+    метка — это ДОКУМЕНТ: две цитаты на разные фрагменты одного документа дают
+    один «[1]», и печатать его дважды значит показать пользователю бессмыслицу.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for citation in slide.citations:
+        label = labels.get(citation.source_id)
+        if label is None or label in seen:
+            continue
+        seen.add(label)
+        ordered.append(label)
+    return ordered
+
+
+# --- Печать ----------------------------------------------------------------
 
 
 def render_presentation(
@@ -227,64 +388,166 @@ def render_presentation(
     created_at: datetime,
     output_path: str,
 ) -> None:
-    """Собрать колоду и сохранить её по output_path.
+    """Собрать колоду и оставить готовый PDF по output_path.
 
-    Состав файла фиксирован контрактом slide_count: титульный слайд, по слайду
-    на каждую секцию плана и финальные «Источники» — ровно
-    len(slides) + RENDERER_ADDED_SLIDES слайдов.
+    Функция СИНХРОННАЯ и блокирующая: она ждёт внешний процесс. Звать её можно
+    только через run_in_threadpool (см. service.py) — тот же приём, что и для
+    прежнего python-pptx, и по той же причине.
 
-    Раскладка section из реестра здесь не используется: разделители увеличили
-    бы число слайдов сверх заказанного пользователем. Ключ остаётся в
-    контракте реестра для колод с разделами, если такие появятся.
+    Состав файла фиксирован контрактом slide_count: титульная страница, по
+    странице на секцию плана и финальные «Источники». Разбиение на страницы
+    делает CSS шаблона (`@page` плюс `break-after: page` на слайде), а не этот
+    код: геометрия — часть дизайна, и навязывать её отсюда значило бы завести
+    вторую, спорящую с первой.
+
+    Chrome печатает СРАЗУ в output_path (у вызывающего это временный файл рядом
+    с итоговым, который он потом переставит через os.replace). Промежуточный
+    PDF во временном каталоге означал бы лишнее копирование между файловыми
+    системами — /tmp на стенде бывает отдельным томом — и второй способ
+    получить полуфайл.
     """
-    template = resolve_template(template_key)
-    presentation, layouts = _new_presentation(template)
-
-    # --- Титульный слайд ---
-    title_slide = presentation.slides.add_slide(_layout(presentation, layouts, "title"))
-    _set_title(title_slide, fit(title, TITLE_MAX_CHARS))
-    slide_total = len(slides) + RENDERER_ADDED_SLIDES
-    subtitle = " · ".join(
-        part
-        for part in (
-            fit(notebook_name, 100),
-            as_utc(created_at).strftime("%d.%m.%Y"),
-            f"{slide_total} {SLIDES_WORD.get(language, SLIDES_WORD['ru'])}",
+    template = template_registry.get(template_key)
+    if template is None:
+        # Не откат на «тему по умолчанию»: у HTML-рендера темы по умолчанию нет
+        # и быть не может — без шаблона нет ни вёрстки, ни шрифтов. Реестр
+        # выбрасывает битые шаблоны при старте с ERROR, а HTTP-слой не даёт
+        # заказать несуществующий ключ; сюда это доезжает, только если шаблон
+        # сломали между заказом и генерацией.
+        raise RenderError(
+            f"Шаблон {template_key!r} недоступен: он не прошёл проверку при "
+            f"старте или был удалён"
         )
-        if part
+
+    binary = ensure_chromium_available()
+    context = build_render_context(
+        title=title,
+        slides=slides,
+        sources=sources,
+        language=language,
+        notebook_name=notebook_name,
+        created_at=created_at,
     )
-    _fill_subtitle(title_slide, fit(subtitle, SUBTITLE_MAX_CHARS))
+    html = render_html(template, context)
 
-    # --- Контентные слайды ---
-    bullets_layout = _layout(presentation, layouts, "bullets")
-    for slide_data in slides:
-        slide = presentation.slides.add_slide(bullets_layout)
-        _set_title(slide, fit(slide_data.heading, HEADING_MAX_CHARS))
-        _fill_bullets(slide, list(slide_data.bullets), BULLET_MAX_CHARS)
-
-    # --- Источники ---
-    sources_slide = presentation.slides.add_slide(
-        _layout(presentation, layouts, "sources")
-    )
-    _set_title(sources_slide, SOURCES_HEADING.get(language, SOURCES_HEADING["ru"]))
-    _fill_bullets(
-        sources_slide, build_source_lines(sources, language), SOURCE_LINE_MAX_CHARS
-    )
-
-    presentation.save(output_path)
+    with tempfile.TemporaryDirectory(prefix="deck-") as workspace:
+        root = Path(workspace)
+        try:
+            page = stage_page(template.directory, html, root / "page")
+        except OSError as exc:
+            raise RenderError(f"Не удалось разложить страницу колоды: {exc}") from exc
+        print_pdf(binary, page, Path(output_path), root / "profile")
 
 
-def _fill_subtitle(slide, text: str) -> None:
-    """Подпись титульного слайда, если для неё есть место.
+def render_html(template: Any, context: dict[str, Any]) -> str:
+    """Шаблон плюс контекст -> строка HTML.
 
-    Отдельной веткой от _fill_bullets: на титульной раскладке подпись — это
-    один абзац, и добавлять к нему пустую рамку, когда плейсхолдера нет, не
-    нужно. Титул без подписи — рабочий слайд.
+    Окружение берётся у реестра (templates.build_environment), а не строится
+    здесь: autoescape=True и StrictUndefined — это ЕГО решения, и смоук-рендер
+    при старте проверяет шаблоны именно в нём. Своё окружение означало бы, что
+    при старте проверяется одно, а пользователю печатается другое.
+
+    Отдельного экранирования тут нет и не должно быть: весь пользовательский
+    текст подставляется как данные, экранирует их Jinja. Фильтр |safe в
+    шаблонах запрещён (см. комментарий к --no-sandbox в chromium.py: именно на
+    этом держится решение печатать без песочницы).
     """
-    title = getattr(slide.shapes, "title", None)
-    for placeholder in slide.placeholders:
-        if _is_title(placeholder, title):
-            continue
-        if placeholder.has_text_frame:
-            placeholder.text_frame.text = text
-            return
+    environment = build_environment(template.directory)
+    try:
+        return environment.get_template(TEMPLATE_FILENAME).render(**context)
+    except TemplateError as exc:
+        # Прежде всего UndefinedError: контекст рендера разошёлся с шаблоном.
+        # Такое ловит смоук-рендер при старте, и до заказа пользователя оно
+        # доезжает только если шаблоны и код приехали из разных релизов.
+        raise RenderError(
+            f"Шаблон {template.key!r} не собрался с этим контекстом "
+            f"({type(exc).__name__}): {exc}"
+        ) from exc
+
+
+# Сколько ждём смерти уже убитой группы. Это не бюджет работы, а время на
+# доставку SIGKILL и закрытие труб: секунды здесь означали бы, что ядро не
+# доставило сигнал, чего не бывает.
+
+
+def print_pdf(binary: str, page: Path, pdf_file: Path, profile_dir: Path) -> None:
+    """Запустить Chrome и дождаться PDF; зависший — убить группой процессов.
+
+    ТАЙМАУТ СТОИТ ЗДЕСЬ, на самом процессе, а не только снаружи, и это главное
+    отличие от прежнего рендера. asyncio.wait_for вокруг стадии (service.py)
+    умеет отменить ОЖИДАНИЕ, но не работу: браузер, который он «снял», продолжил
+    бы жить, держать память и писать в файл, который вызывающий уже считает
+    брошенным. Поэтому первым обязан сработать subprocess-таймаут — он не ждёт,
+    а убивает.
+
+    УБИВАЕТСЯ ГРУППА, А НЕ ПРОЦЕСС. Chrome — это дерево: zygote, рендерер,
+    gpu-процесс, утилиты. Убийство одного родителя оставляет детей живыми,
+    осиротевшими и по-прежнему занимающими память и /dev/shm; на стенде это
+    накапливается до тех пор, пока следующий рендер не упрётся в OOM. Отсюда
+    start_new_session=True при запуске (у дерева появляется своя группа, чей id
+    равен pid родителя) и killpg по ней.
+
+    SIGKILL, а не SIGTERM: процесс уже перебрал отведённое время, его вывод
+    непригоден, и вежливое завершение — это ещё одно ожидание с той же
+    неопределённостью. Мягкий сигнал имел бы смысл, если бы нам был нужен
+    результат его работы; нам он не нужен.
+    """
+    command = pdf_command(binary, page, pdf_file, profile_dir)
+    try:
+        process = subprocess.Popen(  # noqa: S603 - argv наш, шелла нет
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            # Своя сессия => своя группа процессов: только по ней можно убить
+            # всё дерево браузера разом.
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise RenderError(f"Не удалось запустить {Path(binary).name}: {exc}") from exc
+
+    try:
+        _, stderr = process.communicate(timeout=RENDER_PRINT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        stderr = kill_process_group(process)
+        raise RenderError(
+            f"Печать колоды не уложилась в {int(RENDER_PRINT_TIMEOUT)} с и была "
+            f"прервана{_stderr_suffix(stderr)}"
+        )
+    except BaseException:
+        # Любой другой выход отсюда (в том числе отмена потока) не имеет права
+        # оставить браузер работать: файл, в который он пишет, вызывающий уже
+        # считает своим и вот-вот удалит.
+        kill_process_group(process)
+        raise
+
+    if process.returncode != 0:
+        raise RenderError(
+            f"Печать колоды не удалась: "
+            f"{describe_failure(command, process.returncode, stderr or '')}"
+        )
+    if not pdf_file.is_file() or pdf_file.stat().st_size == 0:
+        # Chrome умеет выйти с нулём, не написав файла (страница не загрузилась,
+        # каталог недоступен). Верить коду возврата на слово нельзя — иначе
+        # заказ станет 'ready' с пустым файлом.
+        raise RenderError(
+            f"{Path(binary).name} отчитался об успехе, но PDF не появился"
+            f"{_stderr_suffix(stderr)}"
+        )
+
+
+def _stderr_suffix(stderr: str) -> str:
+    """Хвост осмысленного stderr для текста отказа, или пусто.
+
+    Шум среды (см. STDERR_NOISE в chromium.py) выбрасывается ДО обрезки: Chrome
+    пишет «Failed to adjust OOM score» на каждом запуске в контейнере, и без
+    фильтра хвост состоял бы из него одного, вытеснив настоящую причину. Именно
+    поэтому обрезаем хвост, а не начало: Chrome сообщает беду последней строкой.
+    """
+    lines = [
+        line.strip()
+        for line in (stderr or "").strip().splitlines()
+        if line.strip() and not any(noise in line for noise in STDERR_NOISE)
+    ]
+    tail = " | ".join(lines)[-RENDER_STDERR_TAIL:]
+    return f". Chrome сказал: {tail}" if tail else ""

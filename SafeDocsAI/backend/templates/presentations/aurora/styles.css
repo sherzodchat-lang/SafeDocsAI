@@ -1,0 +1,324 @@
+/* Aurora — тёмная колода: глубокий индиго, световые пятна, крупная типографика.
+   Все заливки насыщенные: светло-серое на тёмном в печати сохраняется,
+   а обратное (тонкое серое на белом) — нет, поэтому светлый текст здесь
+   держится не ниже #b9c2e8. */
+
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("fonts/NotoSans-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Noto Sans";
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+  src: url("fonts/NotoSans-Bold.woff2") format("woff2");
+}
+
+@page {
+  size: 1280px 720px;
+  margin: 0;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #0b1020;
+}
+
+body {
+  font-family: "Noto Sans", sans-serif;
+  color: #eef1fb;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.slide {
+  position: relative;
+  box-sizing: border-box;
+  width: 1280px;
+  height: 720px;
+  overflow: hidden;
+  padding: 60px 88px;
+  background:
+    radial-gradient(1100px 620px at 12% -10%, #2b1a5e 0%, rgba(43, 26, 94, 0) 62%),
+    radial-gradient(900px 560px at 96% 108%, #0d4f63 0%, rgba(13, 79, 99, 0) 60%),
+    linear-gradient(160deg, #0b1020 0%, #131a36 55%, #0a0f1f 100%);
+  break-after: page;
+  break-inside: avoid;
+}
+
+.slide:last-of-type {
+  break-after: auto;
+}
+
+/* Световые пятна — чистая геометрия, без растровых картинок. */
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  opacity: 0.55;
+}
+
+.orb--a {
+  width: 520px;
+  height: 520px;
+  top: -190px;
+  right: -120px;
+  background: radial-gradient(circle, #7c5cff 0%, rgba(124, 92, 255, 0) 70%);
+}
+
+.orb--b {
+  width: 420px;
+  height: 420px;
+  bottom: -170px;
+  left: -110px;
+  background: radial-gradient(circle, #17c8b0 0%, rgba(23, 200, 176, 0) 70%);
+}
+
+.orb--c {
+  width: 460px;
+  height: 460px;
+  top: -200px;
+  left: 58%;
+  background: radial-gradient(circle, #7c5cff 0%, rgba(124, 92, 255, 0) 72%);
+}
+
+/* --- Титульный --------------------------------------------------------- */
+
+.slide--title {
+  display: flex;
+  align-items: center;
+}
+
+.title-inner {
+  position: relative;
+  width: 100%;
+}
+
+.eyebrow {
+  margin: 0 0 22px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #8fe3d6;
+}
+
+.deck-title {
+  margin: 0;
+  max-width: 1000px;
+  font-size: 62px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: #ffffff;
+  overflow-wrap: break-word;
+}
+
+.rule {
+  width: 220px;
+  height: 6px;
+  margin: 34px 0 26px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7c5cff 0%, #17c8b0 100%);
+}
+
+.deck-date {
+  margin: 0;
+  font-size: 21px;
+  color: #b9c2e8;
+}
+
+/* --- Содержательный ---------------------------------------------------- */
+
+.glow {
+  position: absolute;
+  left: 0;
+  top: 120px;
+  width: 6px;
+  height: 300px;
+  background: linear-gradient(180deg, #7c5cff 0%, #17c8b0 100%);
+}
+
+.content-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  margin-bottom: 30px;
+}
+
+.index {
+  flex: 0 0 auto;
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1;
+  color: #17c8b0;
+  font-variant-numeric: tabular-nums;
+}
+
+.slide-heading {
+  margin: 0;
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: #ffffff;
+  overflow-wrap: break-word;
+}
+
+.bullets {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-width: 1050px;
+}
+
+.bullet {
+  position: relative;
+  margin: 0 0 14px;
+  padding-left: 30px;
+  font-size: 20px;
+  line-height: 1.42;
+  color: #dde2f5;
+  overflow-wrap: break-word;
+}
+
+.bullet::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 11px;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #7c5cff 0%, #17c8b0 100%);
+}
+
+.slide-footer {
+  position: absolute;
+  left: 88px;
+  right: 88px;
+  bottom: 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 16px;
+  color: #b9c2e8;
+}
+
+.citation {
+  margin-right: 8px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(124, 92, 255, 0.32);
+  color: #e6e2ff;
+  font-weight: 700;
+}
+
+.pager {
+  font-weight: 700;
+  color: #8fe3d6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Источники --------------------------------------------------------- */
+
+.slide-heading--sources {
+  margin-bottom: 26px;
+}
+
+.sources {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* Контракт допускает до 18 источников (MAX_SOURCE_LINES), а слайд не
+     прокручивается: в одну колонку столько строк не встаёт физически. */
+  columns: 2;
+  column-gap: 36px;
+}
+
+.source {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-left: 3px solid #17c8b0;
+  border-radius: 0 6px 6px 0;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 16px;
+  line-height: 1.32;
+  overflow-wrap: break-word;
+  break-inside: avoid;
+}
+
+.source-label {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: #8fe3d6;
+}
+
+/* ANYWHERE, а не унаследованный от .source break-word, и это ровно та разница,
+   из-за которой имена сканов («skanirovannyy_dokument_...» в 148 знаков одним
+   словом) теряли хвост. break-word разрешает разрыв слова при вёрстке СТРОКИ,
+   но в вычисление min-content ширины НЕ входит, а флекс-элемент ниже своей
+   min-content ширины не сжимается: неразрывное слово распирало карточку шире
+   колонки, и всё, что не поместилось, уезжало за правый край листа — метка и
+   первые буквы оставались, конец имени пропадал без следа.
+   anywhere учитывается в min-content: слово рвётся по любому месту, карточка
+   остаётся в своих границах. Имя с разрывом посреди слова читается;
+   обрезанное — нет. */
+.source-name {
+  flex: 1 1 auto;
+  color: #eef1fb;
+  overflow-wrap: anywhere;
+}
+
+.source-pages {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: #b9c2e8;
+}
+
+/* --- Хвост «…и ещё N» -------------------------------------------------- */
+
+/* На тёмной колоде заметность даёт не размер, а свет: плашка светится тем же
+   градиентом, что и акценты шаблона, и лежит поверх всего остального. Фон
+   непрозрачный намеренно — сообщение о недоборе обязано пережить даже список,
+   который не поместился. */
+.sources-more {
+  position: absolute;
+  left: 88px;
+  right: 88px;
+  bottom: 30px;
+  margin: 0;
+  padding: 12px 18px;
+  border-left: 5px solid #17c8b0;
+  border-radius: 0 8px 8px 0;
+  background: #2a1f63;
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+/* Место под плашку берётся не у источников, а у воздуха между ними: в
+   подрезанном состоянии карточки набираются плотнее ровно на высоту плашки.
+   Иначе хвост сам вытолкнул бы за край пару строк — и молчаливая потеря
+   вернулась бы, только уже из-за сообщения о ней. Обычный слайд
+   (sources_truncated = 0) не меняется.
+   Высоту списку задавать НЕЛЬЗЯ: в постраничном режиме Chrome при заданной
+   высоте перестаёт балансировать колонки и льёт остаток в третью колонку за
+   краем листа — на экране этого не видно, а в PDF источники исчезают. Место
+   освобождает только уплотнение. */
+.slide--sources.is-truncated .source {
+  margin-bottom: 7px;
+  padding: 6px 10px;
+  font-size: 14.5px;
+  line-height: 1.26;
+}

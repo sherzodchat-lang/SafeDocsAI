@@ -1,47 +1,36 @@
-[
-  {
-    "key": "classic",
-    "name": {
-      "ru": "Классический",
-      "tj": "Классикӣ"
+{
+  "templates": [
+    {
+      "key": "aurora",
+      "name": {
+        "ru": "Аврора",
+        "tj": "Аврора"
+      },
+      "dir": "aurora"
     },
-    "template_file": "classic.pptx",
-    "preview_file": "classic.png",
-    "layouts": {
-      "title": 0,
-      "section": 2,
-      "bullets": 1,
-      "sources": 3
-    }
-  },
-  {
-    "key": "contrast",
-    "name": {
-      "ru": "Контрастный",
-      "tj": "Контрастӣ"
+    {
+      "key": "editorial",
+      "name": {
+        "ru": "Издательский",
+        "tj": "Нашриётӣ"
+      },
+      "dir": "editorial"
     },
-    "template_file": "contrast.pptx",
-    "preview_file": "contrast.png",
-    "layouts": {
-      "title": 0,
-      "section": 2,
-      "bullets": 1,
-      "sources": 3
-    }
-  },
-  {
-    "key": "minimal",
-    "name": {
-      "ru": "Минималистичный",
-      "tj": "Минималистӣ"
+    {
+      "key": "blueprint",
+      "name": {
+        "ru": "Чертёжный",
+        "tj": "Нақшакашӣ"
+      },
+      "dir": "blueprint"
     },
-    "template_file": "minimal.pptx",
-    "preview_file": "minimal.png",
-    "layouts": {
-      "title": 0,
-      "section": 2,
-      "bullets": 1,
-      "sources": 3
+    {
+      "key": "draft",
+      "name": {
+        "ru": "Черновой",
+        "tj": "Сиёҳнавис"
+      },
+      "dir": "draft"
     }
-  }
-]
+  ]
+}

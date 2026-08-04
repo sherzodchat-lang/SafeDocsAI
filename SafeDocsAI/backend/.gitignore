@@ -51,6 +51,13 @@ data/chroma/
 # без этой строки .pptx попадали в индекс при первом же `git add -A`.
 data/presentations/
 
+# Превью шаблонов: их рисует Chrome при старте из template.html и эталонной
+# фикстуры (templates.py, default_preview_dir). Это кэш, а не артефакт сборки —
+# картинка зависит ещё и от версии браузера на машине, — поэтому в репозиторий
+# он не едет: рядом с .stamp-файлами это был бы вечный шум в git status и
+# конфликт на каждой правке дизайна.
+data/presentation_previews/
+
 # Logs
 *.log
 logs/

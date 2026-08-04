@@ -72,6 +72,7 @@ from app.modules.presentations.constants import (  # noqa: E402
 )
 from app.modules.presentations.llm_schemas import MIN_SLIDE_COUNT  # noqa: E402
 from app.modules.presentations.templates import (  # noqa: E402
+    default_preview_dir,
     default_templates_dir,
     template_registry,
 )
@@ -1131,13 +1132,29 @@ class TemplatesTests(PresentationsApiTestCase):
                     response, 404, PresentationErrors.UNSUPPORTED_TEMPLATE
                 )
 
-    async def test_registry_paths_stay_inside_the_templates_directory(self):
-        """Страховка на реестр: наружу он путей не выпускает по построению."""
-        root = default_templates_dir().resolve()
+    async def test_registry_paths_stay_inside_their_own_roots(self):
+        """Страховка на реестр: наружу он путей не выпускает по построению.
+
+        Корней теперь ДВА, и это не ослабление проверки, а следствие перехода
+        на HTML. Исходники шаблона лежат в templates/ и приезжают с релизом;
+        превью рисует Chrome при старте, и оно попадает в data/ — как всякий
+        машинный результат, который зависит ещё и от версии браузера на машине.
+        Утверждение осталось прежним: каждый путь заперт в СВОЁМ каталоге, и
+        запись вида "../.." в манифесте или ключ вида "../x" не выводят реестр
+        ни за один из них.
+        """
+        templates_root = default_templates_dir().resolve()
+        preview_root = default_preview_dir().resolve()
         for info in template_registry.list():
             with self.subTest(template=info.key):
-                self.assertTrue(info.preview_file.resolve().is_relative_to(root))
-                self.assertTrue(info.template_file.resolve().is_relative_to(root))
+                self.assertTrue(
+                    info.html_file.resolve().is_relative_to(templates_root)
+                )
+                self.assertTrue(info.css_file.resolve().is_relative_to(templates_root))
+                if info.preview_file is not None:
+                    self.assertTrue(
+                        info.preview_file.resolve().is_relative_to(preview_root)
+                    )
 
 
 if __name__ == "__main__":

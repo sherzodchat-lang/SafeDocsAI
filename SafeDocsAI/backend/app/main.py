@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -59,6 +60,35 @@ async def lifespan(_app: FastAPI):
         raise RuntimeError(
             f"ChromaDB is unreachable at {settings.CHROMA_HOST}:{settings.CHROMA_PORT}: "
             f"{chroma_error}. Refusing to start."
+        )
+
+    # Презентации печатает headless Chrome, и это внешний бинарник: его может
+    # не быть на машине вовсе. Спрашиваем об этом на старте, а не на заказе
+    # пользователя — иначе о том, что пакет не доехал, мы узнаём через минуту
+    # ожидания в чужом браузере.
+    #
+    # Отсутствие Chrome старт НЕ роняет. Сломан один сценарий из полутора
+    # десятков, а отказ на старте отобрал бы и админ-панель, и логи — то есть
+    # ровно те инструменты, которыми этот стенд чинят. Заказы отклонит слой
+    # API, спросив chromium_status(); здесь достаточно ERROR в журнале. Тот же
+    # довод, что и у незаданной embedding-модели выше.
+    #
+    # Реестр шаблонов прогревается здесь же и в отдельном потоке: он парсит
+    # Jinja, делает смоук-рендер каждого дизайна и запускает Chrome за превью.
+    # В event loop это остановило бы процесс целиком, а на первом HTTP-запросе
+    # оплачивал бы всю эту работу первый попавшийся пользователь.
+    from app.modules.presentations.chromium import log_chromium_state
+    from app.modules.presentations.templates import template_registry
+
+    _app.state.chromium = log_chromium_state()
+    try:
+        await asyncio.to_thread(template_registry.warm_up)
+    except Exception as exc:  # noqa: BLE001
+        # Реестр отбраковывает битые шаблоны сам и наружу ничем не кидает;
+        # сюда мы попадём только на чём-то непредвиденном (сбой файловой
+        # системы). Пустая галерея — плохо, невзлетевший бэкенд — хуже.
+        logger.error(
+            "Presentation template registry failed to warm up: %s", exc, exc_info=True
         )
 
     from app.modules.jobs.worker import IndexingWorker

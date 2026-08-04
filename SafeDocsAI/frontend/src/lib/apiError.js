@@ -159,6 +159,10 @@ const ERROR_CODE_KEYS = {
     'presentation.generation_in_progress': 'presentations.errors.generationInProgress',
     'presentation.not_ready': 'presentations.errors.notReady',
     'presentation.file_missing': 'presentations.errors.fileMissing',
+    // 503: на сервере нечем печатать — колоду собирает headless Chrome, а его
+    // может не быть вовсе. Отдельно от generation_failed: там повтор заказа
+    // осмыслен, здесь бесполезен, пока администратор не поставит браузер.
+    'presentation.renderer_unavailable': 'presentations.errors.rendererUnavailable',
     // 404 на чужую или несуществующую колоду. Свой код, а не source.not_found:
     // тот переводится как «источник не найден» — неверный текст на экране
     // презентаций.

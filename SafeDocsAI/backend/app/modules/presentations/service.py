@@ -86,7 +86,11 @@ from app.modules.presentations.prompts import (
     build_slide_messages,
     build_written_digest,
 )
-from app.modules.presentations.renderer import RenderedSource, render_presentation
+from app.modules.presentations.renderer import (
+    RenderError,
+    RenderedSource,
+    render_presentation,
+)
 from app.modules.rag.model_manager import ModelManager
 from app.services.profile_resolver import resolve_profile
 from app.services.rag_service import RAGService
@@ -464,6 +468,16 @@ class CallTimings:
     slide_calls: int = 0
     retries: int = 0
     unclassified: int = 0
+    # Длительность стадии рендера — ОТДЕЛЬНЫМ полем, а не ещё одним значением в
+    # durations. Это другая природа: вызовы модели измеряют скорость чат-модели
+    # (её меняют мышкой из админ-панели), а рендер — скорость внешнего
+    # браузера и диска. Смешав их, мы получили бы p50, который не описывает ни
+    # то, ни другое, и перестали бы замечать, что печать колоды поехала.
+    #
+    # None — не «ноль секунд», а «стадии не было»: джоба упала раньше. Разница
+    # важна ровно в тот момент, когда в строке ищут, где именно было потрачено
+    # время.
+    render_seconds: float | None = None
 
     def record(self, *, stage: str, attempt: int, seconds: float) -> None:
         self.durations.append(seconds)
@@ -502,10 +516,23 @@ class CallTimings:
         index = math.ceil(share * len(ordered)) - 1
         return ordered[min(max(index, 0), len(ordered) - 1)]
 
+    def render_summary(self) -> str:
+        """Хвост строки статистики про стадию рендера.
+
+        Печатается ВСЕГДА, в том числе словами «рендер не выполнялся». Пустое
+        место читалось бы как «рендер был мгновенным», а это ровно
+        противоположный вывод: у джобы, упавшей на девятом слайде, стадии
+        рендера не было вовсе, и по этому полю видно, что искать причину надо
+        выше.
+        """
+        if self.render_seconds is None:
+            return "рендер не выполнялся"
+        return f"рендер {self.render_seconds:.1f}с"
+
     def summary(self) -> str:
         """Одна строка: сколько вызовов, каких и как долго они шли."""
         if not self.durations:
-            return "вызовов модели 0"
+            return f"вызовов модели 0; {self.render_summary()}"
         counters = (
             f"план {self.plan_calls}, слайды {self.slide_calls}, "
             f"повторных {self.retries}"
@@ -524,6 +551,7 @@ class CallTimings:
             f"p90 {self.percentile(self.durations, 0.9):.1f}с, "
             f"max {max(self.durations):.1f}с, "
             f"суммарно {sum(self.durations):.1f}с"
+            f"; {self.render_summary()}"
         )
 
 
@@ -1133,6 +1161,7 @@ async def generate_presentation(
             template_key=presentation.template_key,
             notebook_name=notebook_name,
             created_at=presentation.created_at,
+            timings=timings,
         )
         await PresentationsService.mark_ready(
             session, presentation_id, file_path=file_path, file_size=file_size
@@ -1159,24 +1188,30 @@ async def _render_to_file(
     template_key: str,
     notebook_name: str,
     created_at: Any,
+    timings: CallTimings | None = None,
 ) -> tuple[str, int]:
     """Отрисовать колоду во временный файл и атомарно поставить его на место.
 
-    python-pptx синхронный: он распаковывает и пакует zip, и в event loop это
-    блокировка всего процесса — ровно тот дефект, который в проекте уже чинили
-    для ChromaDB. Отсюда run_in_threadpool.
+    Рендер СИНХРОННЫЙ и блокирующий: он ждёт внешний процесс — headless Chrome.
+    В event loop это остановка всего приложения, ровно тот дефект, который в
+    проекте уже чинили для ChromaDB и для прежнего python-pptx. Отсюда
+    run_in_threadpool; природа блокировки сменилась (было пакование zip, стало
+    ожидание subprocess), а вывод из неё тот же.
 
-    Рендер — такая же стадия, как вызов модели, и обёрнут тем же бюджетом:
-    зависнуть он может на записи файла (полный или отвалившийся том), и без
-    собственного таймаута эта беда ждала бы потолка джобы, то есть часами.
-    Оговорка честная: wait_for отменяет ОЖИДАНИЕ, а не поток — python-pptx
-    дописывает временный файл уже некому. Поэтому уборка ниже стоит в finally
-    и срабатывает в том числе на отменённом ожидании.
+    Бюджетов у стадии два, и они эшелонированы так же, как у вызова модели.
+    ПЕРВЫМ обязан сработать таймаут внутри рендерера (RENDER_PRINT_TIMEOUT): он
+    знает причину и, главное, убивает зависший браузер ГРУППОЙ процессов.
+    wait_for здесь — второй эшелон на LLM_CALL_TIMEOUT, то есть заведомо позже,
+    и он покрывает то, чего первый не видит по построению: зависание ВНЕ
+    браузера — раскладку страницы на отвалившемся томе, чтение шаблона с
+    мёртвого NFS. Оговорка прежняя и честная: wait_for отменяет ОЖИДАНИЕ, а не
+    поток, поэтому уборка ниже стоит в finally.
 
     Временный файл подчищается при любом исходе: без этого каждая неудачная
     генерация оставляла бы на диске мусор, который никто не ищет.
     """
     final_path, temp_path = _presentation_paths(presentation_id)
+    started = perf_counter()
     try:
         await asyncio.wait_for(
             run_in_threadpool(
@@ -1201,12 +1236,26 @@ async def _render_to_file(
         # Exception, и без этой ветки понятный «стадия не уложилась» превратился
         # бы в generation_failed с текстом «TimeoutError: ».
         raise timeout_error(STAGE_RENDER, LLM_CALL_TIMEOUT) from exc
+    except RenderError as exc:
+        # Текст рендерера уходит пользователю КАК ЕСТЬ, без обёртки с именем
+        # класса: он уже написан по-человечески и несёт хвост stderr браузера —
+        # единственную диагностику, которая объясняет, почему колода не
+        # напечаталась. «RenderError: ...» перед ней была бы шумом, вытесняющим
+        # эту диагностику из предела MAX_ERROR_TEXT.
+        raise PresentationGenerationError(
+            PresentationErrors.GENERATION_FAILED, str(exc)
+        ) from exc
     except Exception as exc:
         raise PresentationGenerationError(
             PresentationErrors.GENERATION_FAILED,
             f"Не удалось собрать файл презентации: {type(exc).__name__}: {exc}",
         ) from exc
     finally:
+        # Длительность записывается при ЛЮБОМ исходе, как и у вызовов модели:
+        # у снятой по таймауту стадии она равна потолку, и ровное число в логе —
+        # единственное, по чему видно, что сработал именно он.
+        if timings is not None:
+            timings.render_seconds = perf_counter() - started
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)

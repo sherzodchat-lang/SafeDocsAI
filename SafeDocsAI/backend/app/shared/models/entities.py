@@ -198,7 +198,10 @@ class PresentationBase(SQLModel):
     # для человека — ровно та же пара, что у document.error_code/error_text.
     error_code: Optional[str] = None
     error_text: Optional[str] = None
-    # Заполняются только у status='ready': путь к .pptx на диске и его размер.
+    # Заполняются только у status='ready': путь к файлу колоды на диске и его
+    # размер. Расширение из пути не выводится и здесь не закреплено: новые
+    # колоды печатает Chrome в .pdf, а собранные прежним рендерером .pptx
+    # остаются на диске и обязаны скачиваться ровно как прежде.
     file_path: Optional[str] = None
     file_size: Optional[int] = None
 

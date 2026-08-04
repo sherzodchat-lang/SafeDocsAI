@@ -1,0 +1,103 @@
+{# lang берётся из html_lang, а не из language: внутренний код проекта "tj"
+   не существует в BCP-47, таджикский там "tg". Атрибут стоит один раз на
+   документе — секции наследуют его. #}
+<html lang="{{ html_lang }}">
+<meta charset="utf-8">
+<title>{{ title }}</title>
+<link rel="stylesheet" href="styles.css">
+
+{# --- 1. Титульный ------------------------------------------------------- #}
+<section class="slide slide--title">
+  {# В рейке — только машинные ASCII-подписи фиксированной длины: имя блокнота
+     здесь пришлось бы обрезать, а оно и так стоит ниже, в .specline. #}
+  <div class="rail rail--title">
+    <span class="rail-mark">{{ language|upper }}</span>
+  </div>
+  <div class="sheet">
+    <div class="crosshair crosshair--tl"></div>
+    <div class="crosshair crosshair--br"></div>
+    <div class="stamp">
+      <span class="stamp-row">{{ slides|length }}</span>
+    </div>
+    <div class="panel panel--title">
+      <h1 class="deck-title">{{ title }}</h1>
+      <div class="specline">
+        <span class="spec">{{ notebook_name }}</span>
+        <span class="spec">{{ generated_on }}</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+{# --- 2. Содержательные -------------------------------------------------- #}
+{% for slide in slides %}
+<section class="slide slide--content">
+  <div class="rail">
+    <span class="rail-num">{{ "%02d"|format(slide.index) }}</span>
+  </div>
+  <div class="sheet">
+    <h2 class="slide-heading">{{ slide.heading }}</h2>
+    <div class="underscore"></div>
+    <ul class="bullets panel">
+      {% for bullet in slide.bullets %}
+      <li class="bullet">
+        <span class="marker">{{ "%d.%02d"|format(slide.index, loop.index) }}</span>
+        <span class="bullet-text">{{ bullet }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    <footer class="slide-footer">
+      <span class="refs">
+        {% for citation in slide.citations %}<span class="ref">{{ citation }}</span>{% endfor %}
+      </span>
+      <span class="pager">{{ slide.index }}/{{ slides|length }}</span>
+    </footer>
+  </div>
+</section>
+{% endfor %}
+
+{# --- 3. Источники ------------------------------------------------------- #}
+<section class="slide slide--sources{% if sources_truncated > 0 %} is-truncated{% endif %}">
+  <div class="rail">
+    <span class="rail-num">&#167;</span>
+  </div>
+  <div class="sheet">
+    <h2 class="slide-heading">{{ strings.sources_heading }}</h2>
+    <div class="underscore"></div>
+    {# Контракт допускает до 18 источников (MAX_SOURCE_LINES в рендерере), а
+       слайд не прокручивается. Таблица не умеет CSS-колонок, поэтому список
+       делится пополам на две таблицы: выравнивание колонок сохраняется, а
+       ёмкость слайда удваивается. До шести источников вторая таблица пуста и
+       первая занимает всю ширину. #}
+    {% set half = 6 if sources|length <= 6 else (sources|length + 1) // 2 %}
+    <div class="sources-pair panel">
+      <table class="sources">
+        {% for source in sources[:half] %}
+        <tr class="source">
+          <td class="source-label">{{ source.label }}</td>
+          <td class="source-name">{{ source.name }}</td>
+          <td class="source-pages">{{ source.pages_text }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% if sources|length > half %}
+      <table class="sources">
+        {% for source in sources[half:] %}
+        <tr class="source">
+          <td class="source-label">{{ source.label }}</td>
+          <td class="source-name">{{ source.name }}</td>
+          <td class="source-pages">{{ source.pages_text }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+    </div>
+    {# Хвост печатается ТОЛЬКО когда рендерер сам сообщил о недоборе. Таблица
+       приезжает уже подрезанной, и без этой строки лист молча выдавал бы
+       неполный перечень за полный. Текст пользовательский (кириллица), поэтому
+       моноширинный ASCII-сабсет сюда не подключается — только Noto Sans. #}
+    {% if sources_truncated > 0 %}
+    <p class="sources-more">{{ strings.sources_more.format(count=sources_truncated) }}</p>
+    {% endif %}
+  </div>
+</section>

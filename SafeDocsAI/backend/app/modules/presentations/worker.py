@@ -29,6 +29,8 @@ from app.modules.presentations.constants import (
     ERROR_BACKOFF_SECONDS,
     LLM_CALL_ATTEMPTS,
     LLM_CALL_TIMEOUT,
+    LLM_CALL_WATCHDOG_TIMEOUT,
+    LLM_RETRY_PAUSE_AFTER_TIMEOUT,
     POLL_INTERVAL_SECONDS,
     SLIDE_COUNT_MAX,
     STATUS_ERROR,
@@ -225,14 +227,34 @@ class PresentationWorker:
                 SLIDE_COUNT_MAX,
             )
         ceiling = presentation_job_timeout(slide_count)
+        calls = 1 + max(1, content_section_count(slide_count))
+        # Формула ПЕЧАТАЕТСЯ СЛОВАМИ, поэтому обязана сходиться с числом рядом:
+        # строка, в которой арифметика не бьётся, хуже отсутствия строки —
+        # по ней принимают решения о потолках, а она врёт с уверенным видом.
+        # Разъехалась она дважды, и оба раза молча:
+        #
+        #   * член вызовов стоял на LLM_CALL_TIMEOUT, тогда как настоящая
+        #     внешняя граница вызова — LLM_CALL_WATCHDOG_TIMEOUT (страховка
+        #     wait_for срабатывает позже клиента, и в худшем случае стадия
+        #     занимает именно её);
+        #   * паузы повторов в формулу вошли (LLM_RETRY_PAUSE_AFTER_TIMEOUT), а
+        #     в строку — нет.
+        #
+        # Член рендера остаётся на LLM_CALL_TIMEOUT: это ВНЕШНЯЯ граница стадии
+        # печати (внутри неё браузер ограничен меньшим RENDER_PRINT_TIMEOUT),
+        # и в потолок джобы входит именно она.
         logger.info(
             "Presentation %s: старт, слайдов %s -> вызовов модели %s "
-            "× попыток %s × %sс + рендер %sс = потолок джобы %.0fс",
+            "× попыток %s × %sс + паузы повторов %s × %s × %sс "
+            "+ рендер %sс = потолок джобы %.0fс",
             presentation_id,
             slide_count,
-            1 + max(1, content_section_count(slide_count)),
+            calls,
             LLM_CALL_ATTEMPTS,
-            LLM_CALL_TIMEOUT,
+            LLM_CALL_WATCHDOG_TIMEOUT,
+            calls,
+            LLM_CALL_ATTEMPTS - 1,
+            LLM_RETRY_PAUSE_AFTER_TIMEOUT,
             LLM_CALL_TIMEOUT,
             ceiling,
         )
@@ -241,7 +263,13 @@ class PresentationWorker:
     def _log_call_stats(
         self, presentation_id: int, timings: CallTimings, ceiling: float
     ) -> None:
-        """Одна строка о том, сколько шли вызовы модели этой джобы.
+        """Одна строка о том, сколько шли вызовы модели и рендер этой джобы.
+
+        Рендер стоит в ней отдельным полем, потому что с переходом на печать
+        браузером он перестал быть мгновенным: это внешний процесс, который
+        грузит шрифты, верстает страницу и пишет PDF. Без своего поля его время
+        либо растворилось бы в общем «суммарно», либо стало бы известно только
+        по разнице между суммой вызовов и длительностью джобы — то есть никак.
 
         Смысл тот же, что у стартовой строки про embedding-коллекцию
         (`embedding_model=X -> коллекция Y, векторов N`, chroma_gateway.py):
