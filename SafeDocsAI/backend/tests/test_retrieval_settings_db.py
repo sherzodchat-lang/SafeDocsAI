@@ -18,6 +18,12 @@
    ключ начнёт зависеть от чего-то лишнего, кэш перестанет попадать на
    повторе одинакового запроса, и это тоже падение.
 
+   Тот же кэш и порог релевантности (relevance_distance_threshold). Порог
+   решает, какие фрагменты вообще считаются относящимися к вопросу, то есть
+   меняет САМ СОСТАВ выдачи, — а правят его ровно тогда, когда ассистент
+   ответил «данных нет», и проверяют повтором того же вопроса. Не попади он в
+   ключ — повтор пришёл бы из кэша с прежним составом.
+
 2. enable_condense_query и POST /chat/retrieve.
 
    Панель разбора запроса конденсировала запрос безусловно, то есть с
@@ -57,6 +63,7 @@ from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 from app.modules.ask.schemas import AskRequest  # noqa: E402
 from app.modules.ask.service import handle_ask_request  # noqa: E402
 from app.modules.chat.schemas import ChatRequest, RetrievalRequest  # noqa: E402
+from app.modules.chat import service as chat_service  # noqa: E402
 from app.modules.chat.service import (  # noqa: E402
     _RETRIEVAL_CACHE,
     _retrieval_cache_key,
@@ -111,6 +118,13 @@ class CacheKeyCompositionTests(unittest.TestCase):
         self.assertNotEqual(
             self.key(embedding_model="nomic-embed-text"),
             self.key(embedding_model="bge-m3"),
+        )
+
+    def test_relevance_threshold_changes_key(self):
+        """Порог решает состав выдачи, а не только её порядок."""
+        self.assertNotEqual(
+            self.key(relevance_distance_threshold=1.0),
+            self.key(relevance_distance_threshold=1.3),
         )
 
     def test_reranker_model_changes_key(self):
@@ -312,6 +326,44 @@ class RerankerToggleTests(DatabaseBackedTestCase):
             len(self.search.calls),
             calls_before,
             "смена модели эмбеддингов меняет коллекцию, кэш обязан промахнуться",
+        )
+
+    async def test_saved_threshold_reaches_the_relevance_filter(self):
+        """Порог берётся из настроек В МОМЕНТ ЗАПРОСА, а не с импорта модуля.
+
+        Раньше он приезжал в rerank_retrieval_candidates умолчанием параметра —
+        модульной константой RELEVANCE_DISTANCE_THRESHOLD, замороженной при
+        импорте: правка в админ-панели не действовала бы до перезапуска
+        процесса. Смотрим на то, с чем фильтр реально зовут.
+        """
+        captured: list[float] = []
+        original = chat_service.rerank_retrieval_candidates
+
+        def spy(candidates, **kwargs):
+            captured.append(kwargs["distance_threshold"])
+            return original(candidates, **kwargs)
+
+        with patch.object(chat_service, "rerank_retrieval_candidates", spy):
+            await self.retrieve(relevance_distance_threshold=1.25)
+
+        self.assertEqual(captured, [1.25])
+
+    async def test_threshold_change_is_visible_immediately(self):
+        """Настройку правят ровно после «ответа нет» и проверяют тем же вопросом.
+
+        Попади повтор в кэш — админ увидел бы прежний ответ и вернул порог
+        обратно, решив, что настройка не работает. Ровно этот сценарий раздел
+        уже проходил с reranker_enabled.
+        """
+        await self.retrieve(relevance_distance_threshold=1.0)
+        calls_before = len(self.search.calls)
+
+        await self.retrieve(relevance_distance_threshold=1.3)
+
+        self.assertGreater(
+            len(self.search.calls),
+            calls_before,
+            "выдача взята из кэша: порог релевантности не попал в ключ",
         )
 
     async def test_other_profile_does_not_reuse_cached_result(self):

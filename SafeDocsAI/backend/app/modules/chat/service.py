@@ -27,6 +27,7 @@ from app.modules.rag.constants import DEFAULT_CHAT_MODEL
 from app.services.profile_resolver import resolve_profile
 from app.services.rag_service import RAGService, RELEVANCE_DISTANCE_THRESHOLD
 from app.services.runtime_settings_service import RuntimeSettingsService
+from app.shared.settings import setting_limits
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +94,24 @@ class StreamChatPreparation:
 #                      что цена ошибки несимметрична: лишнее — один пересчёт
 #                      выдачи после правки поля, недостающее — те же пять
 #                      минут, в которые админ-панель показывает прежнюю выдачу
-#                      и настройка выглядит сломанной.
+#                      и настройка выглядит сломанной;
+#   relevance_distance_threshold
+#                    — максимальное расстояние, при котором фрагмент проходит
+#                      отбор (rerank_retrieval_candidates), то есть настройка
+#                      меняет САМ СОСТАВ выдачи, а не только порядок. Правят её
+#                      ровно в ответ на «ответа нет» и проверяют повтором того
+#                      же вопроса — то есть попадают в кэш точнее всех
+#                      остальных.
 #
 # retrieval_top_k и top_k сюда НЕ входят: в ключе уже есть limits, и это те же
 # значения после resolve_retrieval_limits — с учётом переопределения из
 # запроса, которого в самих настройках не видно.
-_RETRIEVAL_SETTING_KEYS = ("embedding_model", "reranker_enabled", "reranker_model")
+_RETRIEVAL_SETTING_KEYS = (
+    "embedding_model",
+    "reranker_enabled",
+    "reranker_model",
+    "relevance_distance_threshold",
+)
 
 
 def _retrieval_settings_digest(runtime_settings: dict[str, Any] | None) -> str:
@@ -792,6 +805,28 @@ def resolve_retrieval_limits(
     return retrieval_top_k, final_top_k
 
 
+def resolve_relevance_distance_threshold(runtime_settings: dict[str, Any]) -> float:
+    """Порог релевантности для этого запроса — из настроек, а не из константы.
+
+    Раньше порог приезжал сюда параметром по умолчанию
+    (RELEVANCE_DISTANCE_THRESHOLD), то есть замерзал на импорте модуля: правка
+    в админ-панели не действовала бы до перезапуска процесса. Читается он там
+    же и тогда же, где reranker_enabled, — из снимка настроек, взятого в начале
+    run_hybrid_retrieval.
+
+    Кламп — как у resolve_retrieval_limits: значение из файла настроек могли
+    править руками, и поиск обязан отработать на чём угодно. Границы берутся из
+    SETTING_LIMITS, а не выписаны числами: разойдись они с сервером, сохранённая
+    настройка перестала бы что-либо значить, а жалоба пришла бы на качество
+    ответов.
+    """
+    limits = setting_limits("relevance_distance_threshold")
+    value = safe_float(runtime_settings.get("relevance_distance_threshold"))
+    if value is None:
+        return RELEVANCE_DISTANCE_THRESHOLD
+    return max(limits.min, min(value, limits.max))
+
+
 def safe_int(
     value: Any, default: int, min_value: int | None = None, max_value: int | None = None
 ) -> int:
@@ -849,6 +884,11 @@ def rerank_retrieval_candidates(
     candidates: list[dict[str, Any]],
     query_text: str,
     final_top_k: int,
+    # Умолчание — запасное значение для вызывающих без настроек (отладочные
+    # скрипты, тесты чистой функции). Живой путь порог ПЕРЕДАЁТ: см.
+    # resolve_relevance_distance_threshold и его вызов в run_hybrid_retrieval.
+    # Оставь его умолчанием — и настройка из админ-панели не действовала бы до
+    # перезапуска процесса.
     distance_threshold: float = RELEVANCE_DISTANCE_THRESHOLD,
 ) -> list[dict[str, Any]]:
     if not candidates:
@@ -1112,10 +1152,14 @@ async def run_hybrid_retrieval(
     heuristic_top_k = (
         max(final_top_k, RERANKER_CANDIDATE_POOL) if reranker_enabled else final_top_k
     )
+    # Порог передаётся явно, а не остаётся умолчанием параметра: умолчание —
+    # это модульная константа, замороженная на импорте, и правка настройки не
+    # доехала бы сюда без перезапуска.
     final_chunks = rerank_retrieval_candidates(
         fused_candidates,
         query_text=search_query,
         final_top_k=heuristic_top_k,
+        distance_threshold=resolve_relevance_distance_threshold(runtime_settings),
     )
 
     if not final_chunks and not scope_is_empty:

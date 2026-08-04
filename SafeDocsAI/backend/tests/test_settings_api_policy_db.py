@@ -222,6 +222,8 @@ class UnknownKeysTests(SettingsApiTestCase):
             "contextual_embedding_enabled",
             "reranker_enabled",
             "top_k",
+            "retrieval_top_k",
+            "relevance_distance_threshold",
             "chat_model_num_ctx",
             "contextual_embedding_num_ctx",
             "confirm_reindex",
@@ -244,6 +246,8 @@ class UnknownKeysTests(SettingsApiTestCase):
                 "contextual_embedding_enabled": True,
                 "reranker_enabled": False,
                 "top_k": 5,
+                "retrieval_top_k": 20,
+                "relevance_distance_threshold": 1.2,
                 "chat_model_num_ctx": 20000,
                 "contextual_embedding_num_ctx": 8192,
                 "confirm_reindex": True,
@@ -318,6 +322,13 @@ class RefusalCodesTests(SettingsApiTestCase):
             ("top_k", 21, 1, 20),
             ("retrieval_top_k", 0, 1, 50),
             ("retrieval_top_k", 51, 1, 50),
+            # Порог релевантности — дробное поле, и политика у него та же:
+            # диапазон держит слой настроек и отвечает своим кодом, а не
+            # Pydantic своим 422. Ноль здесь особенно важен: с ним ни один
+            # фрагмент не считался бы релевантным, то есть поиск отвечал бы
+            # пустотой на всё подряд.
+            ("relevance_distance_threshold", 0, 0.2, 2.0),
+            ("relevance_distance_threshold", 2.5, 0.2, 2.0),
         )
         for field, value, minimum, maximum in cases:
             with self.subTest(field=field, value=value):
@@ -349,6 +360,11 @@ class RefusalCodesTests(SettingsApiTestCase):
             ("top_k", 20),
             ("retrieval_top_k", 1),
             ("retrieval_top_k", 50),
+            ("relevance_distance_threshold", 0.2),
+            # Рабочий ориентир для корпуса на другом языке, чем вопросы: с ним
+            # и заводилась настройка.
+            ("relevance_distance_threshold", 1.25),
+            ("relevance_distance_threshold", 2.0),
         ):
             with self.subTest(field=field, value=value):
                 response = await self.client.put(SETTINGS, json={field: value})

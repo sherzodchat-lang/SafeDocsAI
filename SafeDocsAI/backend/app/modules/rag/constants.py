@@ -1,4 +1,5 @@
 from app.shared.settings.config import settings
+from app.shared.settings.runtime_settings import RuntimeSettingsService
 
 from app.modules.rag.chunker_config import (  # noqa: F401  (re-export)
     CHUNKER_TARGET_TOKENS,
@@ -33,4 +34,24 @@ MULTILINGUAL_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
 # пересоздания коллекции с переиндексацией: hnsw:space существующей коллекции
 # get_or_create не меняет.
 COLLECTION_DISTANCE_SPACE = "l2"
-RELEVANCE_DISTANCE_THRESHOLD = 1.0
+
+# Порог релевантности — УМОЛЧАНИЕ одноимённой runtime-настройки, а не зашитая
+# величина.
+#
+# Числом 1.0 он здесь и стоял, и подобрано оно было на одноязычном русском
+# корпусе: межъязыкового штрафа порог не учитывал, и русский вопрос к
+# таджикскому документу отсекался, отстав от порога на шесть сотых, — хотя
+# нужный документ поиск находил. Поменять это можно было только правкой кода,
+# поэтому порог переехал в runtime-настройки
+# (relevance_distance_threshold, см. app/shared/settings/runtime_settings.py:
+# там же обоснованы его границы).
+#
+# Значение читается из DEFAULTS, а не выписано вторым числом: разъехавшись, эти
+# две копии дали бы «умолчание в админке одно, а поиск работает по другому».
+# Читается один раз на импорте — и этого достаточно: живой потребитель
+# (run_hybrid_retrieval в app/modules/chat/service.py) берёт порог из
+# RuntimeSettingsService.get_settings() на каждый запрос, а здесь остаётся
+# только запасное значение для чистых помощников, которым настроек не передали.
+RELEVANCE_DISTANCE_THRESHOLD = RuntimeSettingsService.DEFAULTS[
+    "relevance_distance_threshold"
+]

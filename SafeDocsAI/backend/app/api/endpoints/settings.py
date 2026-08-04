@@ -85,6 +85,11 @@ class RuntimeSettingsResponse(BaseModel):
     enable_condense_query: bool
     retrieval_top_k: int = _bounded("retrieval_top_k")
     top_k: int = _bounded("top_k")
+    # Дробное поле — единственное числовое, у которого шаг меньше единицы имеет
+    # смысл: рабочая разница между «отсекает верное» и «тащит мусор» здесь
+    # измеряется сотыми (зафиксированный случай — верный документ на 1.0638 при
+    # пороге 1.0). Границы приходят из того же SETTING_LIMITS, что и у целых.
+    relevance_distance_threshold: float = _bounded("relevance_distance_threshold")
     default_domain_profile: str
     available_models: list[str]
     available_chat_models: list[str]
@@ -139,6 +144,12 @@ class RuntimeSettingsUpdate(BaseModel):
     # выберет наугад.
     retrieval_top_k: int | None = None
     top_k: int | None = None
+    # Та же политика, что у соседей: диапазон держит RuntimeSettingsService
+    # (_require_float_in_range) и отвечает settings.value_out_of_range, а не
+    # Pydantic своим 422 без машинного кода. Тип float здесь всё же значим —
+    # им отличается «дробное принимается» от целых полей, где 1.25 отвергается
+    # как не целое.
+    relevance_distance_threshold: float | None = None
     default_domain_profile: str | None = None
     contextual_embedding_enabled: bool | None = None
     contextual_embedding_model: str | None = None
@@ -238,6 +249,11 @@ def _settings_response(values: dict[str, Any]) -> RuntimeSettingsResponse:
         enable_condense_query=values["enable_condense_query"],
         retrieval_top_k=values["retrieval_top_k"],
         top_k=values["top_k"],
+        # Через _setting, а не по прямому ключу: настройка младше остальных, и
+        # словарь без неё может прийти откуда угодно (тест, скрипт, чужой
+        # вызов сборщика). KeyError здесь гасит экран настроек целиком — см.
+        # docstring выше.
+        relevance_distance_threshold=_setting(values, "relevance_distance_threshold"),
         default_domain_profile=values["default_domain_profile"],
         available_models=model_catalog["available_models"],
         available_chat_models=model_catalog["available_chat_models"],

@@ -75,7 +75,17 @@ const BOOLEAN_FIELDS = ['enable_condense_query', 'contextual_embedding_enabled',
 // Числовые поля держатся в состоянии СТРОКАМИ. Number(event.target.value) на
 // каждый ввод превращал очищенное поле в видимый 0, а на сервер уходило совсем
 // другое (Number(x) || 10), то есть показанное и отправленное расходились.
-const NUMBER_FIELDS = ['retrieval_top_k', 'top_k', 'chat_model_num_ctx', 'contextual_embedding_num_ctx'];
+// relevance_distance_threshold — единственное здесь ДРОБНОЕ: остальные поля
+// целые, и общая проверка требует Number.isInteger. Признак живёт в
+// NUMBER_FIELD_RANGES (integer: false), рядом с границами поля, — вторым
+// списком имён он бы с этим списком разъехался.
+const NUMBER_FIELDS = [
+    'retrieval_top_k',
+    'top_k',
+    'relevance_distance_threshold',
+    'chat_model_num_ctx',
+    'contextual_embedding_num_ctx',
+];
 
 // Границы числовых полей — ЗЕРКАЛО серверных.
 //
@@ -107,6 +117,17 @@ const MAX_RETRIEVAL_TOP_K = 50;
 const MIN_TOP_K = 1;
 const MAX_TOP_K = 20;
 
+// Порог релевантности — максимальное расстояние, при котором фрагмент ещё
+// считается подходящим. Шкала — квадрат евклидова расстояния на нормированных
+// векторах, то есть 2 * (1 - cos): 1.0 — косинусная близость 0.5, 2.0 —
+// ортогональные векторы. Отсюда и границы: выше 2.0 порог не отсекал бы уже
+// ничего, ниже 0.2 (близость 0.9) не проходил бы даже верный фрагмент.
+// Единственное дробное поле формы — шаг 0.05: разница между «отсекает верное» и
+// «тащит мусор» измеряется здесь сотыми.
+const MIN_RELEVANCE_DISTANCE_THRESHOLD = 0.2;
+const MAX_RELEVANCE_DISTANCE_THRESHOLD = 2.0;
+const RELEVANCE_DISTANCE_THRESHOLD_STEP = 0.05;
+
 /**
  * Диапазоны числовых полей ровно те, что проверяет сервер при ЗАПИСИ.
  *
@@ -127,6 +148,15 @@ const NUMBER_FIELD_RANGES = {
         messageKey: 'settings.retrievalTopKRange',
     },
     top_k: { min: MIN_TOP_K, max: MAX_TOP_K, messageKey: 'settings.topKRange' },
+    // integer: false — единственное дробное поле. Признак стоит здесь, а не
+    // отдельным списком имён: границы и вид числа описывают одно и то же поле,
+    // и разъехаться им нельзя.
+    relevance_distance_threshold: {
+        min: MIN_RELEVANCE_DISTANCE_THRESHOLD,
+        max: MAX_RELEVANCE_DISTANCE_THRESHOLD,
+        integer: false,
+        messageKey: 'settings.relevanceThresholdRange',
+    },
     chat_model_num_ctx: { min: MIN_NUM_CTX, max: MAX_NUM_CTX, messageKey: 'settings.numCtxRange' },
     contextual_embedding_num_ctx: { min: MIN_NUM_CTX, max: MAX_NUM_CTX, messageKey: 'settings.numCtxRange' },
 };
@@ -141,6 +171,7 @@ const DEFAULT_FORM_VALUES = {
     reranker_enabled: false,
     retrieval_top_k: '20',
     top_k: '10',
+    relevance_distance_threshold: '1',
     default_domain_profile: '',
     chat_model_num_ctx: '20000',
     contextual_embedding_num_ctx: '8192',
@@ -180,6 +211,10 @@ const toFormValues = (data = {}) => ({
     reranker_enabled: Boolean(data.reranker_enabled),
     retrieval_top_k: toNumberField(data.retrieval_top_k, DEFAULT_FORM_VALUES.retrieval_top_k),
     top_k: toNumberField(data.top_k, DEFAULT_FORM_VALUES.top_k),
+    relevance_distance_threshold: toNumberField(
+        data.relevance_distance_threshold,
+        DEFAULT_FORM_VALUES.relevance_distance_threshold,
+    ),
     default_domain_profile: String(data.default_domain_profile || ''),
     chat_model_num_ctx: toNumberField(data.chat_model_num_ctx, DEFAULT_FORM_VALUES.chat_model_num_ctx),
     contextual_embedding_num_ctx: toNumberField(
@@ -217,13 +252,21 @@ const validateNumberField = (field, rawValue) => {
     const value = String(rawValue ?? '').trim();
     if (!value) return 'settings.numberRequired';
 
+    const range = NUMBER_FIELD_RANGES[field];
     const number = Number(value);
-    if (!Number.isInteger(number)) return 'settings.numberInvalid';
+    // Целое требуется от всех полей, кроме помеченных integer: false. Проверка
+    // идёт по признаку поля, а не по одному правилу на всех: до появления
+    // дробного порога здесь стояло безусловное Number.isInteger, и оно
+    // отвергало бы 1.25 — то самое значение, ради которого настройку и завели.
+    // Числом при этом обязано быть любое: Number('abc') — NaN, Number('1e999') —
+    // Infinity, и оба уехали бы на сервер как «значение».
+    const requiresInteger = range ? range.integer !== false : true;
+    if (requiresInteger && !Number.isInteger(number)) return 'settings.numberInvalid';
+    if (!requiresInteger && !Number.isFinite(number)) return 'settings.numberInvalidDecimal';
 
     // Тот же диапазон проверяет и сервер, но подсказка у поля появляется до
     // отправки: упереться в границу заранее полезнее, чем узнать о ней из
     // отказа, потеряв на этом запрос.
-    const range = NUMBER_FIELD_RANGES[field];
     if (range && (number < range.min || number > range.max)) return range.messageKey;
 
     return '';
@@ -1172,6 +1215,35 @@ const SettingsPage = () => {
                                     <p className="mt-1 text-xs font-semibold text-red-600">{t(fieldErrors.top_k)}</p>
                                 )}
                                 <p className="mt-2 text-xs text-slate-500">{t('settings.topKHint')}</p>
+                            </div>
+
+                            {/* Третье звено того же конвейера: пул отобран,
+                                фрагменты отранжированы — порог решает, какие из
+                                них вообще считаются относящимися к вопросу.
+                                Стоит здесь, а не в блоке реранкера, потому что
+                                действует на выдачу независимо от него. */}
+                            <div>
+                                <label className="mb-2 block text-sm font-semibold text-slate-700" htmlFor="settings-relevance-threshold">
+                                    {t('settings.relevanceThreshold')}
+                                </label>
+                                <input
+                                    id="settings-relevance-threshold"
+                                    type="number"
+                                    min={MIN_RELEVANCE_DISTANCE_THRESHOLD}
+                                    max={MAX_RELEVANCE_DISTANCE_THRESHOLD}
+                                    step={RELEVANCE_DISTANCE_THRESHOLD_STEP}
+                                    value={formValues.relevance_distance_threshold}
+                                    onChange={(event) => setField('relevance_distance_threshold', event.target.value)}
+                                    aria-invalid={Boolean(fieldErrors.relevance_distance_threshold)}
+                                    className={`${NUMBER_INPUT_CLASS} w-32`}
+                                />
+                                {fieldErrors.relevance_distance_threshold && (
+                                    <p className="mt-1 text-xs font-semibold text-red-600">
+                                        {t(fieldErrors.relevance_distance_threshold)}
+                                    </p>
+                                )}
+                                <p className="mt-2 text-xs text-slate-500">{t('settings.relevanceThresholdHint')}</p>
+                                <p className="mt-1 text-xs text-slate-500">{t('settings.relevanceThresholdCrossLingualHint')}</p>
                             </div>
                         </div>
 

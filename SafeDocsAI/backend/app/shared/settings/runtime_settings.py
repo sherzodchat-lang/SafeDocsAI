@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -126,12 +127,59 @@ _MODEL_WORD_RE = re.compile(r"[^a-z0-9]+")
 MIN_NUM_CTX = 2048
 MAX_NUM_CTX = 32768
 
+# Границы порога релевантности (relevance_distance_threshold) — максимального
+# расстояния, при котором найденный фрагмент ещё считается относящимся к
+# вопросу.
+#
+# Шкала. Коллекция ChromaDB создана с hnsw:space="l2"
+# (COLLECTION_DISTANCE_SPACE в app/modules/rag/constants.py), а Ollama отдаёт
+# L2-нормированные эмбеддинги, поэтому chroma-шный "l2" (КВАДРАТ евклидова
+# расстояния) на них равен ровно 2 * (1 - cos). То есть d = 0 — совпадение,
+# d = 1.0 — косинусная близость 0.5, d = 2.0 — ортогональные векторы, d > 2.0 —
+# отрицательная близость. Умолчание 1.0 подбиралось на одноязычном русском
+# корпусе и межъязыкового штрафа не учитывает: русский вопрос к таджикскому
+# документу даёт верному фрагменту расстояние около 1.06, и порог 1.0 отсекал
+# ровно тот документ, который поиск нашёл. Отсюда и настройка: для корпуса на
+# другом языке, чем вопросы, порог поднимают (рабочий ориентир 1.2-1.3).
+#
+# Верх 2.0 — там, где фильтр перестаёт быть фильтром: при 2.0 проходит всё, что
+# не противоположно вопросу по смыслу, и в контекст модели едет случайный текст
+# вместо честного «в документах этого нет». Выше 2.0 порог не значил бы уже
+# ничего вовсе.
+#
+# Низ 0.2 — косинусная близость 0.9, то есть почти дословный повтор вопроса.
+# Ниже не проходит даже верный фрагмент на языке вопроса, и настройка
+# превращалась бы в «выключить поиск» — с той разницей, что выглядело бы это как
+# неисправность поиска, а не как выбранное значение.
+MIN_RELEVANCE_DISTANCE_THRESHOLD = 0.2
+MAX_RELEVANCE_DISTANCE_THRESHOLD = 2.0
+
 
 class IntRange(NamedTuple):
-    """Границы числовой настройки, включительно с обоих концов."""
+    """Границы целочисленной настройки, включительно с обоих концов."""
 
     min: int
     max: int
+
+
+class FloatRange(NamedTuple):
+    """Границы дробной настройки, включительно с обоих концов.
+
+    Отдельный тип, а не IntRange с числами float внутри: по нему помощники и
+    отличают дробное поле от целого. Целочисленные пути разбирают значение через
+    int(), и порог 1.25, попав в них по недосмотру, стал бы 1.0 — молча и ровно
+    в том месте, ради которого настройка и заводилась.
+    """
+
+    min: float
+    max: float
+
+
+# Границы настройки — любые, целые или дробные. Отличать их приходится только
+# помощникам разбора (см. _int_limits/_float_limits); всем остальным — схеме
+# ответа, тестам, клиентскому зеркалу — достаточно полей .min и .max, общих у
+# обоих типов.
+NumberRange = IntRange | FloatRange
 
 
 # Границы числовых настроек — из ОДНОГО места, как и умолчания в DEFAULTS.
@@ -155,15 +203,18 @@ class IntRange(NamedTuple):
 # Обе настройки окна контекста ссылаются на одни и те же константы, а не
 # повторяют числа: ограничение у них общее — это память под KV-кэш на том же
 # железе.
-SETTING_LIMITS: dict[str, IntRange] = {
+SETTING_LIMITS: dict[str, NumberRange] = {
     "retrieval_top_k": IntRange(1, 50),
     "top_k": IntRange(1, 20),
     "chat_model_num_ctx": IntRange(MIN_NUM_CTX, MAX_NUM_CTX),
     "contextual_embedding_num_ctx": IntRange(MIN_NUM_CTX, MAX_NUM_CTX),
+    "relevance_distance_threshold": FloatRange(
+        MIN_RELEVANCE_DISTANCE_THRESHOLD, MAX_RELEVANCE_DISTANCE_THRESHOLD
+    ),
 }
 
 
-def setting_limits(field: str) -> IntRange:
+def setting_limits(field: str) -> NumberRange:
     """Границы числовой настройки. Источник один — SETTING_LIMITS.
 
     Незнакомое имя поля — KeyError, и это намеренно: числовое поле без границ
@@ -171,6 +222,33 @@ def setting_limits(field: str) -> IntRange:
     выдуманные.
     """
     return SETTING_LIMITS[field]
+
+
+# Границы с проверкой вида поля. Нужны ровно помощникам разбора: у целых и
+# дробных настроек разные пути и в чтении, и в записи, и указать целочисленный
+# путь на дробное поле — значит потерять дробную часть без единого признака
+# ошибки. Отказ громкий (TypeError, а не SettingsError): это не негодное
+# значение от админа, а ошибка в коде, и лечится она правкой вызова.
+
+
+def _int_limits(field: str) -> IntRange:
+    limits = setting_limits(field)
+    if not isinstance(limits, IntRange):
+        raise TypeError(
+            f"{field} is a fractional setting ({type(limits).__name__}): use the "
+            f"float helpers, int() would silently drop its fractional part"
+        )
+    return limits
+
+
+def _float_limits(field: str) -> FloatRange:
+    limits = setting_limits(field)
+    if not isinstance(limits, FloatRange):
+        raise TypeError(
+            f"{field} is a whole-number setting ({type(limits).__name__}): use the "
+            f"int helpers, otherwise it would start accepting fractional values"
+        )
+    return limits
 
 
 # Слова, которые считаются логическим значением. Общие у снисходительного
@@ -197,6 +275,13 @@ class RuntimeSettingsService:
         "embedding_model": "",
         "retrieval_top_k": 20,
         "top_k": 5,
+        # Максимальное расстояние, при котором фрагмент ещё считается
+        # релевантным. 1.0 — то самое значение, которым порог был зашит
+        # константой (RELEVANCE_DISTANCE_THRESHOLD в
+        # app/modules/rag/constants.py, теперь оно читается отсюда), поэтому
+        # система без файла настроек ведёт себя ровно как раньше. Обоснование
+        # границ — у MIN/MAX_RELEVANCE_DISTANCE_THRESHOLD выше.
+        "relevance_distance_threshold": 1.0,
         "default_domain_profile": "tax",
         "enable_condense_query": True,
         "contextual_embedding_enabled": False,
@@ -496,6 +581,11 @@ class RuntimeSettingsService:
             merged.get("retrieval_top_k")
         )
         merged["top_k"] = cls._normalize_top_k(merged.get("top_k"))
+        merged["relevance_distance_threshold"] = (
+            cls._normalize_relevance_distance_threshold(
+                merged.get("relevance_distance_threshold")
+            )
+        )
         merged["enable_condense_query"] = cls._normalize_bool(
             merged.get("enable_condense_query"), default=True, field="enable_condense_query"
         )
@@ -620,6 +710,10 @@ class RuntimeSettingsService:
             )
         if "top_k" in patch:
             current["top_k"] = cls._require_int_in_range(patch["top_k"], "top_k")
+        if "relevance_distance_threshold" in patch:
+            current["relevance_distance_threshold"] = cls._require_float_in_range(
+                patch["relevance_distance_threshold"], "relevance_distance_threshold"
+            )
         if "default_domain_profile" in patch:
             current["default_domain_profile"] = cls._require_domain_profile(
                 patch["default_domain_profile"]
@@ -885,6 +979,10 @@ class RuntimeSettingsService:
         return cls._clamp_on_read(value, field)
 
     @classmethod
+    def _normalize_relevance_distance_threshold(cls, value: Any) -> float:
+        return cls._clamp_float_on_read(value, "relevance_distance_threshold")
+
+    @classmethod
     def _clamp_on_read(cls, value: Any, field: str) -> int:
         """Подрезать значение поля в его границы; негодное — заменить умолчанием.
 
@@ -893,12 +991,51 @@ class RuntimeSettingsService:
         и это была вторая копия и тех, и других.
         """
         default = cls.DEFAULTS[field]
-        minimum, maximum = setting_limits(field)
+        minimum, maximum = _int_limits(field)
         try:
             number = int(value)
         except (TypeError, ValueError):
             if value is not None:
                 cls._report_read_fallback(field, value, default)
+            return default
+        clamped = max(minimum, min(number, maximum))
+        if clamped != number:
+            cls._report_read_fallback(field, number, clamped)
+        return clamped
+
+    @classmethod
+    def _clamp_float_on_read(cls, value: Any, field: str) -> float:
+        """То же самое для дробной настройки.
+
+        Парный помощник, а не общий с целыми: разбор значения у них разный и
+        объединить его нечем. int() у порога 1.25 отрезал бы дробную часть и
+        вернул 1.0 — то есть чтение молча возвращало бы систему ровно к тому
+        значению, из-за которого настройка и появилась, а в журнале не осталось
+        бы даже строки о подмене (1.0 лежит в границах, подрезать нечего).
+
+        Отличий от целого пути ещё два, и оба — свойства именно float:
+          * NaN и ±inf прекрасно переживают float() и json.loads (в файле это
+            NaN, Infinity — json.dumps пишет их без кавычек). Сравнения с NaN
+            все ложны, поэтому кламп пропустил бы его как есть, и дальше он
+            уехал бы в фильтр релевантности, где `distance <= NaN` — всегда
+            False, то есть не прошёл бы НИ ОДИН фрагмент;
+          * bool — подкласс int, и float(True) даёт законную 1.0. У целых полей
+            это тоже так, но там значение хотя бы остаётся целым; здесь `true`
+            в файле выглядел бы как осмысленно выбранный порог.
+        """
+        default = float(cls.DEFAULTS[field])
+        minimum, maximum = _float_limits(field)
+        if isinstance(value, bool):
+            cls._report_read_fallback(field, value, default)
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            if value is not None:
+                cls._report_read_fallback(field, value, default)
+            return default
+        if not math.isfinite(number):
+            cls._report_read_fallback(field, value, default)
             return default
         clamped = max(minimum, min(number, maximum))
         if clamped != number:
@@ -992,7 +1129,7 @@ class RuntimeSettingsService:
         Границы приходят не от вызывающего, а из SETTING_LIMITS по имени поля —
         из того же места, откуда их берут кламп при чтении и схема ответа.
         """
-        minimum, maximum = setting_limits(field)
+        minimum, maximum = _int_limits(field)
         if isinstance(value, float) and not value.is_integer():
             raise SettingsError(
                 SettingsErrors.INVALID_NUMBER,
@@ -1005,6 +1142,50 @@ class RuntimeSettingsService:
                 SettingsErrors.INVALID_NUMBER,
                 f"{field} must be a whole number, got {value!r}",
             ) from None
+        if not minimum <= number <= maximum:
+            raise SettingsError(
+                SettingsErrors.VALUE_OUT_OF_RANGE,
+                f"{field} must be between {minimum} and {maximum}, got {number}",
+            )
+        return number
+
+    @staticmethod
+    def _require_float_in_range(value: Any, field: str) -> float:
+        """Дробное в границах поля; иначе отказ с машинным кодом.
+
+        Парный к _require_int_in_range, а не он же: тот отвергает всё, что не
+        целое (`must be a whole number`), — то есть на пороге 1.25 отказывал бы
+        ровно там, где дробность и нужна. Коды отказов при этом те же самые
+        (settings.invalid_number и settings.value_out_of_range): для клиента
+        разницы между целым и дробным полем нет — не число оно и не число, а
+        промах мимо диапазона одинаков.
+
+        NaN и ±inf отсекаются отдельно и до сравнения с границами: любое
+        сравнение с NaN ложно, поэтому `not minimum <= nan <= maximum` дало бы
+        «вне диапазона» — формально верный отказ с бессмысленной для админа
+        мотивировкой «должно быть между 0.2 и 2.0, получено nan».
+        """
+        minimum, maximum = _float_limits(field)
+        # bool до float(): float(True) — это законная 1.0, и переключатель,
+        # присланный вместо порога, сохранился бы как осмысленно выбранное
+        # значение.
+        if isinstance(value, bool):
+            raise SettingsError(
+                SettingsErrors.INVALID_NUMBER,
+                f"{field} must be a number, got {value!r}",
+            )
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise SettingsError(
+                SettingsErrors.INVALID_NUMBER,
+                f"{field} must be a number, got {value!r}",
+            ) from None
+        if not math.isfinite(number):
+            raise SettingsError(
+                SettingsErrors.INVALID_NUMBER,
+                f"{field} must be a finite number, got {value!r}",
+            )
         if not minimum <= number <= maximum:
             raise SettingsError(
                 SettingsErrors.VALUE_OUT_OF_RANGE,

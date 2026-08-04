@@ -56,6 +56,10 @@ def format_context_for_llm(
 
         original_text = strip_service_prefix(text or "")
 
+        # Имя файла остаётся в блоке: оно позволяет модели не смешивать факты из
+        # разных документов (послания разных лет отличаются только именем). Но это
+        # служебная разметка, а не текст документа, и правило 3 системного промпта
+        # прямо запрещает переносить её в ответ — сам ответ имени не содержит.
         doc_name = meta.get("doc_name") or ""
         chunk_xml = (
             f"<chunk>\n"
@@ -116,13 +120,23 @@ class GenerationService:
 
         # Правила живут в system-сообщении, данные документов — в user-сообщении,
         # чтобы содержимое файла нельзя было выдать за инструкцию.
+        #
+        # Правило 3 раньше требовало обратного — писать имя файла в скобках после
+        # каждого факта, с образцом «(payom2005.txt)». Модель имя не копирует, а
+        # порождает, и на таджикском порождала с ошибкой («(payom20лади .txt)»
+        # вместо payom2024.txt). Ссылки на источники и так уходят отдельным полем
+        # sources, где имя берётся из базы и испортиться не может, поэтому
+        # требование снято и заменено запретом.
         system_prompt = (
             f"You are {assistant_name}, a document-based question answering assistant.\n"
             f"Answer the user's question using ONLY the context and conversation history provided in the user message.\n\n"
             f"Rules:\n"
             f"1) {answer_rules}\n"
             f"2) Find the answer ONLY inside the <original_text> tags. Do not use any other part of the context as a source of facts.\n"
-            f"3) For every fact or figure you state, you MUST cite the source file name in parentheses. The file name is located strictly between the <file_name> and </file_name> tags. Never use any other words or phrases from the context as a citation. Example: (payom2005.txt).\n"
+            f"3) NEVER write file names, source_id, chunk_id, page numbers or any other service identifiers in the answer text. "
+            f"The <file_name>, <chunk> and <original_text> tags are service markup of the retrieval system, not part of the document text: "
+            f"do not copy them, do not paraphrase them and do not append them in parentheses to a sentence. "
+            f"Source references are delivered separately in a structured field and are rendered by the interface itself.\n"
             f"4) Reply in the same language the user used (Russian, Tajik, or other). Do not switch languages.\n"
             f"5) You may adapt your explanation style on request, but never invent facts.\n"
             f'6) If the context does not contain the answer, reply exactly: "{no_data_answer}".\n'

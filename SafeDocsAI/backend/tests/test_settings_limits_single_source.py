@@ -22,9 +22,16 @@
     объявления в jsx и сверяет их с SETTING_LIMITS. Разойдись они — форма
     предлагала бы значение, на котором сохранение упирается в отказ, или
     запрещала бы то, что сервер принимает.
-  * **Новая числовая настройка без границ не проедет.** Любое целое в DEFAULTS
+  * **Новая числовая настройка без границ не проедет.** Любое число в DEFAULTS
     обязано иметь запись в SETTING_LIMITS: поле без границ принимает что
     угодно.
+  * **Дробная настройка идёт своим путём.** Порог релевантности
+    (relevance_distance_threshold) — единственное поле со значимой дробной
+    частью, и целочисленные помощники ему не годятся: int() превратил бы 1.25 в
+    1.0 при чтении, а _require_int_in_range отверг бы то же 1.25 при записи как
+    «не целое». Отсюда FloatRange и парные _clamp_float_on_read /
+    _require_float_in_range — а заодно проверка, что перепутать пути нельзя
+    молча.
   * **Потребитель настроек не подрезает их по-своему.** Последним на top_k и
     retrieval_top_k смотрит поиск (resolve_retrieval_limits в
     app/modules/chat/service.py), и границы он держит свои. Разойдись они с
@@ -55,6 +62,8 @@ from app.core.exceptions import SettingsError, SettingsErrors  # noqa: E402
 from app.main import app  # noqa: E402
 from app.shared.settings.runtime_settings import (  # noqa: E402
     SETTING_LIMITS,
+    FloatRange,
+    IntRange,
     RuntimeSettingsService,
 )
 
@@ -74,9 +83,16 @@ CLIENT_BOUND_CONSTANTS = {
     "top_k": ("MIN_TOP_K", "MAX_TOP_K"),
     "chat_model_num_ctx": ("MIN_NUM_CTX", "MAX_NUM_CTX"),
     "contextual_embedding_num_ctx": ("MIN_NUM_CTX", "MAX_NUM_CTX"),
+    "relevance_distance_threshold": (
+        "MIN_RELEVANCE_DISTANCE_THRESHOLD",
+        "MAX_RELEVANCE_DISTANCE_THRESHOLD",
+    ),
 }
 
-_CONST_RE = re.compile(r"^const ([A-Z][A-Z0-9_]*)\s*=\s*(\d+);", re.MULTILINE)
+# Дробная часть в шаблоне обязательна: границы порога релевантности на клиенте
+# записаны как 0.2 и 2.0, и шаблон на одних целых («\d+;») просто не нашёл бы
+# эти объявления — сверка молча свелась бы к «константы не найдены».
+_CONST_RE = re.compile(r"^const ([A-Z][A-Z0-9_]*)\s*=\s*(\d+(?:\.\d+)?);", re.MULTILINE)
 _RANGES_BLOCK_RE = re.compile(r"^const NUMBER_FIELD_RANGES = \{(.*?)^\};", re.M | re.S)
 _RANGES_ENTRY_RE = re.compile(r"(\w+):\s*\{([^}]*)\}", re.S)
 _BOUND_RE = re.compile(r"\b(min|max):\s*([A-Za-z_$][\w$]*|\d+)")
@@ -92,7 +108,7 @@ def _client_source() -> str:
 
 class LimitsCoverAllNumericSettingsTests(unittest.TestCase):
     def test_every_numeric_setting_has_limits(self):
-        """Целое в DEFAULTS без записи в SETTING_LIMITS — поле без границ.
+        """Число в DEFAULTS без записи в SETTING_LIMITS — поле без границ.
 
         Ловит не сегодняшний разъезд, а завтрашний: настройку добавляют в
         DEFAULTS, а границы ей не заводят, и запись принимает любое число.
@@ -101,10 +117,25 @@ class LimitsCoverAllNumericSettingsTests(unittest.TestCase):
             field
             for field, value in RuntimeSettingsService.DEFAULTS.items()
             # bool — подкласс int, а у переключателя границ не бывает.
-            if isinstance(value, int) and not isinstance(value, bool)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
         }
 
         self.assertEqual(numeric, set(SETTING_LIMITS))
+
+    def test_the_range_type_matches_the_kind_of_the_default(self):
+        """Вид границ и вид умолчания — об одном и том же поле.
+
+        Именно по типу границ помощники и решают, читать значение через int()
+        или через float() (см. _int_limits/_float_limits). Объяви целому полю
+        FloatRange — и оно начнёт принимать дробные значения, которых сам
+        потребитель не ждёт; объяви дробному IntRange — и порог 1.25 при чтении
+        станет 1.0 молча, а при записи будет отвергнут как «не целое».
+        """
+        for field, limits in SETTING_LIMITS.items():
+            with self.subTest(field=field):
+                default = RuntimeSettingsService.DEFAULTS[field]
+                expected = FloatRange if isinstance(default, float) else IntRange
+                self.assertIsInstance(limits, expected)
 
     def test_limits_are_ordered_and_hold_their_own_default(self):
         """Умолчание обязано лежать внутри своих границ.
@@ -122,12 +153,12 @@ class LimitsCoverAllNumericSettingsTests(unittest.TestCase):
 # --- Запись и чтение: одни и те же границы -------------------------------
 
 
-class WriteAndReadShareLimitsTests(unittest.TestCase):
-    """Строгая проверка при записи и кламп при чтении — по одной границе.
+class SettingsFileTestCase(unittest.TestCase):
+    """Файл настроек во временном каталоге — общая обвязка путей записи/чтения.
 
-    Числа в тесте не выписаны: он берёт их из SETTING_LIMITS и требует, чтобы
-    оба пути вели себя по ним. Верни кто-нибудь литерал в один из путей —
-    красным станет этот тест, а не пользовательский сценарий через полгода.
+    Отдельным базовым классом, а не наследованием одного набора от другого:
+    наследуй кто-нибудь готовый набор ради setUp — и все его тесты прогонялись
+    бы по второму разу, а падение показывало бы сразу два имени.
     """
 
     def setUp(self) -> None:
@@ -150,6 +181,15 @@ class WriteAndReadShareLimitsTests(unittest.TestCase):
         self.settings_path.write_text(
             json.dumps(values, ensure_ascii=False), encoding="utf-8"
         )
+
+
+class WriteAndReadShareLimitsTests(SettingsFileTestCase):
+    """Строгая проверка при записи и кламп при чтении — по одной границе.
+
+    Числа в тесте не выписаны: он берёт их из SETTING_LIMITS и требует, чтобы
+    оба пути вели себя по ним. Верни кто-нибудь литерал в один из путей —
+    красным станет этот тест, а не пользовательский сценарий через полгода.
+    """
 
     def test_write_accepts_both_ends_of_the_range(self):
         for field, limits in SETTING_LIMITS.items():
@@ -223,6 +263,102 @@ class WriteAndReadShareLimitsTests(unittest.TestCase):
                         RuntimeSettingsService.update_settings({field: repaired})[field],
                         repaired,
                     )
+
+
+# --- Дробная настройка: своя пара помощников ------------------------------
+
+
+FRACTIONAL_FIELD = "relevance_distance_threshold"
+
+
+class FractionalSettingKeepsItsPrecisionTests(SettingsFileTestCase):
+    """Порог релевантности не теряет дробную часть ни при чтении, ни при записи.
+
+    Общие циклы выше проверяют только концы диапазона, а вся суть этого поля —
+    между ними: разница между «отсекает верный документ» и «работает»
+    измеряется сотыми (зафиксированный случай — 1.0638 при пороге 1.0).
+    Пропусти его целочисленный путь — и оба конца остались бы зелёными, потому
+    что 0.2 и 2.0 через int() дают 0 и 2, то есть выходят из диапазона и
+    отвергаются, а не подменяются молча.
+    """
+
+    def test_a_fractional_value_survives_write_and_read(self):
+        saved = RuntimeSettingsService.update_settings({FRACTIONAL_FIELD: 1.25})
+
+        self.assertEqual(saved[FRACTIONAL_FIELD], 1.25)
+        self.assertEqual(
+            RuntimeSettingsService.get_settings()[FRACTIONAL_FIELD], 1.25
+        )
+
+    def test_a_fractional_value_in_the_file_is_read_as_is(self):
+        """Чтение чинит только негодное. 1.25 годится — и остаётся 1.25."""
+        self.write_settings_file(**{FRACTIONAL_FIELD: 1.25})
+
+        with self.assertNoLogs(LOGGER_NAME, level="WARNING"):
+            values = RuntimeSettingsService.get_settings()
+
+        self.assertEqual(values[FRACTIONAL_FIELD], 1.25)
+
+    def test_a_whole_number_is_still_accepted(self):
+        """1 и 1.0 — одно и то же значение, и отвергать первое не за что."""
+        self.assertEqual(
+            RuntimeSettingsService.update_settings({FRACTIONAL_FIELD: 1})[
+                FRACTIONAL_FIELD
+            ],
+            1.0,
+        )
+
+    def test_write_refuses_what_is_not_a_number(self):
+        for value in ("порог", None, True, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaises(SettingsError) as raised:
+                    RuntimeSettingsService.update_settings({FRACTIONAL_FIELD: value})
+
+                self.assertEqual(
+                    raised.exception.error_code, SettingsErrors.INVALID_NUMBER
+                )
+
+    def test_read_repairs_what_is_not_a_number(self):
+        """NaN переживает и json.loads, и float(), а сравнения с ним все ложны.
+
+        Оставь его как есть — и в фильтре релевантности `distance <= nan` было
+        бы False для КАЖДОГО фрагмента: поиск отвечал бы пустотой на всё подряд.
+        """
+        default = RuntimeSettingsService.DEFAULTS[FRACTIONAL_FIELD]
+        for raw in ("NaN", "Infinity", '"порог"', "true"):
+            with self.subTest(raw=raw):
+                RuntimeSettingsService._reported_read_fallbacks.clear()
+                self.settings_path.write_text(
+                    f'{{"{FRACTIONAL_FIELD}": {raw}}}', encoding="utf-8"
+                )
+
+                with self.assertLogs(LOGGER_NAME, level="WARNING") as logs:
+                    values = RuntimeSettingsService.get_settings()
+
+                self.assertEqual(values[FRACTIONAL_FIELD], default)
+                self.assertIn(FRACTIONAL_FIELD, "\n".join(logs.output))
+
+
+class NumberHelpersCannotBeSwappedTests(unittest.TestCase):
+    """Целочисленные помощники и дробные не подменяют друг друга молча.
+
+    Это и есть цена отдельного FloatRange: без него дробное поле выглядело бы в
+    SETTING_LIMITS как целое с числами float внутри, и опечатка в вызове
+    (_clamp_on_read вместо _clamp_float_on_read) прошла бы без единого признака
+    — порог 1.25 просто стал бы 1.0. Отказ здесь громкий и на этапе вызова.
+    """
+
+    def test_int_helpers_refuse_a_fractional_field(self):
+        with self.assertRaises(TypeError):
+            RuntimeSettingsService._clamp_on_read(1.25, FRACTIONAL_FIELD)
+        with self.assertRaises(TypeError):
+            RuntimeSettingsService._require_int_in_range(1, FRACTIONAL_FIELD)
+
+    def test_float_helpers_refuse_a_whole_number_field(self):
+        with self.assertRaises(TypeError):
+            RuntimeSettingsService._clamp_float_on_read(5, "top_k")
+        with self.assertRaises(TypeError):
+            RuntimeSettingsService._require_float_in_range(5, "top_k")
 
 
 # --- Схема ответа: те же границы и по-прежнему в OpenAPI -----------------
@@ -328,6 +464,54 @@ class RetrievalLimitsAgreeWithSettingsTests(unittest.TestCase):
         )
 
 
+class RelevanceThresholdAgreesWithSettingsTests(unittest.TestCase):
+    """Порог релевантности доезжает до поиска тем же числом, что сохранён.
+
+    Тот же класс дефекта, что и у top_k, но с более дорогой ценой: порог решает
+    не длину выдачи, а сам факт, что фрагмент считается относящимся к вопросу.
+    Подрежь его поиск по-своему — админ поднял бы порог для многоязычного
+    корпуса, увидел бы новое значение на экране настроек и продолжал получать
+    «ответа нет».
+    """
+
+    def resolve(self, value):
+        from app.modules.chat.service import resolve_relevance_distance_threshold
+
+        return resolve_relevance_distance_threshold(
+            {"relevance_distance_threshold": value}
+        )
+
+    def test_saved_values_survive_the_search_path(self):
+        limits = SETTING_LIMITS[FRACTIONAL_FIELD]
+        # Оба конца сохраняемого диапазона и рабочий ориентир для корпуса на
+        # другом языке, чем вопросы (1.2-1.3) — все доезжают нетронутыми.
+        for value in (limits.min, 1.25, limits.max):
+            with self.subTest(value=value):
+                self.assertEqual(self.resolve(value), value)
+
+    def test_search_clamps_to_the_same_limits(self):
+        limits = SETTING_LIMITS[FRACTIONAL_FIELD]
+
+        self.assertEqual(self.resolve(limits.max + 1), limits.max)
+        self.assertEqual(self.resolve(limits.min - 1), limits.min)
+
+    def test_search_falls_back_to_the_same_default(self):
+        """Настройки нет или она испорчена — берётся умолчание из DEFAULTS.
+
+        Оно же и есть RELEVANCE_DISTANCE_THRESHOLD в
+        app/modules/rag/constants.py: второй копии числа не осталось.
+        """
+        from app.modules.chat.service import resolve_relevance_distance_threshold
+        from app.modules.rag.constants import RELEVANCE_DISTANCE_THRESHOLD
+
+        default = RuntimeSettingsService.DEFAULTS[FRACTIONAL_FIELD]
+        self.assertEqual(RELEVANCE_DISTANCE_THRESHOLD, default)
+        self.assertEqual(resolve_relevance_distance_threshold({}), default)
+        for broken in (None, "порог", float("nan")):
+            with self.subTest(value=broken):
+                self.assertEqual(self.resolve(broken), default)
+
+
 # --- Клиент: зеркало серверных границ ------------------------------------
 
 
@@ -348,9 +532,11 @@ class ClientMirrorsServerLimitsTests(unittest.TestCase):
             # чем, и это не отказ.
             raise unittest.SkipTest(f"{SETTINGS_PAGE} is not available")
 
-    def constants(self) -> dict[str, int]:
+    def constants(self) -> dict[str, float]:
+        # float, а не int: одно и то же значение может быть записано и как 20, и
+        # как 2.0, а сравнивается оно с числом из SETTING_LIMITS, где 1 == 1.0.
         return {
-            name: int(value) for name, value in _CONST_RE.findall(_client_source())
+            name: float(value) for name, value in _CONST_RE.findall(_client_source())
         }
 
     def test_client_constants_match_the_server(self):
