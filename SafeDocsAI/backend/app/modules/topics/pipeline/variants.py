@@ -241,8 +241,16 @@ def fit_variant(
     topics = dominant_topics(
         labels["train"],
         splits["train"].labels("topic_id"),
-        splits["train"].labels("topic"),
+        # Одноязычное основное имя: колонка topic в корпусе переведена вместе с
+        # документом, и подпись «как у первого документа кластера» доставалась
+        # на случайном языке.
+        splits["train"].localized_labels("en"),
         centroids.shape[0],
+        # Переводы — часть артефакта победителя: именно этот файл уезжает в
+        # продукт, где английских подписей показывать некому (интерфейс
+        # переведён на ru и tg).
+        splits["train"].localized_labels("ru"),
+        splits["train"].localized_labels("tg"),
     )
     return VariantFit(
         spec=spec,

@@ -57,6 +57,7 @@ def document(doc_id, *, language="ru", topic_id="A01", origin="synthetic", split
         language=language,
         topic_id=topic_id,
         topic=f"тема {topic_id}",
+        topic_ru=f"тема {topic_id} по-русски",
         subtopic_id=f"{topic_id}_S01",
         dataset_origin=origin,
         split=split,

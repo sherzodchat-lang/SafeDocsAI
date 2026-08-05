@@ -43,8 +43,54 @@ export const matchesTopicFilter = (source, clusterIndex) => (
     clusterIndex == null || toClusterIndex(source?.topic_cluster_index) === clusterIndex
 );
 
-/** Подпись темы документа; пустая строка означает «темы у документа нет». */
-export const resolveTopicLabel = (source) => String(source?.topic_label || '').trim();
+/**
+ * Порядок предпочтения подписей по локали интерфейса.
+ *
+ * Английский в этом списке ПОСЛЕДНИЙ и без своего поля: английского интерфейса
+ * в продукте нет, а topic_label / label — это устойчивый ключ темы, годный как
+ * подпись только тогда, когда перевода не нашлось.
+ *
+ * Таджикский откатывается на русский раньше, чем на ключ: между английским
+ * названием и русским таджикоязычному пользователю ближе русское.
+ */
+const LABEL_ORDER = {
+    ru: ['ru'],
+    tg: ['tg', 'ru'],
+};
+
+const pickLabel = (source, locale, prefix) => {
+    const order = LABEL_ORDER[locale] || LABEL_ORDER.ru;
+    for (const language of order) {
+        const value = String(source?.[`${prefix}${language}`] || '').trim();
+        if (value) return value;
+    }
+    return '';
+};
+
+/**
+ * Подпись темы документа; пустая строка означает «темы у документа нет».
+ *
+ * Откат к topic_label обязателен: null в переводе — обычное состояние
+ * (документ размечен моделью без переводов или до появления колонок), и
+ * подпись при этом всё равно должна быть.
+ */
+export const resolveTopicLabel = (source, locale) => (
+    pickLabel(source, locale, 'topic_label_') || String(source?.topic_label || '').trim()
+);
+
+/**
+ * Подпись темы в распределении — по тому же правилу, что у документа.
+ *
+ * Отдельная функция, потому что поля приходят из разных ответов API
+ * (label_ru у темы против topic_label_ru у источника), а правило выбора обязано
+ * остаться одним: разъехавшись, эти два экрана назвали бы одну тему по-разному.
+ */
+export const resolveTopicName = (topic, locale) => (
+    pickLabel(topic, locale, 'label_') || String(topic?.label || '').trim()
+);
+
+/** Тема, в которую не попал ни один видимый источник. */
+export const isEmptyTopic = (topic) => !(Number(topic?.document_count) > 0);
 
 /**
  * Доля темы как число от 0 до 1.

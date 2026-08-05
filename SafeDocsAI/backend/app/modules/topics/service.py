@@ -13,6 +13,13 @@
 артефакта, а НЕИЗВЕСТНОЕ преобразование — это отказ применять модель вовсе
 (TopicModelUnusable), а не тихий переход к сравнению как есть.
 
+Победивший артефакт центрирует по ячейке «язык × происхождение», а у боевого
+документа происхождения нет: синтетика существует только внутри обучающего
+корпуса. Отсюда единственное допущение этого файла — dataset_origin=real, — из-за
+которого шесть средних превращаются в три; оно названо и объяснено у
+PRODUCTION_FIXED_FIELDS. Поле, за которым такого постоянного значения не
+закреплено, по-прежнему означает отказ.
+
 **Где живёт модель и где реестр.** Центроиды — в файле-артефакте: матрица
 4096-мерных векторов нужна целиком и только слою назначения, в PostgreSQL ей
 делать нечего. В базе лежит реестр версий (TopicModelVersion): он отвечает,
@@ -66,7 +73,7 @@ from app.core.database import (
     session_context,
 )
 from app.core.exceptions import TopicErrors
-from app.modules.topics.kmeans import KMeans
+from app.modules.topics.kmeans import KMeans, l2_normalize
 from app.shared.models import Chunk, Document, TopicModelVersion, utcnow
 
 logger = logging.getLogger(__name__)
@@ -83,7 +90,21 @@ logger = logging.getLogger(__name__)
 # Переменная окружения нужна не ради гибкости, а ради тестов и ради второго
 # стенда: подменять её приходится в каждом тесте назначения тем.
 TOPIC_MODEL_PATH_ENV = "TOPIC_MODEL_PATH"
-DEFAULT_TOPIC_MODEL_PATH = "data/task1_multilingual_dataset/topic_model.npz"
+
+# Умолчание указывает на ПОБЕДИВШУЮ модель, а не на первую обученную.
+#
+# topic_model.npz — базовый прогон без преобразования, k выбран по максимуму
+# силуэта. На этом корпусе он даёт k=4 и делит документы не по темам, а по языку
+# и жанру: ARI против языка +0.415 против +0.063 по теме, а само решение при k=4
+# буквально «реальные-en, реальные-ru, реальные-tg, вся синтетика».
+#
+# topic_model_best.npz — центрирование по ячейке «язык × жанр», k=20: тема
+# +0.191 (втрое выше), ось языка исчезает (+0.002). Разбор — docs/kmeans-topics.md.
+#
+# Держать умолчанием базовую модель значило бы раздавать пользователям темы,
+# которые на самом деле не темы. Базовый артефакт остаётся на диске: он нужен
+# для сравнения в отчёте, но не для боевой разметки.
+DEFAULT_TOPIC_MODEL_PATH = "data/task1_multilingual_dataset/topic_model_best.npz"
 
 
 def topic_model_path() -> Path:
@@ -97,7 +118,7 @@ def topic_model_path() -> Path:
 
 # --- Преобразование вектора ----------------------------------------------
 #
-# Три вида, и каждый обязан быть назван в артефакте явно. Умолчания «если не
+# Четыре вида, и каждый обязан быть назван в артефакте явно. Умолчания «если не
 # написано — значит ничего не делаем» здесь нет намеренно: артефакт, обученный
 # с вычитанием среднего, но забывший про это написать, получил бы молчаливое
 # сравнение сырого вектора с чужими центроидами. Отсутствие ключа считается
@@ -110,14 +131,86 @@ TRANSFORM_NONE = "none"
 TRANSFORM_MEAN_SHIFT = "mean_shift"
 # Вычесть среднее СВОЕЙ группы (у нас — своего языка). Ради этого вида всё и
 # затевалось: без него кластеры совпадают с языками, а не с темами.
+#
+# Своего производителя у этого вида в проекте нет: обучающая сторона пишет
+# group_centering (см. ниже). Он остаётся читаемым, потому что артефакт кладут
+# на диск отдельно от выкладки бэкенда, и уже лежащий файл не должен погаснуть
+# от обновления кода.
 TRANSFORM_GROUP_MEAN_SHIFT = "group_mean_shift"
+# То же вычитание среднего группы, но так, как его называет и сохраняет
+# обучающая сторона (pipeline/transforms.py, GroupCentering): группа задаётся
+# СПИСКОМ полей, ключи составные («en|real»), и после вычитания вектор
+# нормируется заново.
+TRANSFORM_GROUP_CENTERING = "group_centering"
 
-KNOWN_TRANSFORMS = (TRANSFORM_NONE, TRANSFORM_MEAN_SHIFT, TRANSFORM_GROUP_MEAN_SHIFT)
+KNOWN_TRANSFORMS = (
+    TRANSFORM_NONE,
+    TRANSFORM_MEAN_SHIFT,
+    TRANSFORM_GROUP_MEAN_SHIFT,
+    TRANSFORM_GROUP_CENTERING,
+)
 
-# Единственный признак, по которому слой назначения умеет выбрать группу.
-# Строка, а не молчаливое допущение: артефакт, группирующий по чему-то ещё
-# (жанр, происхождение), должен получить внятный отказ, а не среднее по языку.
+# Единственный признак, по которому слой назначения умеет выбрать группу
+# ПО ДОКУМЕНТУ. Строка, а не молчаливое допущение: артефакт, группирующий по
+# чему-то ещё, должен получить внятный отказ, а не среднее по языку.
 GROUP_FIELD_LANGUAGE = "language"
+
+# Разделитель составного ключа группы. То же значение, что KEY_SEPARATOR в
+# pipeline/transforms.py, и разъехаться им нельзя: этим символом обучающая
+# сторона склеивает «en|real», а этот файл — разбирает.
+GROUP_KEY_SEPARATOR = "|"
+
+# --- Допущение о боевых значениях полей группы -----------------------------
+#
+# СУЩЕСТВЕННОЕ ДОПУЩЕНИЕ, и оно здесь одно.
+#
+# Победивший вариант центрирует вектор по ячейке «язык × происхождение» и
+# сохраняет шесть средних: en|real, en|synthetic, ru|real, ru|synthetic,
+# tg|real, tg|synthetic. Языку документа соответствие есть — Document.language.
+# Происхождения у боевого документа нет и быть не может: dataset_origin — это
+# признак ОБУЧАЮЩЕГО корпуса, где половину текстов сгенерировали, чтобы добрать
+# объём. Документ, который пользователь загрузил в продукт, синтетическим не
+# бывает по определению: он пришёл из внешнего мира, а не из генератора.
+#
+# Поэтому при загрузке артефакта шесть средних проецируются на три: остаются
+# ячейки с dataset_origin=real, и ключом становится один язык (en|real -> en).
+# Средние ветки |synthetic в бою не нужны — применить их не к чему.
+#
+# Словарь, а не константа в коде: поле, которого здесь нет, зафиксировать
+# нечем, и артефакт, группирующий по нему, получает честный отказ (см.
+# _parse_group_centering). «Возьмём что-нибудь похожее» здесь запрещено ровно
+# по той же причине, по которой запрещено неизвестное преобразование: молчаливо
+# выбранное чужое среднее даёт правдоподобный номер кластера и неверную тему.
+PRODUCTION_FIXED_FIELDS: dict[str, str] = {"dataset_origin": "real"}
+
+# Код таджикского языка внутри проекта — "tj" (определитель языка, доменные
+# профили, колоды презентаций), а в датасете и, значит, в артефакте — "tg"
+# (ISO 639-1). Расхождение известное и уже описанное в presentations/constants.py
+# (HTML_LANG), новым решением здесь оно не является.
+#
+# Без этой строки таджикский документ не находил бы своего среднего и тихо
+# получал бы запасное (общее по корпусу): преобразование выродилось бы в
+# обычное глобальное центрирование ровно для того языка, ради которого продукт
+# и делается, и заметить это было бы нечем — номер кластера всё равно
+# посчитался бы.
+LANGUAGE_GROUP_ALIASES: dict[str, str] = {"tj": "tg"}
+
+
+def unit_vector(vector: np.ndarray) -> np.ndarray:
+    """Привести вектор к единичной длине тем же кодом, что и обучение.
+
+    l2_normalize из kmeans.py, а не своя строка с делением на норму: у неё
+    внутри обработка нулевого вектора, и вторая реализация разошлась бы с
+    первой ровно там, где расхождение не видно.
+    """
+    return l2_normalize(np.asarray(vector, dtype=np.float64).reshape(1, -1))[0]
+
+
+def _group_candidates(group: str | None) -> tuple[str, ...]:
+    """Ключи, под которыми среднее этой группы может лежать в артефакте."""
+    key = str(group or "")
+    alias = LANGUAGE_GROUP_ALIASES.get(key)
+    return (key,) if alias is None else (key, alias)
 
 
 class TopicModelUnusable(Exception):
@@ -145,39 +238,211 @@ class TopicTransform:
     """Преобразование вектора перед сравнением с центроидами."""
 
     kind: str
-    # mean_shift: вычитаемое. group_mean_shift: запасное вычитаемое для
-    # группы, которой в модели нет (документ на четвёртом языке).
+    # mean_shift: вычитаемое. group_mean_shift и group_centering: запасное
+    # вычитаемое для группы, которой в модели нет (документ на четвёртом языке).
     mean: np.ndarray | None = None
     group_field: str = GROUP_FIELD_LANGUAGE
     group_means: dict[str, np.ndarray] | None = None
+    # Привести вход к единичной длине ПЕРЕД вычитанием. Не украшение: средние
+    # групп посчитаны на нормированных эмбеддингах (обучающий кэш хранит
+    # векторы единичной длины), а вектор документа в бою — СРЕДНЕЕ векторов его
+    # фрагментов, и длина у него меньше единицы тем сильнее, чем разнороднее
+    # документ. Вычесть среднее единичных векторов из вектора длины 0.8 —
+    # значит сдвинуть его дальше, чем сдвигало обучение, и получить другое
+    # направление, то есть другой кластер. Ошибка молчаливая: номер всё равно
+    # посчитается.
+    unit_input: bool = False
+    # Нормировать заново ПОСЛЕ вычитания — так делает обучающая сторона
+    # (GroupCentering.apply_to_keys), и артефакт говорит об этом полем
+    # renormalize. Само назначение от этого не меняется, пока сравнение
+    # косинусное (KMeans(normalize=True) нормирует вход predict'а сам), но
+    # соблюдать объявленное преобразование обязан читатель, а не случайное
+    # совпадение двух нормировок: артефакт с normalize=false тем же кодом
+    # молча уехал бы в другую геометрию.
+    renormalize: bool = False
+    # Поля группы, зафиксированные боевым значением (dataset_origin=real).
+    # Хранятся ради описания: пользователь и журнал должны видеть, что модель
+    # группировала не только по языку.
+    fixed_fields: tuple[tuple[str, str], ...] = ()
 
     @property
     def description(self) -> str:
         """Строка для API и для журнала: что именно делает преобразование."""
-        if self.kind == TRANSFORM_GROUP_MEAN_SHIFT:
-            return f"{self.kind}({self.group_field})"
+        if self.kind in (TRANSFORM_GROUP_MEAN_SHIFT, TRANSFORM_GROUP_CENTERING):
+            # Зафиксированные поля названы прямо в подписи: «по языку» и «по
+            # языку, при dataset_origin=real» — это разные преобразования, и
+            # различать их в реестре надо без чтения кода.
+            fixed = "".join(
+                f"; {field}={value}" for field, value in self.fixed_fields
+            )
+            return f"{self.kind}({self.group_field}{fixed})"
         return self.kind
 
     def apply(self, vector: np.ndarray, *, group: str | None) -> np.ndarray:
+        prepared = np.asarray(vector, dtype=np.float64)
+        if self.unit_input:
+            prepared = unit_vector(prepared)
         if self.kind == TRANSFORM_NONE:
-            return vector
+            return prepared
         if self.kind == TRANSFORM_MEAN_SHIFT:
-            return vector if self.mean is None else vector - self.mean
-        # group_mean_shift: незнакомая группа — не повод отказаться от темы,
-        # но и вычитать чужое среднее нельзя. Берём общее, если оно есть, иначе
-        # оставляем вектор как есть: это худшее из двух назначений, но всё же
-        # назначение, а документ на неизвестном языке — редкость, ради которой
-        # не стоит гасить функцию целиком.
-        means = self.group_means or {}
-        chosen = means.get(group or "")
-        if chosen is None:
-            chosen = self.mean
-        return vector if chosen is None else vector - chosen
+            shift = self.mean
+        else:
+            # Группировка: незнакомая группа — не повод отказаться от темы,
+            # но и вычитать чужое среднее нельзя. Берём общее, если оно есть,
+            # иначе оставляем вектор как есть: это худшее из двух назначений,
+            # но всё же назначение, а документ на неизвестном языке — редкость,
+            # ради которой не стоит гасить функцию целиком.
+            means = self.group_means or {}
+            shift = None
+            for candidate in _group_candidates(group):
+                shift = means.get(candidate)
+                if shift is not None:
+                    break
+            if shift is None:
+                shift = self.mean
+        if shift is not None:
+            prepared = prepared - shift
+        return unit_vector(prepared) if self.renormalize else prepared
 
 
 def _as_vector(value: Any) -> np.ndarray | None:
     array = np.asarray(value, dtype=np.float64)
     return None if array.ndim != 1 or array.size == 0 else array
+
+
+def _fixed_fields_text() -> str:
+    return ", ".join(f"{field}={value}" for field, value in PRODUCTION_FIXED_FIELDS.items())
+
+
+def _parse_group_centering(
+    raw: dict[str, Any], arrays: dict[str, np.ndarray], *, fallback: np.ndarray | None
+) -> TopicTransform:
+    """Разобрать преобразование обучающей стороны и спроецировать его на бой.
+
+    Артефакт группирует по СПИСКУ полей («язык × происхождение»), а слой
+    назначения знает у документа одно — язык. Разница закрывается не догадкой, а
+    определением: остальные поля обязаны иметь в бою постоянное значение
+    (PRODUCTION_FIXED_FIELDS), и тогда средние по ячейкам с этим значением —
+    ровно те, которые к боевому документу применимы. Все прочие ячейки
+    выбрасываются: применить их не к чему.
+
+    Поле, которого в PRODUCTION_FIXED_FIELDS нет, — отказ. Такой артефакт
+    группировал по признаку, которого у боевого документа не определить и не
+    зафиксировать, и любое среднее для него было бы выбрано наугад.
+    """
+    fields = [str(value) for value in (raw.get("fields") or [])]
+    if not fields:
+        raise TopicModelUnusable(
+            "преобразование group_centering объявлено без transform.fields: "
+            "по какому признаку выбирать среднее — неизвестно"
+        )
+    if GROUP_FIELD_LANGUAGE not in fields:
+        raise TopicModelUnusable(
+            f"группировка по {fields} не поддерживается: у документа слой "
+            f"назначения знает только {GROUP_FIELD_LANGUAGE!r}, а его среди "
+            "полей группы нет"
+        )
+    unsupported = [
+        field
+        for field in fields
+        if field != GROUP_FIELD_LANGUAGE and field not in PRODUCTION_FIXED_FIELDS
+    ]
+    if unsupported:
+        raise TopicModelUnusable(
+            f"группировка по {unsupported} не поддерживается: в бою этих полей "
+            "у документа нет и постоянного значения за ними не закреплено "
+            f"(известны {GROUP_FIELD_LANGUAGE!r} и {_fixed_fields_text()})"
+        )
+
+    keys = [str(value) for value in (raw.get("keys") or [])]
+    means: dict[str, np.ndarray] = {}
+    inline = raw.get("means")
+    if isinstance(inline, dict):
+        for key, value in inline.items():
+            vector = _as_vector(value)
+            if vector is not None:
+                means[str(key)] = vector
+    matrix = arrays.get("transform_means")
+    if matrix is not None:
+        if matrix.ndim != 2 or matrix.shape[0] != len(keys):
+            raise TopicModelUnusable(
+                "transform_means не согласован с transform.keys: "
+                f"{getattr(matrix, 'shape', None)} против {len(keys)} групп"
+            )
+        for index, key in enumerate(keys):
+            means[key] = np.asarray(matrix[index], dtype=np.float64)
+    if not means:
+        raise TopicModelUnusable(
+            "преобразование group_centering объявлено, но средних по группам "
+            "нет ни в метаданных (transform.means), ни в архиве "
+            "(transform_means + transform.keys)"
+        )
+
+    language_at = fields.index(GROUP_FIELD_LANGUAGE)
+    projected: dict[str, np.ndarray] = {}
+    dropped: list[str] = []
+    for key, vector in means.items():
+        parts = key.split(GROUP_KEY_SEPARATOR)
+        if len(parts) != len(fields):
+            raise TopicModelUnusable(
+                f"ключ группы {key!r} не разбирается по полям {fields}: "
+                f"частей {len(parts)}, а полей {len(fields)}"
+            )
+        cell = dict(zip(fields, parts))
+        # Все поля, кроме языка, проверены выше: у каждого есть боевое значение.
+        production = all(
+            cell[field] == PRODUCTION_FIXED_FIELDS[field]
+            for field in fields
+            if field != GROUP_FIELD_LANGUAGE
+        )
+        if production:
+            projected[parts[language_at]] = vector
+        else:
+            dropped.append(key)
+    if not projected:
+        raise TopicModelUnusable(
+            f"ни одна группа артефакта не описывает боевой документ: ключи "
+            f"{sorted(means)} при боевых значениях {_fixed_fields_text()}"
+        )
+
+    if dropped:
+        # Громко, потому что допущение существенное: из шести средних боевыми
+        # оказываются три, и человек, читающий журнал, обязан узнать об этом
+        # отсюда, а не из чужой головы.
+        logger.info(
+            "Артефакт тем группирует по %s. В бою %s (синтетики среди "
+            "загруженных документов не бывает), поэтому из %s средних "
+            "оставлены %s и ключуются языком: %s. Не нужны в бою: %s.",
+            ", ".join(fields),
+            _fixed_fields_text(),
+            len(means),
+            len(projected),
+            ", ".join(sorted(projected)),
+            ", ".join(sorted(dropped)),
+        )
+
+    fallback_mean = arrays.get("transform_fallback")
+    if fallback_mean is None:
+        fallback_mean = _as_vector(raw["fallback"]) if raw.get("fallback") is not None else None
+    if fallback_mean is None:
+        fallback_mean = fallback
+    return TopicTransform(
+        kind=TRANSFORM_GROUP_CENTERING,
+        mean=fallback_mean,
+        group_field=GROUP_FIELD_LANGUAGE,
+        group_means=projected,
+        # Средние посчитаны на нормированных векторах — см. unit_input.
+        unit_input=True,
+        # Умолчание True: обучающая сторона считает перенормировку частью
+        # преобразования (GroupCentering.renormalize=True по умолчанию), и
+        # артефакт без этого ключа обучен ею же.
+        renormalize=bool(raw.get("renormalize", True)),
+        fixed_fields=tuple(
+            (field, PRODUCTION_FIXED_FIELDS[field])
+            for field in fields
+            if field in PRODUCTION_FIXED_FIELDS
+        ),
+    )
 
 
 def parse_transform(meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> TopicTransform:
@@ -221,6 +486,9 @@ def parse_transform(meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> Topi
             "преобразование mean_shift объявлено, но вычитаемого вектора нет "
             "ни в метаданных (transform.mean), ни в архиве (transform_mean)"
         )
+
+    if kind == TRANSFORM_GROUP_CENTERING:
+        return _parse_group_centering(raw, arrays, fallback=mean)
 
     if kind != TRANSFORM_GROUP_MEAN_SHIFT:
         return TopicTransform(kind=kind, mean=mean)
@@ -273,6 +541,14 @@ class TopicArtifact:
     normalize: bool
     transform: TopicTransform
     labels: dict[int, str]
+    # Подписи тех же кластеров на языках интерфейса: {"ru": {0: "Налоги"}, ...}.
+    # Отдельно от labels, а не вместо: английская подпись устойчива (она же
+    # лежит в артефакте, в отчётах эксперимента и в назначениях прошлых
+    # версий), переводы же есть не у каждого артефакта — старые файлы их просто
+    # не содержат. Кластер без перевода в словарь НЕ попадает: пустая строка
+    # тут означала бы «подпись есть, но пустая», и клиент показал бы безымянную
+    # строку вместо отката.
+    labels_localized: dict[str, dict[int, str]]
     k: int
     metrics: dict[str, float | None]
     trained_at: datetime
@@ -289,6 +565,15 @@ class TopicArtifact:
 
     def label_of(self, cluster: int) -> str:
         return self.labels.get(int(cluster)) or default_label(cluster)
+
+    def label_in(self, cluster: int, language: str) -> str | None:
+        """Подпись кластера на языке интерфейса или None, если её в артефакте нет.
+
+        None, а не default_label: «Кластер 7» уже отдаётся основной подписью, и
+        вторая такая же строка не добавила бы ничего, зато лишила бы клиента
+        возможности отличить «перевода нет» от «он совпал с оригиналом».
+        """
+        return (self.labels_localized.get(language) or {}).get(int(cluster)) or None
 
     def assign(self, vector: np.ndarray, *, group: str | None) -> int:
         """Номер ближайшего кластера для одного вектора документа.
@@ -339,14 +624,64 @@ def _extract_labels(meta: dict[str, Any], cluster_count: int) -> dict[int, str]:
     return {index: labels.get(index, default_label(index)) for index in range(cluster_count)}
 
 
+# Языки интерфейса, для которых у темы бывает своя подпись. Список закрыт не
+# здесь, а в продукте: экраны переведены на русский и таджикский, английского
+# интерфейса нет вовсе. Ключ каждой темы (поле topic артефакта) при этом
+# остаётся английским — он не для показа, а для ссылок и сверок.
+#
+# Порядок значения не имеет, но кортеж, а не множество: он ходит в JSON
+# метаданных и в ответ API, и переменный порядок ключей мешал бы сравнивать
+# ответы глазами.
+LOCALIZED_LABEL_LANGUAGES = ("ru", "tg")
+
+# Как поле перевода называется в артефакте: topic + суффикс языка.
+_LOCALIZED_LABEL_FIELDS = {language: f"topic_{language}" for language in LOCALIZED_LABEL_LANGUAGES}
+
+
+def _extract_labels_localized(
+    meta: dict[str, Any], cluster_count: int
+) -> dict[str, dict[int, str]]:
+    """Переводы подписей из артефакта — только те, что там есть.
+
+    Отсутствующие НЕ добираются номером кластера, как это делает
+    _extract_labels: там подпись обязана быть у любого номера, потому что она
+    единственная, а здесь она вторая. Кластер без перевода просто выпадает из
+    словаря, и клиент показывает основную подпись — это и есть честный откат, а
+    не подмена.
+
+    Переводов нет ни у одного кластера, если артефакт обучен кодом до их
+    появления. Раздел от этого не ломается: он возвращается ровно в то
+    состояние, в котором был.
+    """
+    labels: dict[str, dict[int, str]] = {language: {} for language in LOCALIZED_LABEL_LANGUAGES}
+    for item in meta.get("cluster_topics") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            cluster = int(item.get("cluster"))
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= cluster < cluster_count:
+            continue
+        for language, field in _LOCALIZED_LABEL_FIELDS.items():
+            name = str(item.get(field) or "").strip()
+            if name:
+                labels[language][cluster] = name
+    return labels
+
+
 _METRIC_ALIASES = {
     # Ключ ответа API -> имена, под которыми число может лежать в артефакте.
     # Псевдонимы нужны потому, что метрики считает эксперимент, а не этот слой:
     # он называет их так, как удобно отчёту, и требовать от него единственного
     # написания значило бы ронять регистрацию модели из-за имени ключа.
-    "ari_topic": ("ari_topic", "ari", "adjusted_rand_index"),
-    "purity": ("purity",),
-    "silhouette": ("silhouette", "silhouette_score"),
+    #
+    # Имена с суффиксом _test — то, как называет свои числа эксперимент с
+    # вариантами (pipeline/variants.py): метрика победителя меряется на
+    # ОТЛОЖЕННОЙ выборке, и именно её честно показывать в карточке модели.
+    "ari_topic": ("ari_topic", "ari_topic_test", "ari", "adjusted_rand_index"),
+    "purity": ("purity", "purity_topic_test"),
+    "silhouette": ("silhouette", "silhouette_test", "silhouette_score"),
 }
 
 
@@ -475,6 +810,7 @@ def load_artifact(path: Path | None = None) -> TopicArtifact:
         normalize=bool(meta.get("normalize", True)),
         transform=transform,
         labels=_extract_labels(meta, cluster_count),
+        labels_localized=_extract_labels_localized(meta, cluster_count),
         k=k,
         metrics=_extract_metrics(meta),
         trained_at=_extract_trained_at(meta, file),
@@ -626,6 +962,12 @@ class TopicShare:
 
     cluster_index: int
     label: str
+    # Та же подпись на языках интерфейса: {"ru": "Налоги", "tg": "Андозҳо"}.
+    # Языка в словаре нет — перевода нет, показывать надо label. Решение «что
+    # показать» остаётся за клиентом: интерфейс переведён на ru и tg, но фильтр
+    # по теме и ссылки живут по устойчивому английскому имени, поэтому обрезать
+    # что-то из двух здесь было бы решением за него.
+    labels_localized: dict[str, str]
     document_count: int
     share: float
 
@@ -707,6 +1049,19 @@ class TopicsService:
                 {str(index): label for index, label in artifact.labels.items()},
                 ensure_ascii=False,
             ),
+            # Переводы копируются в реестр по той же причине, что и основные
+            # подписи: список тем обязан отвечать и тогда, когда файл артефакта
+            # уже перезаписан следующим обучением. Одной колонкой на все языки,
+            # а не колонкой на язык: набор языков принадлежит продукту, а не
+            # схеме БД, и новый перевод не должен стоить миграции. Кластеров без
+            # перевода здесь нет — их отсутствие и есть ответ.
+            labels_localized_json=json.dumps(
+                {
+                    language: {str(index): label for index, label in names.items()}
+                    for language, names in artifact.labels_localized.items()
+                },
+                ensure_ascii=False,
+            ),
             artifact_path=artifact.path,
             artifact_digest=artifact.digest,
             trained_at=artifact.trained_at,
@@ -760,6 +1115,33 @@ class TopicsService:
             index: labels.get(index) or default_label(index)
             for index in range(int(model.cluster_count or 0))
         }
+
+    @staticmethod
+    def labels_localized_of(model: TopicModelVersion) -> dict[str, dict[int, str]]:
+        """Переводы подписей из реестра — только те, что там есть.
+
+        Отсутствующие не подменяются номером кластера (см.
+        _extract_labels_localized): пустое место здесь — сигнал клиенту
+        откатиться к основной подписи, а не повод показать «Кластер 7» дважды.
+        """
+        try:
+            raw = json.loads(model.labels_localized_json or "{}")
+        except ValueError:
+            raw = {}
+        labels: dict[str, dict[int, str]] = {
+            language: {} for language in LOCALIZED_LABEL_LANGUAGES
+        }
+        if not isinstance(raw, dict):
+            return labels
+        for language, names in raw.items():
+            if language not in labels or not isinstance(names, dict):
+                continue
+            for key, value in names.items():
+                with contextlib.suppress(TypeError, ValueError):
+                    name = str(value).strip()
+                    if name:
+                        labels[language][int(key)] = name
+        return labels
 
     @staticmethod
     def metrics_of(model: TopicModelVersion) -> dict[str, float | None]:
@@ -817,13 +1199,24 @@ class TopicsService:
         counts = {int(row[0]): int(row[1]) for row in result.all()}
         total = sum(counts.values())
         labels = TopicsService.labels_of(model)
+        localized = TopicsService.labels_localized_of(model)
         # Кластеры без документов остаются в ответе с нулём. Пропускать их
         # нельзя: пользователь, сравнивающий распределение по двум блокнотам,
-        # иначе видит два разных набора строк и не может их сопоставить.
+        # иначе видит два разных набора строк и не может их сопоставить. То же
+        # относится к администратору: полный список — это ответ на вопрос «что
+        # модель вообще умеет различать», и он теряется, если строки с нулём
+        # отфильтровать на сервере. Прятать их от ОБЫЧНОГО пользователя —
+        # работа экрана, а не выдачи: см. TopicsPage, где пустые темы свёрнуты
+        # под раскрытие.
         rows = [
             TopicShare(
                 cluster_index=index,
                 label=labels.get(index) or default_label(index),
+                labels_localized={
+                    language: names[index]
+                    for language, names in localized.items()
+                    if index in names
+                },
                 document_count=counts.get(index, 0),
                 share=(counts.get(index, 0) / total) if total else 0.0,
             )
@@ -937,6 +1330,20 @@ class TopicsService:
             cluster = artifact.assign(centre, group=document.language)
             document.topic_cluster_index = cluster
             document.topic_label = artifact.label_of(cluster)
+            # Переводы ХРАНЯТСЯ рядом с основной подписью и по тому же правилу:
+            # все пишутся в момент назначения и остаются такими, какими их
+            # сделала эта версия модели. Собирать перевод на лету по
+            # topic_cluster_index из АКТИВНОЙ модели было бы дешевле на две
+            # колонки, но у документа, размеченного прошлой версией, номер 7
+            # означает уже другую тему: рядом с исторической английской
+            # подписью встало бы название от чужой модели, и документ показывал
+            # бы два разных имени одной темы.
+            #
+            # Документы, размеченные ДО появления колонок, остаются с None:
+            # переводы у них появятся при первой же переразметке — той самой,
+            # которую всё равно приходится запускать после смены артефакта.
+            document.topic_label_ru = artifact.label_in(cluster, "ru")
+            document.topic_label_tg = artifact.label_in(cluster, "tg")
             document.topic_model_version = model.version
             session.add(document)
             assigned += 1

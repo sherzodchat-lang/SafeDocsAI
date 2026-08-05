@@ -51,6 +51,18 @@ class Document:
     language: str
     topic_id: str
     topic: str
+    # Русское название темы отдельной колонкой. Оно же лежит в topic у русских
+    # записей — колонка topic переведена вместе с документом, — и совпадает с
+    # ним во всём корпусе (проверено на всех 20 темах). То есть topic_ru
+    # избыточно, но читается однозначно, и ради этой однозначности оно здесь и
+    # остаётся.
+    #
+    # Отдельной колонки с ТАДЖИКСКИМ названием в корпусе нет, а сами названия
+    # есть: они лежат в topic у таджикских записей и достаются
+    # Corpus.topic_names("tg"). Ровно так же достаётся и настоящее английское
+    # название — брать его «у первого документа кластера» нельзя, язык там
+    # какой попадётся.
+    topic_ru: str
     subtopic_id: str
     dataset_origin: str
     split: str
@@ -95,6 +107,58 @@ class Corpus:
         """
         return [str(getattr(document, field)) for document in self.documents]
 
+    def topic_names(self, language: str) -> dict[str, str]:
+        """Название каждой темы НА ЗАДАННОМ ЯЗЫКЕ: topic_id -> имя.
+
+        Колонка topic в этом корпусе переведена вместе с документом: у
+        английской записи там 'Education', у русской 'Образование', у
+        таджикской 'Маориф'. То есть отдельной колонки с таджикским названием
+        нет, а сами таджикские названия есть — и берутся они отсюда.
+
+        Из этого же следует, почему подпись кластера нельзя брать «у первого
+        попавшегося документа кластера», как делалось раньше: язык подписи
+        оказывался лотереей, и в боевом артефакте один кластер из двадцати
+        подписан по-таджикски посреди английских.
+
+        Расхождение внутри одной пары (topic_id, язык) — противоречие в самом
+        корпусе, и узнать о нём лучше здесь, чем по подписи, которая меняется
+        от прогона к прогону.
+        """
+        names: dict[str, str] = {}
+        conflicts: dict[str, set[str]] = {}
+        for document in self.documents:
+            if document.language != language:
+                continue
+            name = (document.topic or "").strip()
+            if not name:
+                continue
+            known = names.setdefault(document.topic_id, name)
+            if known != name:
+                conflicts.setdefault(document.topic_id, {known}).add(name)
+        if conflicts:
+            details = "; ".join(
+                f"{topic_id}: {sorted(values)}" for topic_id, values in sorted(conflicts.items())
+            )
+            raise ValueError(
+                f"в корпусе у темы больше одного названия на языке {language!r} ({details})"
+            )
+        return names
+
+    def localized_labels(self, language: str) -> list[str]:
+        """Колонка «название темы этого документа на заданном языке».
+
+        Выровнена по документам, как и остальные колонки: dominant_topics берёт
+        имя тем же индексом, каким выбрал тему, и перепутать имя одной темы с
+        именем другой невозможно.
+
+        Откат к собственному названию документа обязателен: на подвыборке, где
+        нужного языка нет вообще (корпус предыдущей версии, слой одного языка),
+        пустая подпись превратилась бы в «Кластер 7» на экране — то есть в
+        потерю там, где раньше хоть что-то было.
+        """
+        table = self.topic_names(language)
+        return [table.get(document.topic_id) or document.topic for document in self.documents]
+
     def subset(self, predicate) -> "Corpus":
         return Corpus(tuple(d for d in self.documents if predicate(d)))
 
@@ -137,6 +201,14 @@ def _document_from_record(record: dict) -> Document:
         language=str(record["language"]),
         topic_id=str(record["topic_id"]),
         topic=str(record["topic"]),
+        # topic_ru в список обязательных полей НЕ входит: рядом лежат файлы
+        # предыдущей версии корпуса (train.jsonl / test.jsonl, только реальные
+        # тексты), где этой колонки нет. Падать на них значило бы запретить
+        # прогон на старом корпусе ради подписи, которая нужна интерфейсу, а не
+        # кластеризации. Пустая строка здесь честно означает «русского названия
+        # у этой записи нет», и дальше по цепочке она превращается в отсутствие
+        # русской подписи, а не в подпись-пустышку.
+        topic_ru=str(record.get("topic_ru") or ""),
         subtopic_id=str(record["subtopic_id"]),
         dataset_origin=str(record["dataset_origin"]),
         split=str(record["split"]),

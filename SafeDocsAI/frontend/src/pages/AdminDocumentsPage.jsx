@@ -362,9 +362,11 @@ const AdminDocumentsPage = ({ notebookId }) => {
         if (topicClusterIndex == null) return '';
         if (topicFilter.label) return topicFilter.label;
 
-        const labelled = documents.find((doc) => matchesTopicFilter(doc, topicClusterIndex) && resolveTopicLabel(doc));
-        return labelled ? resolveTopicLabel(labelled) : t('documents.topicFilterUnknown');
-    }, [documents, t, topicClusterIndex, topicFilter.label]);
+        const labelled = documents.find(
+            (doc) => matchesTopicFilter(doc, topicClusterIndex) && resolveTopicLabel(doc, locale),
+        );
+        return labelled ? resolveTopicLabel(labelled, locale) : t('documents.topicFilterUnknown');
+    }, [documents, locale, t, topicClusterIndex, topicFilter.label]);
 
     const resetTopicFilter = useCallback(() => {
         const params = new URLSearchParams(searchParams);
@@ -703,7 +705,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                     // источник не размечен) — тогда не показываем ничего:
                                     // прочерк на месте темы сообщал бы о ней больше, чем
                                     // о самом источнике.
-                                    const topicLabel = resolveTopicLabel(doc);
+                                    const topicLabel = resolveTopicLabel(doc, locale);
 
                                     return (
                                         <tr key={doc.id} className="border-t border-slate-100 text-sm hover:bg-slate-50/70">

@@ -640,7 +640,7 @@ const NotebookWorkspace = ({
                 // Тема источника — подпись рядом с датой и размером. Нет поля или
                 // источник не размечен — строки просто нет: «не определено» на
                 // карточке рассказывало бы о состоянии модели, а не о документе.
-                const sourceTopicLabel = resolveTopicLabel(source);
+                const sourceTopicLabel = resolveTopicLabel(source, locale);
 
                 return (
                   <article key={source.id} className="rounded-2xl border border-slate-200 p-4 transition hover:border-slate-300 hover:bg-slate-50">

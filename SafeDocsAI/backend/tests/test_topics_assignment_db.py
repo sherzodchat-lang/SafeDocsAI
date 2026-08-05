@@ -39,6 +39,8 @@ from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 from topicfixtures import (  # noqa: E402
     ARTIFACT_EMBEDDING_MODEL,
     LABELS,
+    LABELS_RU,
+    LABELS_TG,
     document_vector_for,
     write_language_artifact,
 )
@@ -161,7 +163,35 @@ class AssignmentAfterIndexingTests(TopicAssignmentTestCase):
         stored = await self.get_row(Document, document.id)
         self.assertEqual(stored.topic_cluster_index, 2)
         self.assertEqual(stored.topic_label, LABELS[2])
+        # Все подписи пишутся В МОМЕНТ назначения и той версией модели, что его
+        # сделала. Собирать перевод на лету по номеру кластера нельзя: у
+        # документа, размеченного прошлой версией, тот же номер означает другую
+        # тему, и рядом с исторической английской подписью встало бы чужое
+        # название.
+        self.assertEqual(stored.topic_label_ru, LABELS_RU[2])
+        self.assertEqual(stored.topic_label_tg, LABELS_TG[2])
         self.assertEqual(stored.topic_model_version, model.version)
+
+    async def test_a_model_without_translations_leaves_the_columns_empty(self):
+        """Отсутствие перевода — не повод записать устойчивое имя дважды.
+
+        Пустая колонка означает «показывай topic_label», и клиент так и
+        делает. Записанная сюда английская подпись выглядела бы переводом, и
+        отличить настоящий заголовок от подделки стало бы нечем.
+        """
+        write_language_artifact(self.artifact, localized=False)
+        forget_cached_artifacts()
+        async with self.session_factory() as session:
+            await TopicsService.sync_active_model(session)
+        document = await self.make_indexed_document(cluster=2)
+
+        async with self.session_factory() as session:
+            await TopicsService.assign_after_indexing(session, document.id)
+
+        stored = await self.get_row(Document, document.id)
+        self.assertEqual(stored.topic_label, LABELS[2])
+        self.assertIsNone(stored.topic_label_ru)
+        self.assertIsNone(stored.topic_label_tg)
 
     async def test_the_language_shift_is_undone_before_the_comparison(self):
         """Тот же документ на трёх языках обязан попасть в ОДНУ тему.

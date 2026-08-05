@@ -65,12 +65,28 @@ class ClusterTopic:
     topic: str
     share: float
     size: int
+    # Та же тема на языках интерфейса. Все названия пишутся В АРТЕФАКТ, а не
+    # добираются приложением из корпуса: корпус лежит в репозитории обучения, а
+    # артефакт уезжает на сервер один, и слой выдачи не имеет права зависеть от
+    # файла, которого рядом с ним может не быть.
+    #
+    # Языков ровно два, и список закрыт не здесь, а в продукте: интерфейс
+    # переведён на русский и таджикский, английского в нём нет вовсе. topic
+    # остаётся ключом — устойчивым именем темы, по которому сходятся отчёты
+    # эксперимента и назначения прошлых версий.
+    #
+    # Со значениями по умолчанию — чтобы артефакты, обученные до появления этих
+    # полей, читались как «перевода нет», а не падали.
+    topic_ru: str = ""
+    topic_tg: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "cluster": self.cluster,
             "topic_id": self.topic_id,
             "topic": self.topic,
+            "topic_ru": self.topic_ru,
+            "topic_tg": self.topic_tg,
             "share": self.share,
             "size": self.size,
         }
@@ -273,6 +289,8 @@ class TopicModel:
                     cluster=int(item["cluster"]),
                     topic_id=str(item["topic_id"]),
                     topic=str(item["topic"]),
+                    topic_ru=str(item.get("topic_ru") or ""),
+                    topic_tg=str(item.get("topic_tg") or ""),
                     share=float(item["share"]),
                     size=int(item["size"]),
                 )
@@ -289,12 +307,19 @@ def dominant_topics(
     topic_ids: Sequence[str],
     topic_names: Sequence[str],
     n_clusters: int,
+    topic_names_ru: Sequence[str] | None = None,
+    topic_names_tg: Sequence[str] | None = None,
 ) -> tuple[ClusterTopic, ...]:
     """Соответствие «кластер -> преобладающая тема» по обучающей выборке.
 
     Пустой кластер (такое возможно, когда k больше числа различимых групп)
     получает пустую тему и size = 0, а не пропускается: приложение обязано
     уметь ответить на любой номер, который может вернуть predict.
+
+    Переводы необязательны, и это не послабление: все колонки выровнены по
+    документам, поэтому имя на каждом языке выбирается ТЕМ ЖЕ индексом, что и
+    основное, — иначе кластер получил бы английское имя одной темы и русское
+    другой, и расхождение было бы видно только человеку, читающему оба.
     """
     result: list[ClusterTopic] = []
     labels_array = np.asarray(labels)
@@ -311,15 +336,23 @@ def dominant_topics(
         # же данных мог бы подписать кластер по-другому.
         best_topic = min(counts, key=lambda key: (-counts[key], key))
         name = ""
+        name_ru = ""
+        name_tg = ""
         for index in members:
             if topic_ids[int(index)] == best_topic:
                 name = topic_names[int(index)]
+                if topic_names_ru is not None:
+                    name_ru = str(topic_names_ru[int(index)] or "")
+                if topic_names_tg is not None:
+                    name_tg = str(topic_names_tg[int(index)] or "")
                 break
         result.append(
             ClusterTopic(
                 cluster=cluster,
                 topic_id=best_topic,
                 topic=name,
+                topic_ru=name_ru,
+                topic_tg=name_tg,
                 share=float(counts[best_topic] / members.size),
                 size=int(members.size),
             )

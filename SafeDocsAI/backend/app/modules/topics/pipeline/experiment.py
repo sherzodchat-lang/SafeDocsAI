@@ -135,7 +135,19 @@ def fit_on(corpus: Corpus, X: np.ndarray, k: int, *, random_state: int = RANDOM_
     model = KMeans(n_clusters=k, random_state=random_state, normalize=True).fit(X)
     assert model.labels_ is not None
     topics = dominant_topics(
-        model.labels_, corpus.labels("topic_id"), corpus.labels("topic"), k
+        model.labels_,
+        corpus.labels("topic_id"),
+        # localized_labels("en"), а не labels("topic"): колонка topic переведена
+        # вместе с документом, и подпись «как у первого документа кластера»
+        # оказывалась на языке, какой попадётся. Основное имя обязано быть
+        # одноязычным — по нему сходятся отчёты и назначения прошлых версий.
+        corpus.localized_labels("en"),
+        k,
+        # Переводы записываются ЗДЕСЬ, при обучении, а не добираются потом:
+        # артефакт уезжает на сервер без корпуса, и подпись, забытая на этом
+        # шаге, восстанавливается только повторным прогоном.
+        corpus.localized_labels("ru"),
+        corpus.localized_labels("tg"),
     )
     return Fitted(kmeans=model, corpus=corpus, X=X, cluster_topics=topics)
 

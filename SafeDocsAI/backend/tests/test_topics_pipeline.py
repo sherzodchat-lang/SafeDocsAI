@@ -17,6 +17,7 @@
 на подставной функции с заранее известными векторами.
 """
 
+import dataclasses
 import json
 import os
 import sys
@@ -76,6 +77,10 @@ def record(
         "language": language,
         "topic_id": topic_id,
         "topic": f"тема {topic_id}",
+        # Русское название заведомо отличается от основного: совпадающие
+        # значения не дали бы отличить «подпись взята из своей колонки» от
+        # «взята из соседней».
+        "topic_ru": f"тема {topic_id} по-русски",
         "subtopic_id": subtopic_id,
         "dataset_origin": origin,
         "is_synthetic": origin == "synthetic",
@@ -193,6 +198,66 @@ class CorpusTests(unittest.TestCase):
 
     def test_counts(self):
         self.assertEqual(self.corpus.counts("dataset_origin"), {"real": 2, "synthetic": 1})
+
+
+class LocalizedTopicNameTests(unittest.TestCase):
+    """Колонка topic переведена ВМЕСТЕ с документом.
+
+    Из-за этого подпись кластера, взятая «у первого попавшегося документа»,
+    доставалась на случайном языке: в боевом артефакте так появился кластер,
+    подписанный по-таджикски посреди английских подписей. Здесь закрепляется
+    способ взять имя темы на ЗАДАННОМ языке.
+    """
+
+    def setUp(self):
+        def named(doc_id, language, topic_id, topic):
+            item = document(doc_id, language=language, topic_id=topic_id)
+            return dataclasses.replace(item, topic=topic)
+
+        self.corpus = Corpus(
+            (
+                named("e1", "en", "A01", "Human resources"),
+                named("r1", "ru", "A01", "Кадры"),
+                named("t1", "tg", "A01", "Кадрҳо"),
+                named("e2", "en", "B01", "History"),
+                named("t2", "tg", "B01", "Таърих"),
+            )
+        )
+
+    def test_names_are_taken_from_the_documents_of_that_language(self):
+        self.assertEqual(
+            self.corpus.topic_names("tg"), {"A01": "Кадрҳо", "B01": "Таърих"}
+        )
+        self.assertEqual(self.corpus.topic_names("ru"), {"A01": "Кадры"})
+
+    def test_the_column_is_aligned_with_the_documents(self):
+        """dominant_topics берёт имя тем же индексом, каким выбрал тему."""
+        self.assertEqual(
+            self.corpus.localized_labels("tg"),
+            ["Кадрҳо", "Кадрҳо", "Кадрҳо", "Таърих", "Таърих"],
+        )
+
+    def test_a_topic_without_that_language_keeps_its_own_name(self):
+        """Пустая подпись превратилась бы в «Кластер 7» на экране.
+
+        У темы B01 русской записи в этой выборке нет, и её документы отдают
+        собственное название — оно хуже перевода, но лучше пустоты.
+        """
+        self.assertEqual(
+            self.corpus.localized_labels("ru"),
+            ["Кадры", "Кадры", "Кадры", "History", "Таърих"],
+        )
+
+    def test_two_names_for_one_topic_in_one_language_are_refused(self):
+        """Иначе подпись менялась бы от прогона к прогону."""
+        corpus = Corpus(
+            (
+                dataclasses.replace(document("a", language="ru"), topic="Кадры"),
+                dataclasses.replace(document("b", language="ru"), topic="Персонал"),
+            )
+        )
+        with self.assertRaises(ValueError):
+            corpus.topic_names("ru")
 
 
 class EmbeddingCacheTests(unittest.TestCase):
@@ -417,8 +482,8 @@ class ModelIOTests(unittest.TestCase):
             embedding_model="qwen3-embedding:8b",
             normalize=True,
             cluster_topics=(
-                ClusterTopic(0, "A01", "Кадровые документы", 0.9, 100),
-                ClusterTopic(1, "B03", "История", 0.5, 40),
+                ClusterTopic(0, "A01", "Human resources", 0.9, 100, "Кадры", "Кадрҳо"),
+                ClusterTopic(1, "B03", "History", 0.5, 40, "История", "Таърих"),
             ),
             params={"k": 2, "random_state": 42},
         )
@@ -434,6 +499,28 @@ class ModelIOTests(unittest.TestCase):
         self.assertEqual(loaded.topic_of(1).topic_id, "B03")
         self.assertAlmostEqual(loaded.topic_of(1).share, 0.5)
         self.assertEqual(loaded.params["random_state"], 42)
+        # Переводы — часть артефакта: продукт читает их отсюда, корпуса рядом с
+        # ним нет.
+        self.assertEqual(loaded.topic_of(1).topic_ru, "История")
+        self.assertEqual(loaded.topic_of(1).topic_tg, "Таърих")
+
+    def test_artifact_without_translations_still_loads(self):
+        """Файлы, обученные до появления переводов, лежат на стендах."""
+        self.make_model().save(self.path)
+        with np.load(self.path, allow_pickle=False) as archive:
+            meta = json.loads(str(archive["meta"]))
+            centroids = archive["centroids"]
+        for item in meta["cluster_topics"]:
+            item.pop("topic_ru")
+            item.pop("topic_tg")
+        np.savez_compressed(
+            self.path, centroids=centroids, meta=np.array(json.dumps(meta, ensure_ascii=False))
+        )
+
+        loaded = TopicModel.load(self.path)
+        self.assertEqual(loaded.topic_of(1).topic, "History")
+        self.assertEqual(loaded.topic_of(1).topic_ru, "")
+        self.assertEqual(loaded.topic_of(1).topic_tg, "")
 
     def test_loaded_model_assigns_new_documents(self):
         self.make_model().save(self.path)
@@ -487,6 +574,37 @@ class DominantTopicTests(unittest.TestCase):
         self.assertEqual(len(result), 3)
         self.assertEqual(result[2].size, 0)
         self.assertEqual(result[2].topic_id, "")
+
+    def test_translations_come_from_the_same_record_as_the_main_name(self):
+        """Иначе кластер получил бы имя одной темы и перевод другой."""
+        labels = [0, 0, 0, 1, 1]
+        topic_ids = ["A01", "A01", "B02", "B02", "B02"]
+        names = ["HR", "HR", "History", "History", "History"]
+        names_ru = ["Кадры", "Кадры", "История", "История", "История"]
+        names_tg = ["Кадрҳо", "Кадрҳо", "Таърих", "Таърих", "Таърих"]
+        result = dominant_topics(labels, topic_ids, names, 2, names_ru, names_tg)
+        self.assertEqual(
+            (result[0].topic, result[0].topic_ru, result[0].topic_tg),
+            ("HR", "Кадры", "Кадрҳо"),
+        )
+        self.assertEqual(
+            (result[1].topic, result[1].topic_ru, result[1].topic_tg),
+            ("History", "История", "Таърих"),
+        )
+
+    def test_without_translations_the_fields_are_empty_and_nothing_breaks(self):
+        """Корпус предыдущей версии переводов не содержит вовсе."""
+        result = dominant_topics([0, 0], ["A01", "A01"], ["HR", "HR"], 1)
+        self.assertEqual(result[0].topic, "HR")
+        self.assertEqual(result[0].topic_ru, "")
+        self.assertEqual(result[0].topic_tg, "")
+
+    def test_empty_cluster_has_no_translations_either(self):
+        result = dominant_topics(
+            [0, 0], ["A01", "A01"], ["HR", "HR"], 2, ["Кадры", "Кадры"], ["Кадрҳо", "Кадрҳо"]
+        )
+        self.assertEqual(result[1].topic_ru, "")
+        self.assertEqual(result[1].topic_tg, "")
 
 
 class ExperimentWiringTests(unittest.TestCase):

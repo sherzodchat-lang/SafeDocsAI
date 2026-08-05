@@ -10,7 +10,7 @@ import { useSessionRole } from '../hooks/useSessionRole';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage, resolveErrorCode } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
-import { buildTopicFilterSearch, resolveTopicShare, sortTopics } from '../lib/topics';
+import { buildTopicFilterSearch, isEmptyTopic, resolveTopicName, resolveTopicShare, sortTopics } from '../lib/topics';
 import { topicsService } from '../services/topicsService';
 
 // Модель могли ещё не обучить — для пользователя это состояние системы, а не
@@ -22,10 +22,20 @@ const REASSIGN_IN_PROGRESS_CODE = 'topic.reassign_in_progress';
 // кто смотрит метрики каждый день, иначе открывать их пришлось бы каждый заход.
 const MODEL_DETAILS_STORAGE_KEY = 'knowledgeai.topics.modelDetailsOpen';
 
-const readModelDetailsPreference = () => {
+// Пустые темы свёрнуты тем же приёмом и с той же памятью. Модель различает
+// двадцать тем, а в небольшой базе документы попадают в три-четыре — остальные
+// строки показывали бы нули и вытесняли с экрана то, ради чего сюда пришли.
+// Список при этом не выброшен: он отвечает на вопрос «что модель вообще
+// умеет», и администратору этот ответ нужен.
+const EMPTY_TOPICS_STORAGE_KEY = 'knowledgeai.topics.emptyOpen';
+
+const readStoredFlag = (key) => {
     if (typeof window === 'undefined') return false;
-    return localStorage.getItem(MODEL_DETAILS_STORAGE_KEY) === 'true';
+    return localStorage.getItem(key) === 'true';
 };
+
+const readModelDetailsPreference = () => readStoredFlag(MODEL_DETAILS_STORAGE_KEY);
+const readEmptyTopicsPreference = () => readStoredFlag(EMPTY_TOPICS_STORAGE_KEY);
 
 const formatMetric = (value, fallback) => {
     const numeric = Number(value);
@@ -51,6 +61,7 @@ const TopicsPage = () => {
     const [model, setModel] = useState(null);
     const [modelError, setModelError] = useState('');
     const [detailsOpen, setDetailsOpen] = useState(readModelDetailsPreference);
+    const [emptyOpen, setEmptyOpen] = useState(readEmptyTopicsPreference);
     const [reloadToken, setReloadToken] = useState(0);
     const [isReassigning, setIsReassigning] = useState(false);
     const [reassignNotice, setReassignNotice] = useState(null);
@@ -113,6 +124,14 @@ const TopicsPage = () => {
         });
     }, []);
 
+    const toggleEmpty = useCallback(() => {
+        setEmptyOpen((prev) => {
+            const next = !prev;
+            localStorage.setItem(EMPTY_TOPICS_STORAGE_KEY, String(next));
+            return next;
+        });
+    }, []);
+
     const handleReassign = useCallback(async () => {
         setIsReassigning(true);
         setReassignNotice(null);
@@ -139,14 +158,27 @@ const TopicsPage = () => {
         [topics],
     );
 
-    const visibleTopics = useMemo(() => {
+    // Список делится надвое: темы с источниками и пустые. Пустых на небольшой
+    // базе большинство (модель различает двадцать тем, документы попадают в
+    // три-четыре), и показанные вперемешку они превращают экран в столбец
+    // нулей.
+    //
+    // При поиске деления нет: пользователь назвал тему сам, и прятать
+    // найденное под второе раскрытие значило бы отфильтровать его же запрос
+    // ещё раз.
+    const { visibleTopics, filledTopics, emptyTopics } = useMemo(() => {
         const query = searchTerm.trim().toLowerCase();
         const matching = query
-            ? topics.filter((topic) => String(topic?.label || '').toLowerCase().includes(query))
+            ? topics.filter((topic) => resolveTopicName(topic, locale).toLowerCase().includes(query))
             : topics;
+        const sorted = sortTopics(matching);
 
-        return sortTopics(matching);
-    }, [searchTerm, topics]);
+        return {
+            visibleTopics: sorted,
+            filledTopics: query ? sorted : sorted.filter((topic) => !isEmptyTopic(topic)),
+            emptyTopics: query ? [] : sorted.filter(isEmptyTopic),
+        };
+    }, [locale, searchTerm, topics]);
 
     const modelClusterCount = model?.cluster_count ?? model?.k;
     const metricFallback = t('topics.model.unknown');
@@ -201,41 +233,86 @@ const TopicsPage = () => {
                         {searchTerm.trim() ? t('topics.noMatches') : t('topics.empty')}
                     </p>
                 ) : (
-                    <ul className="space-y-2">
-                        {visibleTopics.map((topic) => {
-                            const share = resolveTopicShare(topic, totalDocuments);
-                            const percent = Math.round(share * 100);
-                            const label = String(topic.label || '').trim();
+                    <>
+                        {filledTopics.length === 0 ? (
+                            <p className="rounded-xl bg-slate-50 p-8 text-center text-sm text-slate-500">{t('topics.empty')}</p>
+                        ) : (
+                            <ul className="space-y-2">
+                                {filledTopics.map((topic) => {
+                                    const share = resolveTopicShare(topic, totalDocuments);
+                                    const percent = Math.round(share * 100);
+                                    // Подпись на языке интерфейса, с откатом к
+                                    // устойчивому имени темы: английских экранов в
+                                    // продукте нет.
+                                    const label = resolveTopicName(topic, locale);
 
-                            return (
-                                <li key={topic.cluster_index}>
-                                    {/* Клик по теме ведёт к источникам этой темы. Номер
-                                        кластера уходит в адрес параметром запроса и на
-                                        экране не показывается ни здесь, ни там. */}
-                                    <Link
-                                        to={`/sources${buildTopicFilterSearch(topic.cluster_index, label)}`}
-                                        aria-label={t('topics.open', { name: label })}
-                                        className="block rounded-xl border border-slate-200 px-4 py-3 transition hover:border-[#1f3a60]/40 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
+                                    return (
+                                        <li key={topic.cluster_index}>
+                                            {/* Клик по теме ведёт к источникам этой темы. Номер
+                                                кластера уходит в адрес параметром запроса и на
+                                                экране не показывается ни здесь, ни там. */}
+                                            <Link
+                                                to={`/sources${buildTopicFilterSearch(topic.cluster_index, label)}`}
+                                                aria-label={t('topics.open', { name: label })}
+                                                className="block rounded-xl border border-slate-200 px-4 py-3 transition hover:border-[#1f3a60]/40 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
+                                            >
+                                                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                                    <span className="min-w-0 break-words text-sm font-semibold text-slate-900">{label}</span>
+                                                    <span className="flex shrink-0 items-center gap-3 text-xs text-slate-500">
+                                                        <span>{t('topics.documentCount', { count: topic.document_count })}</span>
+                                                        <span className="font-semibold text-slate-700">{t('topics.share', { value: percent })}</span>
+                                                        <ChevronRight className="h-4 w-4 text-slate-400" />
+                                                    </span>
+                                                </div>
+                                                {/* Полоса вместо графика: доля читается быстрее
+                                                    в сравнении с соседями, а библиотек ради этого
+                                                    в проекте нет и заводить их не из-за чего. */}
+                                                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                                                    <div className="h-full rounded-full bg-[#1f3a60]" style={{ width: `${Math.max(percent, 1)}%` }} />
+                                                </div>
+                                            </Link>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
+
+                        {/* Пустые темы — под раскрытием, тем же приёмом, что «О модели»
+                            здесь и «Подробности» в списке источников. Ссылками они НЕ
+                            делаются: переход в список источников по пустой теме ведёт на
+                            пустой экран, и предлагать его незачем. */}
+                        {emptyTopics.length > 0 ? (
+                            <div className="mt-4 border-t border-slate-100 pt-4">
+                                <div className="flex flex-wrap items-center gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={toggleEmpty}
+                                        aria-expanded={emptyOpen}
+                                        className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1"
                                     >
-                                        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                                            <span className="min-w-0 break-words text-sm font-semibold text-slate-900">{label}</span>
-                                            <span className="flex shrink-0 items-center gap-3 text-xs text-slate-500">
-                                                <span>{t('topics.documentCount', { count: topic.document_count })}</span>
-                                                <span className="font-semibold text-slate-700">{t('topics.share', { value: percent })}</span>
-                                                <ChevronRight className="h-4 w-4 text-slate-400" />
-                                            </span>
-                                        </div>
-                                        {/* Полоса вместо графика: доля читается быстрее
-                                            в сравнении с соседями, а библиотек ради этого
-                                            в проекте нет и заводить их не из-за чего. */}
-                                        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
-                                            <div className="h-full rounded-full bg-[#1f3a60]" style={{ width: `${Math.max(percent, 1)}%` }} />
-                                        </div>
-                                    </Link>
-                                </li>
-                            );
-                        })}
-                    </ul>
+                                        <ChevronDown className={cn('h-4 w-4 transition-transform duration-150', emptyOpen && 'rotate-180')} />
+                                        {t('topics.emptyClusters.action', { count: emptyTopics.length })}
+                                    </button>
+                                    {!emptyOpen ? (
+                                        <span className="text-xs text-slate-400">{t('topics.emptyClusters.hint')}</span>
+                                    ) : null}
+                                </div>
+
+                                {emptyOpen ? (
+                                    <ul className="mt-3 flex flex-wrap gap-2">
+                                        {emptyTopics.map((topic) => (
+                                            <li
+                                                key={topic.cluster_index}
+                                                className="rounded-lg border border-dashed border-slate-200 px-3 py-1.5 text-xs text-slate-400"
+                                            >
+                                                {resolveTopicName(topic, locale)}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : null}
+                            </div>
+                        ) : null}
+                    </>
                 )}
             </section>
 

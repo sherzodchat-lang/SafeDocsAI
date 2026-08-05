@@ -40,6 +40,8 @@ from dbfixtures import DatabaseBackedTestCase  # noqa: E402
 from topicfixtures import (  # noqa: E402
     ARTIFACT_EMBEDDING_MODEL,
     LABELS,
+    LABELS_RU,
+    LABELS_TG,
     METRICS,
     write_language_artifact,
 )
@@ -109,6 +111,8 @@ class TopicsApiTestCase(DatabaseBackedTestCase):
                 notebook_id=notebook.id,
                 topic_cluster_index=cluster,
                 topic_label=None if cluster is None else LABELS[cluster],
+                topic_label_ru=None if cluster is None else LABELS_RU[cluster],
+                topic_label_tg=None if cluster is None else LABELS_TG[cluster],
                 topic_model_version=version,
             )
         )
@@ -215,10 +219,43 @@ class DistributionTests(TopicsApiTestCase):
         self.assertAlmostEqual(sum(shares.values()), 1.0)
 
     async def test_empty_clusters_stay_in_the_answer(self):
-        """Иначе два блокнота дают два разных набора строк и не сопоставляются."""
+        """Иначе два блокнота дают два разных набора строк и не сопоставляются.
+
+        Пустые кластеры остаются и по второй причине: полный список — это
+        ответ администратору на вопрос «что модель вообще различает». Прячет
+        их от обычного пользователя ЭКРАН, свернув под раскрытие, а не выдача:
+        отфильтровав их здесь, мы отняли бы данные у всех сразу.
+        """
         rows = (await self.client.get(TOPICS_URL)).json()
         self.assertEqual(len(rows), len(LABELS))
         self.assertEqual([row["label"] for row in rows][0], LABELS[0])
+        self.assertEqual([row["document_count"] for row in rows][-1], 0)
+
+    async def test_every_label_comes_back_and_the_client_chooses(self):
+        """Переводы — показать пользователю, label — сослаться на тему.
+
+        Интерфейс переведён на ru и tg, английских экранов в продукте нет, и
+        одно только label означало бы английские подписи у всех. Решать за
+        клиента, какую из подписей показать, API всё же не должен: подпись темы
+        путешествует между экранами параметром фильтра.
+        """
+        rows = (await self.client.get(TOPICS_URL)).json()
+        by_cluster = {row["cluster_index"]: row for row in rows}
+        self.assertEqual(by_cluster[0]["label"], LABELS[0])
+        self.assertEqual(by_cluster[0]["label_ru"], LABELS_RU[0])
+        self.assertEqual(by_cluster[0]["label_tg"], LABELS_TG[0])
+
+    async def test_a_model_without_translations_answers_null_not_english(self):
+        """null — сигнал клиенту откатиться к label, а не «перевод пустой»."""
+        write_language_artifact(self.artifact, localized=False)
+        forget_cached_artifacts()
+        async with self.session_factory() as session:
+            await TopicsService.sync_active_model(session)
+
+        rows = (await self.client.get(TOPICS_URL)).json()
+        self.assertEqual({row["label_ru"] for row in rows}, {None})
+        self.assertEqual({row["label_tg"] for row in rows}, {None})
+        self.assertEqual({row["label"] for row in rows}, set(LABELS))
 
     async def test_the_biggest_topic_comes_first(self):
         rows = (await self.client.get(TOPICS_URL)).json()
@@ -255,6 +292,16 @@ class DistributionTests(TopicsApiTestCase):
         self.assertEqual(
             {item["topic_label"] for item in labelled},
             {LABELS[0], LABELS[1]},
+        )
+        # Переводы тоже хранимые и приходят рядом с ключом: клиент показывает
+        # их, а к topic_label откатывается, когда перевода нет.
+        self.assertEqual(
+            {item["topic_label_ru"] for item in labelled},
+            {LABELS_RU[0], LABELS_RU[1]},
+        )
+        self.assertEqual(
+            {item["topic_label_tg"] for item in labelled},
+            {LABELS_TG[0], LABELS_TG[1]},
         )
         self.assertIn("topic_cluster_index", body[0])
 
