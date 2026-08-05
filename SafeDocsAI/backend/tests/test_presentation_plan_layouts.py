@@ -21,6 +21,12 @@
    будет выбирать тот, кто не видит колоды.
 4. Пределы плана (число секций из SLIDE_COUNT_MIN/MAX) от нового поля не
    поехали.
+5. Предел серии одинаковых раскладок проверяет СХЕМА, а не текст промпта.
+   Просьба «не больше трёх подряд» стояла в план-промпте, и живой прогон отдал
+   семь списков подряд: правило, которое некому проверить, — не механизм.
+   Проверять его обязана машина, а отказ — говорить, что именно переразметить,
+   и называть честный запасной выход (quote), иначе требование разнообразия
+   превращается в требование выдумать сравнение.
 """
 
 import json
@@ -43,6 +49,10 @@ from app.modules.presentations.constants import (  # noqa: E402
     SLIDE_LAYOUTS,
 )
 from app.modules.presentations.llm_schemas import (  # noqa: E402
+    PLAN_LAYOUT_RUN_MAX as SCHEMA_LAYOUT_RUN_MAX,  # noqa: E402
+)
+from app.modules.presentations.llm_schemas import (  # noqa: E402
+    RENDERER_ADDED_SLIDES,
     LlmResponseError,
     content_section_count,
     validate_plan,
@@ -173,8 +183,12 @@ class ThePlanLimitsStillHold(unittest.TestCase):
         for slide_count in (SLIDE_COUNT_MIN, SLIDE_COUNT_MAX):
             with self.subTest(slide_count=slide_count):
                 sections = content_section_count(slide_count)
+                # Раскладки берутся ЧЕРЕДОВАНИЕМ, а не сплошным списком: на
+                # предельном заказе сплошной список — это нарушение предела
+                # серии, и проверка числа секций падала бы на чужом правиле.
                 plan = validate(
-                    [LAYOUT_BULLETS] * sections, slide_count=slide_count
+                    [SLIDE_LAYOUTS[index % len(SLIDE_LAYOUTS)] for index in range(sections)],
+                    slide_count=slide_count,
                 )
                 self.assertEqual(len(plan.sections), sections)
 
@@ -190,8 +204,166 @@ class ThePlanLimitsStillHold(unittest.TestCase):
         self.assertIn(f"exactly {SECTIONS}", text)
 
     def test_a_section_too_many_is_still_rejected(self):
+        # Лишняя секция размечена ДРУГОЙ раскладкой нарочно: сплошной список из
+        # четырёх нарушил бы заодно и предел серии, и проверка счёта секций
+        # прошла бы на чужом отказе, ничего про счёт не доказав.
+        text = rejection(
+            self,
+            {
+                "title": "Т",
+                "sections": [
+                    section(index, LAYOUT_BULLETS if index <= SECTIONS else LAYOUT_QUOTE)
+                    for index in range(1, SECTIONS + 2)
+                ],
+            },
+            slide_count=SLIDE_COUNT,
+        )
+        self.assertIn(f"exactly {SECTIONS}", text)
+
+
+class TheRunLimitIsCheckedByTheSchema(unittest.TestCase):
+    """Предел серии одинаковых раскладок проверяет МАШИНА, а не промпт.
+
+    Правило «не больше PLAN_LAYOUT_RUN_MAX подряд» стояло только в тексте
+    план-промпта, и живой прогон показал, чего это стоит: из восьми
+    содержательных секций нестандартную раскладку получила одна — семь списков
+    подряд при заявленном пределе три. Счётчик расхождений при этом показал, что
+    слайды исполнили назначенное, то есть однообразие пришло из плана. Просьба,
+    которую нечем проверить, — не механизм.
+
+    Отвергнутый план уходит в уже существующий повтор (call_with_one_retry,
+    LLM_CALL_ATTEMPTS = 2), и текст отказа — единственная подсказка второй
+    попытки: он обязан назвать раскладку, длину серии и предел.
+    """
+
+    def deck(self, layouts: list[str]):
+        """План на столько слайдов, сколько в нём секций, — заказ под разметку.
+
+        Число секций тут вспомогательное: проверяется предел серии, и упереться
+        в чужую проверку (счёт секций) на полпути было бы обидно.
+        """
+        return validate(layouts, slide_count=len(layouts) + 2)
+
+    def deck_rejection(self, layouts: list[str]) -> str:
+        with self.assertRaises(LlmResponseError) as ctx:
+            self.deck(layouts)
+        return ctx.exception.error_text
+
+    def test_a_run_exactly_at_the_limit_passes(self):
+        # Ровно предел — это ЧЕСТНАЯ разметка, а не нарушение: материал,
+        # который и правда не держит ни сравнений, ни цифр, ни порядка, имеет
+        # право на три списка подряд.
+        layouts = [LAYOUT_BULLETS] * PLAN_LAYOUT_RUN_MAX + [LAYOUT_QUOTE]
+        plan = self.deck(layouts)
+        self.assertEqual([item.layout for item in plan.sections], layouts)
+
+    def test_one_section_over_the_limit_is_rejected(self):
         with self.assertRaises(LlmResponseError):
-            validate([LAYOUT_BULLETS] * (SECTIONS + 1))
+            self.deck([LAYOUT_BULLETS] * (PLAN_LAYOUT_RUN_MAX + 1))
+
+    def test_the_rejection_names_the_layout_the_length_and_the_limit(self):
+        """«Validation failed» бесполезен: на нём повтор выродится в ту же разметку.
+
+        Все три факта обязаны быть в тексте — какая раскладка, сколько её
+        подряд и какой предел, — иначе модель не знает ни что чинить, ни до
+        какого числа.
+        """
+        over = PLAN_LAYOUT_RUN_MAX + 1
+        text = self.deck_rejection([LAYOUT_BULLETS] * over)
+        self.assertIn(repr(LAYOUT_BULLETS), text)
+        self.assertIn(f"{over} in a row", text)
+        self.assertIn(f"more than {PLAN_LAYOUT_RUN_MAX} sections in a row", text)
+        # И место: секции названы номерами, по которым модель найдёт их в своём
+        # же ответе.
+        self.assertIn(f"sections.0-{over - 1}", text)
+
+    def test_the_rejection_offers_the_honest_way_out(self):
+        """Отказ не имеет права толкать на враньё.
+
+        Требование разнообразия без названного запасного выхода читается как
+        «выдумай сравнение», а выдуманное сравнение хуже однообразной колоды.
+        Честный выход ровно один: дословная формулировка есть в любом
+        документе, в отличие от второй стороны или центрального числа.
+        """
+        text = self.deck_rejection([LAYOUT_BULLETS] * (PLAN_LAYOUT_RUN_MAX + 1))
+        self.assertIn(repr(LAYOUT_QUOTE), text)
+        self.assertIn("unlike a second side or a central number", text)
+
+    def test_every_layout_is_limited_the_same_way(self):
+        # Предел — про ОДНООБРАЗИЕ, а не про списки. Четыре сравнения подряд
+        # ровно так же означают, что план не смотрел в материал.
+        for layout in SLIDE_LAYOUTS:
+            with self.subTest(layout=layout):
+                text = self.deck_rejection([layout] * (PLAN_LAYOUT_RUN_MAX + 1))
+                self.assertIn(repr(layout), text)
+
+    def test_a_run_broken_by_another_layout_passes(self):
+        """Серия считается ПОДРЯД, а не по всей колоде.
+
+        Иначе предел превратился бы в квоту «не больше трёх списков на колоду»,
+        то есть в прямое требование выдумать форму для четвёртой секции.
+        Комбинация «три списка, цитата, три списка» честна и обязана проходить.
+        """
+        layouts = (
+            [LAYOUT_BULLETS] * PLAN_LAYOUT_RUN_MAX
+            + [LAYOUT_QUOTE]
+            + [LAYOUT_BULLETS] * PLAN_LAYOUT_RUN_MAX
+        )
+        plan = self.deck(layouts)
+        self.assertEqual([item.layout for item in plan.sections], layouts)
+
+    def test_the_shortest_deck_of_the_catalogue_still_validates(self):
+        """Колода минимальной длины не должна стать невозможной.
+
+        При SLIDE_COUNT_MIN содержательных секций всего
+        content_section_count(SLIDE_COUNT_MIN), и если их не больше предела, то
+        сплошной список — законный план. Предел, который запрещает самый
+        короткий заказ, запрещает не лень, а продукт.
+        """
+        sections = content_section_count(SLIDE_COUNT_MIN)
+        self.assertLessEqual(
+            sections,
+            PLAN_LAYOUT_RUN_MAX,
+            "предел серии стал строже самой короткой колоды: заказ на "
+            f"{SLIDE_COUNT_MIN} слайдов больше нельзя разметить одними списками",
+        )
+        plan = validate([LAYOUT_BULLETS] * sections, slide_count=SLIDE_COUNT_MIN)
+        self.assertEqual(len(plan.sections), sections)
+
+    def test_all_violating_runs_are_named_not_just_the_first(self):
+        """Попытка после отказа ровно одна (LLM_CALL_ATTEMPTS = 2).
+
+        План, исправленный в одном месте из двух, сгорит вместе с заказом,
+        поэтому претензия обязана перечислить все нарушенные серии сразу.
+        """
+        layouts = (
+            [LAYOUT_BULLETS] * (PLAN_LAYOUT_RUN_MAX + 1)
+            + [LAYOUT_QUOTE]
+            + [LAYOUT_STEPS] * (PLAN_LAYOUT_RUN_MAX + 1)
+        )
+        text = self.deck_rejection(layouts)
+        self.assertIn(repr(LAYOUT_BULLETS), text)
+        self.assertIn(repr(LAYOUT_STEPS), text)
+
+    def test_only_content_sections_are_counted(self):
+        """Титул и «Источники» раскладок не имеют — и в план не попадают.
+
+        Их дорисовывает рендерер (RENDERER_ADDED_SLIDES), поэтому в sections
+        лежат ТОЛЬКО содержательные секции, и исключать из счёта нечего.
+        Сторож на случай, если в план однажды заведут служебную секцию: тогда
+        предел начнёт считать её частью серии, и это придётся заметить здесь, а
+        не по странной колоде.
+        """
+        sections = content_section_count(SLIDE_COUNT_MAX)
+        self.assertEqual(sections + RENDERER_ADDED_SLIDES, SLIDE_COUNT_MAX)
+        # Ровно предел на каждую серию по всей длине предельного заказа —
+        # разметка, законная и целиком содержательная.
+        layouts = [
+            SLIDE_LAYOUTS[(index // PLAN_LAYOUT_RUN_MAX) % len(SLIDE_LAYOUTS)]
+            for index in range(sections)
+        ]
+        plan = validate(layouts, slide_count=SLIDE_COUNT_MAX)
+        self.assertEqual(len(plan.sections), sections)
 
 
 class ThePlanPromptAsksForTheMarkup(unittest.TestCase):
@@ -233,11 +405,27 @@ class ThePlanPromptAsksForTheMarkup(unittest.TestCase):
         self.assertIn("never the turn", prompt)
         self.assertIn("Do not cycle through", prompt)
 
-    def test_the_rule_allows_a_deck_of_nothing_but_lists(self):
-        # Если материал не даёт ни сравнений, ни цифр, ни порядка, честнее вся
-        # колода списками, чем натянутые формы. Промпт обязан сказать это
-        # прямо: иначе модель прочтёт требование разнообразия как обязанность.
-        self.assertIn("that is a correct plan, not a failure", self.plan_prompt())
+    def test_the_rule_offers_quote_as_the_honest_way_to_break_a_run(self):
+        """Выход «размечай всё списками» промпт предлагать больше не имеет права.
+
+        Раньше он предлагал: «если материала нет — все секции bullets, это
+        корректный план». С тех пор как предел серии ПРОВЕРЯЕТСЯ схемой, этот
+        совет прямо противоречил бы проверке — модель, ему поверившая, получала
+        бы отказ за исполнение правила. Заменить его можно только тем, что можно
+        взять, ничего не выдумав: дословная формулировка есть в любом документе.
+        """
+        prompt = self.plan_prompt()
+        self.assertIn(f"break the run with {LAYOUT_QUOTE}", prompt)
+        self.assertIn("a wording that matters literally is in every document", prompt)
+        # И честность второй половины правила остаётся: выдумывать материал под
+        # форму запрещено прямым текстом.
+        self.assertIn("Never make up a comparison or a number", prompt)
+        self.assertIn("is a correct plan, not a failure", prompt)
+
+    def test_the_prompt_says_the_run_limit_is_checked(self):
+        # Валидатор — страховка, а не замена: повтор стоит целого вызова
+        # модели, и предупреждённая модель чаще попадает с первой попытки.
+        self.assertIn("This rule is CHECKED", self.plan_prompt())
 
     def test_the_run_limit_reaches_the_prompt_as_a_number(self):
         # Требование «не больше N одинаковых подряд» осмысленно только здесь:
@@ -245,6 +433,25 @@ class ThePlanPromptAsksForTheMarkup(unittest.TestCase):
         # руками, оно разъехалось бы с ней молча.
         self.assertIn(
             f"more than {PLAN_LAYOUT_RUN_MAX} sections in a row", self.plan_prompt()
+        )
+
+    def test_the_prompt_and_the_validator_read_the_same_constant(self):
+        """Сторож на расхождение: два числа вместо одного — уже было.
+
+        Предел серии жил в constants.py как просьба, схема его не знала, и
+        разошлись они ровно так, как и должны были. Теперь число объявлено в
+        схеме (llm_schemas.PLAN_LAYOUT_RUN_MAX) и переэкспортировано через
+        constants.py; проверяется не совпадение значений, а ТОЖДЕСТВО объекта —
+        совпадающие значения ничего не доказывают, пока их два.
+        """
+        self.assertIs(PLAN_LAYOUT_RUN_MAX, SCHEMA_LAYOUT_RUN_MAX)
+        # И то же самое число доезжает до текста промпта. Сдвинутый предел
+        # обязан сдвинуть промпт — иначе модель просят об одном, а отвергают за
+        # другое.
+        prompt = self.plan_prompt()
+        self.assertIn(f"more than {SCHEMA_LAYOUT_RUN_MAX} sections in a row", prompt)
+        self.assertNotIn(
+            f"more than {SCHEMA_LAYOUT_RUN_MAX + 1} sections in a row", prompt
         )
 
     def test_the_prompt_explains_why_the_choice_is_here(self):
