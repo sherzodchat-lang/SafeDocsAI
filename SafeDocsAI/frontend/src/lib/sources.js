@@ -25,6 +25,21 @@ export const resolveStatus = (status) => {
 export const isSourceInProgress = (status) => IN_PROGRESS_STATUSES.includes(resolveStatus(status));
 
 /**
+ * Заливка бейджа статуса — одна на все экраны.
+ *
+ * Таблица «Все источники» красила четыре статуса в четыре цвета, а панель
+ * блокнота знала только «ошибка / всё остальное»: один и тот же документ
+ * выглядел по-разному в двух местах, и «Индексируется» рядом с «Готово» там
+ * было не отличить.
+ */
+export const SOURCE_STATUS_BADGE_CLASS = {
+    ready: 'bg-emerald-100 text-emerald-700',
+    pending: 'bg-slate-100 text-slate-600',
+    indexing: 'bg-amber-100 text-amber-700',
+    error: 'bg-red-100 text-red-700',
+};
+
+/**
  * Причина, по которой источник не проиндексировался.
  *
  * Бэкенд кладёт её в поля error_code и error_text документа (backend/app/api/endpoints/

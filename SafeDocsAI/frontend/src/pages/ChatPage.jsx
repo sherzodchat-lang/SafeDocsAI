@@ -522,43 +522,62 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
         <>
         <div className="h-full w-full min-w-0 overflow-hidden">
             <div className={cn('flex h-full flex-col overflow-hidden bg-white', !isNotebookPanel && 'lg:border-l lg:border-slate-200')}>
-                <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
-                    {isNotebookPanel ? (
-                        <div>
-                            <h3 className="text-lg font-semibold text-slate-900">{t('chat.notebookChatTitle')}</h3>
-                            <p className="mt-1 text-sm text-slate-500">{t('chat.notebookChatDescription')}</p>
-                        </div>
-                    ) : (
-                        <>
-                            <div className="flex flex-wrap items-center gap-2">
-                                <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">
-                                    {formatTodayLabel(locale, t)}
-                                </div>
-                                <NotebookScopeBadge
-                                    notebookId={effectiveNotebookId}
-                                    notebookName={notebookName}
-                                    canReset={canResetScope}
-                                    onReset={resetScope}
-                                    resetTitle={t('chat.scopeResetTitle')}
-                                />
-                            </div>
+                {/* В блокноте чат занимает весь экран, и заголовок «Чат с блокнотом»
+                    повторял бы имя блокнота из шапки страницы. Полоса остаётся
+                    только тогда, когда в ней есть что нажать: пока диалога нет,
+                    сбрасывать нечего, и место отдано первому вопросу. */}
+                {isNotebookPanel ? (
+                    hasConversation ? (
+                        <div className="flex items-center justify-end border-b border-slate-200 bg-white px-4 py-2 sm:px-6">
                             <Button variant="ghost" size="sm" onClick={handleClearChat} disabled={hasPendingMessage}>
                                 {t('chat.clear')}
                             </Button>
-                        </>
-                    )}
-                </div>
+                        </div>
+                    ) : null
+                ) : (
+                    <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <div className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">
+                                {formatTodayLabel(locale, t)}
+                            </div>
+                            <NotebookScopeBadge
+                                notebookId={effectiveNotebookId}
+                                notebookName={notebookName}
+                                canReset={canResetScope}
+                                onReset={resetScope}
+                                resetTitle={t('chat.scopeResetTitle')}
+                            />
+                        </div>
+                        <Button variant="ghost" size="sm" onClick={handleClearChat} disabled={hasPendingMessage}>
+                            {t('chat.clear')}
+                        </Button>
+                    </div>
+                )}
 
                 <div className={cn('scrollbar-soft flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 sm:px-8', isNotebookPanel ? 'bg-slate-50' : 'space-y-6 bg-[#f6f8fc]')}>
                     {isNotebookPanel && !hasConversation ? (
-                        /* Та же мера, что у пустых панелей источников и заметок:
-                           колонка объясняет себя строкой, а не рамкой в треть экрана. */
-                        <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-5 text-center">
-                            <Shield className="h-5 w-5 text-slate-400" />
-                            <h4 className="text-sm font-semibold text-slate-900">{t('chat.emptyTitle')}</h4>
-                            <p className="max-w-md text-xs leading-5 text-slate-500">
+                        /* Пустой чат теперь занимает весь экран, поэтому он не
+                           объясняет интерфейс рамкой, а сразу предлагает первый
+                           вопрос — теми же формулировками, что и общий чат. */
+                        <div className="mx-auto flex h-full min-h-[14rem] max-w-xl flex-col items-center justify-center gap-3 text-center">
+                            <Shield className="h-6 w-6 text-slate-400" />
+                            <h4 className="text-base font-semibold text-slate-900">{t('chat.emptyTitle')}</h4>
+                            <p className="text-sm leading-6 text-slate-500">
                                 {t('chat.emptyDescription')}
                             </p>
+                            <div className="mt-1 flex flex-wrap justify-center gap-2">
+                                {quickQuestions.map((question) => (
+                                    <button
+                                        key={question}
+                                        type="button"
+                                        onClick={() => handleQuickQuestion(question)}
+                                        disabled={hasPendingMessage}
+                                        className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:text-[#1f3a60] disabled:opacity-55"
+                                    >
+                                        {question}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
                     ) : (
                         <div className="w-full min-w-0 space-y-6">
@@ -593,11 +612,14 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
 
                                         {msg.role === 'assistant' && msg.logId && (
                                             <div className="mt-3 flex gap-2 border-t border-slate-200 pt-2">
+                                                {/* Выбранную оценку показываем цветом самого значка:
+                                                    цветная заливка кричала громче, чем весит оценка
+                                                    одного ответа, и гасила серый текст на себе. */}
                                                 <button
                                                     onClick={() => handleFeedback(msg.logId, 'up', idx)}
                                                     className={cn(
                                                         'rounded-md p-1.5 transition',
-                                                        msg.feedback === 'up' ? 'bg-green-100 text-green-600' : 'text-slate-400 hover:bg-slate-100',
+                                                        msg.feedback === 'up' ? 'bg-slate-200 text-emerald-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600',
                                                     )}
                                                     title={t('chat.feedbackGood')}
                                                 >
@@ -607,7 +629,7 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
                                                     onClick={() => handleFeedback(msg.logId, 'down', idx)}
                                                     className={cn(
                                                         'rounded-md p-1.5 transition',
-                                                        msg.feedback === 'down' ? 'bg-red-100 text-red-600' : 'text-slate-400 hover:bg-slate-100',
+                                                        msg.feedback === 'down' ? 'bg-slate-200 text-red-700' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600',
                                                     )}
                                                     title={t('chat.feedbackBad')}
                                                 >

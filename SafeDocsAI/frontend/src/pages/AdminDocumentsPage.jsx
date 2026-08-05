@@ -26,7 +26,7 @@ import { useSources, useSourcesActions } from '../contexts/SourcesContext';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatDocumentLanguage, formatLocaleDate, parseTimestamp } from '../lib/locale';
-import { formatSize, resolveSourceErrorMessage, resolveStatus } from '../lib/sources';
+import { SOURCE_STATUS_BADGE_CLASS, formatSize, resolveSourceErrorMessage, resolveStatus } from '../lib/sources';
 import { TOPIC_LABEL_PARAM, TOPIC_PARAM, matchesTopicFilter, readTopicFilter, resolveTopicLabel } from '../lib/topics';
 
 const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
@@ -119,23 +119,12 @@ const AdminDocumentsPage = ({ notebookId }) => {
         });
     }, []);
 
+    // Заливка приходит из общей таблицы: тот же бейдж рисует панель блокнота.
     const statusMeta = useMemo(() => ({
-        ready: {
-            label: t('documents.status.ready'),
-            badgeClass: 'bg-emerald-100 text-emerald-700',
-        },
-        pending: {
-            label: t('documents.status.pending'),
-            badgeClass: 'bg-slate-100 text-slate-600',
-        },
-        indexing: {
-            label: t('documents.status.indexing'),
-            badgeClass: 'bg-amber-100 text-amber-700',
-        },
-        error: {
-            label: t('documents.status.error'),
-            badgeClass: 'bg-red-100 text-red-700',
-        },
+        ready: { label: t('documents.status.ready'), badgeClass: SOURCE_STATUS_BADGE_CLASS.ready },
+        pending: { label: t('documents.status.pending'), badgeClass: SOURCE_STATUS_BADGE_CLASS.pending },
+        indexing: { label: t('documents.status.indexing'), badgeClass: SOURCE_STATUS_BADGE_CLASS.indexing },
+        error: { label: t('documents.status.error'), badgeClass: SOURCE_STATUS_BADGE_CLASS.error },
     }), [t]);
 
     // Единый слой данных: список, постраничное чтение, опрос индексации и обработка
@@ -473,28 +462,30 @@ const AdminDocumentsPage = ({ notebookId }) => {
                     onDragOver={handleDragOver}
                     onDrop={handleDrop}
                     className={cn(
-                        'rounded-2xl border-2 border-dashed p-8 text-center transition-all duration-200',
+                        'rounded-2xl border-2 border-dashed p-6 text-center transition-colors duration-200',
                         isDragActive
                             ? 'border-[#1f3a60] bg-[#1f3a60]/5'
                             : 'border-slate-300 bg-slate-50',
                     )}
                 >
                     <div className={cn(
-                        'mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full transition-all duration-200',
+                        'mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full transition-colors duration-200',
                         isDragActive
                             ? 'bg-[#1f3a60] text-white'
                             : 'bg-[#1f3a60]/10 text-[#1f3a60]',
                     )}>
-                        <CloudUpload className={cn('h-7 w-7', isDragActive && 'animate-bounce')} />
+                        {/* Захват файла показываем ростом иконки, а не подскоком:
+                            пружина ничего не сообщает и мешает целиться в зону. */}
+                        <CloudUpload className={cn('h-6 w-6 transition-transform duration-200 ease-out', isDragActive && 'scale-110')} />
                     </div>
-                    <h3 className="text-2xl font-bold text-slate-800">
+                    <h3 className="text-lg font-semibold text-slate-800">
                         {isDragActive ? t('documents.dropActive') : t('documents.dropIdle')}
                     </h3>
                     <p className="mt-1 text-sm text-slate-500">{t('documents.supportedFormats')}</p>
 
                     {/* Одна кнопка на всё действие: выбор файла сразу запускает
                         загрузку, поэтому она же и показывает её ход. */}
-                    <div className="mt-5 flex flex-wrap items-center justify-center gap-3" aria-live="polite">
+                    <div className="mt-4 flex flex-wrap items-center justify-center gap-3" aria-live="polite">
                         {/* Кнопка, а не label: скрытый input недоступен с клавиатуры, label не фокусируется. */}
                         <button
                             type="button"
@@ -711,7 +702,10 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                         <tr key={doc.id} className="border-t border-slate-100 text-sm hover:bg-slate-50/70">
                                             <td className="px-5 py-3">
                                                 <div className="flex items-center gap-3">
-                                                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-100 text-red-500">
+                                                    {/* Иконка файла нейтральная: красным на этом экране
+                                                        говорит только сбой индексации, и красный значок
+                                                        у исправного документа спорил с бейджем статуса. */}
+                                                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
                                                         <FileText className="h-4 w-4" />
                                                     </div>
                                                     <div className="min-w-0">
@@ -785,7 +779,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                         <button
                                                             type="button"
                                                             onClick={() => fetchChunks(doc.id, doc.name)}
-                                                            className="rounded-md p-1.5 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                                            className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
                                                             title={t('documents.viewChunks')}
                                                             aria-label={t('documents.viewChunksFor', { name: doc.name })}
                                                         >
@@ -795,7 +789,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                     <button
                                                         type="button"
                                                         onClick={() => openDeleteDialog(doc)}
-                                                        className="rounded-md p-1.5 text-slate-500 transition hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                                        className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
                                                         title={t('documents.delete')}
                                                         aria-label={t('documents.deleteSource', { name: doc.name })}
                                                     >

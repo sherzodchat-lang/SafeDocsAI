@@ -96,6 +96,7 @@ const Layout = () => {
 
     const [notebookHeader, setNotebookHeader] = useState(null);
     const [notebookActions, setNotebookActions] = useState(null);
+    const [notebookTabs, setNotebookTabs] = useState(null);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('knowledgeai.sidebarCollapsed') === 'true');
     const [isLoggingOut, setIsLoggingOut] = useState(false);
 
@@ -154,7 +155,7 @@ const Layout = () => {
     };
 
     return (
-        <NotebookHeaderContext.Provider value={{ notebookHeader, setNotebookHeader, notebookActions, setNotebookActions }}>
+        <NotebookHeaderContext.Provider value={{ notebookHeader, setNotebookHeader, notebookActions, setNotebookActions, notebookTabs, setNotebookTabs }}>
         <div className="min-h-screen bg-[#f3f5f8] lg:flex lg:h-screen lg:overflow-hidden">
             <aside className={cn(
                 'hidden flex-col bg-[#1f3a60] text-white transition-[width] duration-300 lg:flex lg:h-screen',
@@ -236,7 +237,13 @@ const Layout = () => {
             </aside>
 
             <div className="flex min-h-screen flex-1 flex-col lg:h-screen">
-                <header className="border-b border-slate-200 bg-white px-4 py-3 sm:px-6 lg:px-8">
+                {/* Вкладки блокнота стоят в самой шапке, а не блоком под ней:
+                    нижняя граница шапки служит им направляющей, и экран не
+                    начинается с двух полос навигации подряд. */}
+                <header className={cn(
+                    'border-b border-slate-200 bg-white px-4 sm:px-6 lg:px-8',
+                    notebookTabs && notebookTabs.items.length > 0 ? 'pt-3' : 'py-3',
+                )}>
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         {/* min-w-0 обязателен: без него flex-элемент не сжимается ниже длины
                             содержимого, и truncate у имени блокнота (до 255 символов) не работает. */}
@@ -252,26 +259,40 @@ const Layout = () => {
                                     </span>
                                 </div>
                             ) : notebookHeader ? (
-                                <div className="flex min-w-0 flex-col gap-1">
-                                    <h1 className="truncate text-lg lg:text-2xl font-extrabold text-[#1f3a60]" title={notebookHeader.name}>
-                                        {notebookHeader.name}
-                                    </h1>
-                                    {notebookHeader.description ? (
-                                        <p className="truncate text-sm text-slate-500" title={notebookHeader.description}>{notebookHeader.description}</p>
-                                    ) : null}
-                                    <div className="flex flex-wrap items-center gap-3 text-[11px] font-medium text-slate-400">
-                                        <div className="inline-flex items-center gap-1.5">
+                                /* Описание, даты и профиль стоят одной строкой под именем:
+                                   тремя отдельными строками шапка занимала треть высоты
+                                   экрана, а данные в ней справочные — их читают редко, но
+                                   убрать нельзя. */
+                                <div className="flex min-w-0 flex-col gap-0.5">
+                                    <div className="flex min-w-0 items-center gap-2">
+                                        <h1 className="truncate text-lg lg:text-2xl font-extrabold text-[#1f3a60]" title={notebookHeader.name}>
+                                            {notebookHeader.name}
+                                        </h1>
+                                        {/* Слово «Профиль» ушло в подсказку: в строке с именем
+                                            блокнота оно занимало место, а значение говорит само
+                                            за себя. */}
+                                        <span
+                                            title={`${t('layout.actions.profile')}: ${notebookHeader.domainProfile}`}
+                                            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#1f3a60]/10 px-2.5 py-0.5 text-[11px] font-bold text-[#1f3a60]"
+                                        >
+                                            <Bookmark className="h-3 w-3" />
+                                            {notebookHeader.domainProfile}
+                                        </span>
+                                    </div>
+                                    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] font-medium text-slate-400">
+                                        {notebookHeader.description ? (
+                                            <span className="max-w-[22rem] truncate text-slate-500" title={notebookHeader.description}>
+                                                {notebookHeader.description}
+                                            </span>
+                                        ) : null}
+                                        <span className="inline-flex items-center gap-1.5">
                                             <CalendarDays className="h-3.5 w-3.5" />
-                                            <span>{t('layout.actions.created')}: {notebookHeader.createdAtText}</span>
-                                        </div>
-                                        <div className="inline-flex items-center gap-1.5">
+                                            {t('layout.actions.created')}: {notebookHeader.createdAtText}
+                                        </span>
+                                        <span className="inline-flex items-center gap-1.5">
                                             <Clock3 className="h-3.5 w-3.5" />
-                                            <span>{t('layout.actions.updated')}: {notebookHeader.updatedAtText}</span>
-                                        </div>
-                                        <div className="inline-flex items-center gap-1.5">
-                                            <Bookmark className="h-3.5 w-3.5" />
-                                            <span>{t('layout.actions.profile')}: {notebookHeader.domainProfile}</span>
-                                        </div>
+                                            {t('layout.actions.updated')}: {notebookHeader.updatedAtText}
+                                        </span>
                                     </div>
                                 </div>
                             ) : null}
@@ -320,31 +341,36 @@ const Layout = () => {
                                                         : t('layout.actions.makeActiveForChat')}
                                                 </Button>
                                             ) : null}
-                                            {/* Правка стоит рядом с удалением: шапка — единственное место,
-                                                где имя, описание и профиль блокнота видны целиком. */}
+                                            {/* Правка и удаление — обслуживание блокнота, а не работа
+                                                в нём: они остались рядом, но значками. Тремя полными
+                                                кнопками шапка спорила с единственным действием,
+                                                которое здесь и правда выбирают, — областью чата.
+                                                Названия действий целиком остались в подсказке и в
+                                                метке для скринридера. */}
                                             {notebookActions.onEdit ? (
                                                 <Button
                                                     type="button"
                                                     variant="outline"
-                                                    className="justify-center"
+                                                    size="icon"
                                                     disabled={notebookActions.editDisabled}
                                                     title={notebookActions.editTitle}
+                                                    aria-label={notebookActions.editTitle}
                                                     onClick={notebookActions.onEdit}
                                                 >
                                                     <Pencil className="h-4 w-4" />
-                                                    {t('layout.actions.edit')}
                                                 </Button>
                                             ) : null}
                                             <Button
                                                 type="button"
-                                                variant="destructive"
-                                                className="justify-center"
+                                                variant="outline"
+                                                size="icon"
+                                                className="text-red-600 hover:border-red-300 hover:bg-red-50 hover:text-red-700"
                                                 disabled={notebookActions.deleteDisabled}
                                                 title={notebookActions.deleteTitle}
+                                                aria-label={notebookActions.deleteTitle}
                                                 onClick={notebookActions.onDelete}
                                             >
                                                 <Trash2 className="h-4 w-4" />
-                                                {t('layout.actions.delete')}
                                             </Button>
                                         </div>
                                     ) : null}
@@ -379,6 +405,26 @@ const Layout = () => {
                             </Link>
                         ))}
                     </div>
+
+                    {notebookTabs && notebookTabs.items.length > 0 ? (
+                        <nav aria-label={notebookTabs.label} className="-mb-px mt-3 flex flex-wrap">
+                            {notebookTabs.items.map((tab) => (
+                                <Link
+                                    key={tab.key}
+                                    to={tab.href}
+                                    aria-current={tab.isActive ? 'page' : undefined}
+                                    className={cn(
+                                        'border-b-2 px-3 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40',
+                                        tab.isActive
+                                            ? 'border-[#1f3a60] text-[#1f3a60]'
+                                            : 'border-transparent text-slate-500 hover:text-[#1f3a60]',
+                                    )}
+                                >
+                                    {tab.label}
+                                </Link>
+                            ))}
+                        </nav>
+                    ) : null}
                 </header>
 
                 <main className="soft-grid flex-1 overflow-auto p-6">

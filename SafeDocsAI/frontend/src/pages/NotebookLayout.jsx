@@ -1,12 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 
 import { useNotebookHeader } from '../components/layout/NotebookHeaderContext';
 import NotebookEditDialog from '../components/notebook/NotebookEditDialog';
 import { useSources, useSourcesActions } from '../contexts/SourcesContext';
 import { useSessionRole } from '../hooks/useSessionRole';
 import { useLocale } from '../i18n';
-import { cn } from '../lib/utils';
 import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
 import { resolveDomainProfileLabel } from '../lib/notebooks';
@@ -36,7 +35,11 @@ const clearNotebookLocalState = (notebookId) => {
  * Разделы блокнота. Маршруты у них были и раньше, а перехода — нет: в источники
  * и заметки вели ссылки со дна панелей рабочего пространства, и найти их можно
  * было, только зная, что они там есть. Презентации так не открыть вовсе,
- * поэтому разделы собраны в одну полосу вкладок над содержимым.
+ * поэтому разделы собраны в одну полосу вкладок.
+ *
+ * Полоса живёт в шапке страницы, а не отдельным блоком под ней: два блока
+ * подряд занимали высоту, которой не хватало чату — тому единственному, ради
+ * чего блокнот и открывают.
  *
  * contentOnly — вкладка контент-менеджера: пользовательской роли она не
  * рисуется. Это не защита (её держит сервер и гард маршрута), а отсутствие
@@ -92,7 +95,7 @@ const NotebookLayout = () => {
   const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
-  const { setNotebookHeader, setNotebookActions } = useNotebookHeader();
+  const { setNotebookHeader, setNotebookActions, setNotebookTabs } = useNotebookHeader();
 
   // Тот же кэш, что и у панели источников: своего запроса за списком шапка не шлёт,
   // а дата «Обновлён» пересчитывается сразу после загрузки или удаления источника.
@@ -373,39 +376,35 @@ const NotebookLayout = () => {
   ]);
 
   const notebookBasePath = notebookId ? `/notebooks/${notebookId}` : '';
-  const visibleTabs = NOTEBOOK_TABS.filter((tab) => !tab.contentOnly || canManageContent);
+
+  useEffect(() => {
+    if (!notebookBasePath) {
+      setNotebookTabs(null);
+      return undefined;
+    }
+
+    const items = NOTEBOOK_TABS
+      .filter((tab) => !tab.contentOnly || canManageContent)
+      .map((tab) => {
+        const href = tab.path ? `${notebookBasePath}/${tab.path}` : notebookBasePath;
+        // Обзор — индексный маршрут, поэтому сравнение точное: без него он
+        // подсвечивался бы вместе с любой вложенной вкладкой.
+        const isActive = tab.path
+          ? location.pathname === href || location.pathname.startsWith(`${href}/`)
+          : location.pathname === notebookBasePath || location.pathname === `${notebookBasePath}/`;
+
+        return { key: tab.labelKey, href, label: t(tab.labelKey), isActive };
+      });
+
+    setNotebookTabs({ label: t('notebookTabs.label'), items });
+
+    return () => {
+      setNotebookTabs(null);
+    };
+  }, [canManageContent, location.pathname, notebookBasePath, setNotebookTabs, t]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
-      {notebookBasePath ? (
-        <nav aria-label={t('notebookTabs.label')} className="flex flex-wrap gap-2">
-          {visibleTabs.map((tab) => {
-            const href = tab.path ? `${notebookBasePath}/${tab.path}` : notebookBasePath;
-            // Обзор — индексный маршрут, поэтому сравнение точное: без него он
-            // подсвечивался бы вместе с любой вложенной вкладкой.
-            const isActive = tab.path
-              ? location.pathname === href || location.pathname.startsWith(`${href}/`)
-              : location.pathname === notebookBasePath || location.pathname === `${notebookBasePath}/`;
-
-            return (
-              <Link
-                key={tab.labelKey}
-                to={href}
-                aria-current={isActive ? 'page' : undefined}
-                className={cn(
-                  'rounded-lg border px-3.5 py-1.5 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40 focus-visible:ring-offset-2',
-                  isActive
-                    ? 'border-[#1f3a60] bg-[#1f3a60] text-white'
-                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-[#1f3a60]',
-                )}
-              >
-                {t(tab.labelKey)}
-              </Link>
-            );
-          })}
-        </nav>
-      ) : null}
-
+    <div className="flex h-full min-h-0 flex-col">
       <div className="min-h-0 flex-1">
         <Outlet context={contextValue} />
       </div>

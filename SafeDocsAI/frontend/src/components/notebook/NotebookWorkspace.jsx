@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   FilePlus2,
   FileText,
   Link2,
@@ -30,7 +31,7 @@ import { useSources, useSourcesActions } from '../../contexts/SourcesContext';
 import { useLocale } from '../../i18n';
 import { resolveApiErrorMessage } from '../../lib/apiError';
 import { formatLocaleDate } from '../../lib/locale';
-import { formatSize, resolveSourceErrorMessage, resolveStatus } from '../../lib/sources';
+import { SOURCE_STATUS_BADGE_CLASS, formatSize, resolveSourceErrorMessage, resolveStatus } from '../../lib/sources';
 import { resolveTopicLabel } from '../../lib/topics';
 import { notesService } from '../../services/notesService';
 import { notebooksService } from '../../services/notebooksService';
@@ -113,96 +114,128 @@ const AddSourceSplitButton = ({ onUpload, onExisting, isLoading, uploadProgress,
   );
 };
 
-const NotebookSidePanel = ({
-  icon,
-  title,
+const RAIL_SOURCES = 'sources';
+const RAIL_NOTES = 'notes';
+
+/**
+ * Вспомогательная полоса блокнота: источники и заметки.
+ *
+ * Раньше это были две одинаковые панели, стоявшие слева от чата. Каждая несла
+ * свою шапку, свою кнопку сворачивания и свою кнопку действия, и вдвоём они
+ * занимали больше места, чем сам чат, ради которого блокнот и открывают. Теперь
+ * полоса одна, а источники и заметки — вкладки внутри неё: шапка, сворачивание и
+ * кнопка действия стали общими, а счётчик у каждой вкладки виден всегда, поэтому
+ * невыбранная половина не пропадает из виду.
+ */
+const NotebookRail = ({
+  tabs,
+  activeTab,
+  onTabChange,
   collapsed,
   onToggle,
-  action,
-  actionLabel,
-  actionLoading,
-  actionDisabled,
-  renderAction,
-  children,
-  footerLink,
   expandLabel,
   collapseLabel,
+  panelLabel,
+  children,
 }) => {
+  const active = tabs.find((tab) => tab.id === activeTab) || tabs[0];
+
   return (
-    <section
+    <aside
+      aria-label={panelLabel}
       className={cn(
-        // Полосой панель становится только там, где рядом помещаются три колонки:
-        // до этого она занимает всю ширину и стоит над чатом, а не за краем экрана.
-        'relative flex w-full shrink-0 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm transition-[width] duration-300 ease-out xl:h-full',
-        collapsed ? 'xl:w-11' : 'xl:w-[19rem] 2xl:w-[21rem]',
+        // Полосой панель становится только там, где рядом помещается вторая
+        // колонка: до этого она занимает всю ширину и стоит под чатом, а не за
+        // краем экрана.
+        'flex w-full shrink-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition-[width] duration-200 ease-out xl:h-full',
+        collapsed ? 'xl:w-12' : 'xl:w-[20rem] 2xl:w-[22rem]',
       )}
     >
       {collapsed ? (
         <button
           type="button"
           onClick={onToggle}
-          className="flex w-full items-center justify-center gap-2 bg-slate-50 px-4 py-3 text-slate-500 transition hover:bg-slate-100 hover:text-[#1f3a60] xl:h-full xl:flex-col xl:justify-between xl:px-0 xl:py-4"
+          className="flex w-full items-center justify-center gap-2 bg-slate-50 px-4 py-2.5 text-slate-500 transition hover:bg-slate-100 hover:text-[#1f3a60] xl:h-full xl:flex-col xl:justify-between xl:px-0 xl:py-4"
           aria-label={expandLabel}
         >
           <ChevronDown className="h-4 w-4 xl:hidden" />
-          <ChevronRight className="hidden h-4 w-4 xl:block" />
+          <ChevronLeft className="hidden h-4 w-4 xl:block" />
           {/* Вертикальная надпись — только у узкой полосы: в развёрнутой на всю
               ширину строке её пришлось бы читать боком. */}
           <span className="flex items-center gap-2 xl:rotate-180 xl:[writing-mode:vertical-rl]">
-            {React.createElement(icon, { className: 'h-4 w-4' })}
-            <span className="text-xs font-semibold tracking-[0.24em] uppercase">{title}</span>
+            {React.createElement(active.icon, { className: 'h-4 w-4' })}
+            <span className="text-xs font-semibold uppercase tracking-[0.24em]">{panelLabel}</span>
           </span>
           <span className="hidden h-4 w-4 xl:block" />
         </button>
       ) : (
         <div className="flex min-h-0 w-full flex-col xl:h-full">
-          <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-4 py-4">
-            <div>
-              <div className="inline-flex items-center gap-2 rounded-full bg-[#1f3a60]/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-[#1f3a60]">
-                {React.createElement(icon, { className: 'h-3.5 w-3.5' })}
-                {title}
-              </div>
+          <div className="flex items-center gap-2 border-b border-slate-200 px-3 py-2.5">
+            <div role="tablist" aria-label={panelLabel} className="flex min-w-0 flex-1 gap-1">
+              {tabs.map((tab) => {
+                const isActive = tab.id === active.id;
+
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    id={`notebook-rail-tab-${tab.id}`}
+                    aria-selected={isActive}
+                    aria-controls={`notebook-rail-panel-${tab.id}`}
+                    onClick={() => onTabChange(tab.id)}
+                    className={cn(
+                      'inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1',
+                      isActive ? 'bg-[#1f3a60] text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-[#1f3a60]',
+                    )}
+                  >
+                    {React.createElement(tab.icon, { className: 'h-3.5 w-3.5 shrink-0' })}
+                    <span className="truncate">{tab.title}</span>
+                    {/* Счётчик у невыбранной вкладки — единственный признак, что
+                        за ней что-то есть: без него переключение стало бы
+                        проверкой наугад. */}
+                    <span className={cn('shrink-0 tabular-nums', isActive ? 'text-white/75' : 'text-slate-400')}>
+                      {tab.count}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
 
             <button
               type="button"
               onClick={onToggle}
-              className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-900"
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
               aria-label={collapseLabel}
             >
-              <ChevronLeft className="h-4 w-4" />
+              <ChevronUp className="h-4 w-4 xl:hidden" />
+              <ChevronRight className="hidden h-4 w-4 xl:block" />
             </button>
           </div>
 
-          <div className="border-b border-slate-200 px-4 py-3">
-            {renderAction ? renderAction() : (
-              <Button
-                type="button"
-                onClick={action}
-                isLoading={actionLoading}
-                disabled={actionDisabled}
-                className="w-full justify-center"
-              >
-                <Plus className="h-4 w-4" />
-                {actionLabel}
-              </Button>
-            )}
+          <div className="border-b border-slate-200 px-3 py-3">{active.action}</div>
+
+          {/* На узком экране высота полосы не задана, поэтому список ограничиваем
+              сами: иначе страница превращается в один длинный столбец. */}
+          <div
+            role="tabpanel"
+            id={`notebook-rail-panel-${active.id}`}
+            aria-labelledby={`notebook-rail-tab-${active.id}`}
+            className="scrollbar-soft max-h-[55vh] min-h-0 flex-1 overflow-y-auto px-3 py-3 xl:max-h-none"
+          >
+            {children}
           </div>
 
-          {/* На узком экране высота панели не задана, поэтому список ограничиваем
-              сами: иначе страница превращается в один длинный столбец. */}
-          <div className="scrollbar-soft max-h-[60vh] min-h-0 flex-1 overflow-y-auto px-4 py-4 xl:max-h-none">{children}</div>
-
-          {footerLink ? (
-            <div className="border-t border-slate-200 px-4 py-3">
-              <Link to={footerLink.to} className="text-sm font-semibold text-[#1f3a60] transition hover:text-[#162945] hover:underline">
-                {footerLink.label}
+          {active.footerLink ? (
+            <div className="border-t border-slate-200 px-3 py-2.5">
+              <Link to={active.footerLink.to} className="text-sm font-semibold text-[#1f3a60] transition hover:text-[#162945] hover:underline">
+                {active.footerLink.label}
               </Link>
             </div>
           ) : null}
         </div>
       )}
-    </section>
+    </aside>
   );
 };
 
@@ -240,8 +273,10 @@ const NotebookWorkspace = ({
   const noteTitleInputRef = useRef(null);
   const noteDeleteDialogRef = useRef(null);
   const noteDeleteCancelRef = useRef(null);
-  const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
-  const [notesCollapsed, setNotesCollapsed] = useState(false);
+  // Одна полоса на источники и заметки: вместо двух состояний сворачивания
+  // осталось одно, а вкладка помнит, что человек смотрел последним.
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const [railTab, setRailTab] = useState(RAIL_SOURCES);
 
   const [uploadingSource, setUploadingSource] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');  // e.g. "2 / 5"
@@ -327,7 +362,13 @@ const NotebookWorkspace = ({
     error: t('documents.status.error'),
   }), [t]);
 
-  const noteCountLabel = useMemo(() => t('notebook.noteCount', { count: notes.length }), [notes.length, t]);
+  // Загрузка и привязка источника, как и создание заметки, приводят полосу к тому
+  // списку, который только что изменился: иначе результат действия оказывается за
+  // невыбранной вкладкой и выглядит как «ничего не произошло».
+  const revealRail = useCallback((tab) => {
+    setRailTab(tab);
+    setRailCollapsed(false);
+  }, []);
 
   const notebookNameById = useMemo(
     () => Object.fromEntries((notebooks || []).map((notebook) => [notebook.id, notebook.name])),
@@ -381,7 +422,7 @@ const NotebookWorkspace = ({
       setUploadProgress(`${i + 1} / ${files.length}`);
       try {
         await uploadSource(files[i], currentNotebookId);
-        setSourcesCollapsed(false);
+        revealRail(RAIL_SOURCES);
       } catch (error) {
         console.error(`Failed to upload ${files[i].name}`, error);
         errors.push(`${files[i].name} (${resolveApiErrorMessage(error, t, 'documents.uploadError')})`);
@@ -406,7 +447,7 @@ const NotebookWorkspace = ({
       setAttachingExistingSources(true);
       setAttachError('');
       await attachSources(currentNotebookId, selectedExistingSourceIds);
-      setSourcesCollapsed(false);
+      revealRail(RAIL_SOURCES);
       closeSourceSheet();
     } catch (error) {
       console.error('Failed to attach existing sources', error);
@@ -511,7 +552,7 @@ const NotebookWorkspace = ({
       setNoteComposerOpen(false);
       setNoteTitle('');
       setNoteBody('');
-      setNotesCollapsed(false);
+      revealRail(RAIL_NOTES);
     } catch (error) {
       console.error('Failed to create note', error);
       // Ошибку показываем в модалке — там, где пользователь её ждёт, список заметок остаётся на месте.
@@ -566,255 +607,269 @@ const NotebookWorkspace = ({
     }
   };
 
-  return (
-    <div className="flex min-h-0 flex-col gap-4 xl:h-full">
-      <input ref={sourceInputRef} type="file" className="hidden" multiple accept=".pdf,.docx,.txt" onChange={handleSourceUpload} />
+  const sourcesContent = (
+    <div className="space-y-3" aria-live="polite">
+      {uploadError ? (
+        <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
+          {uploadError}
+        </p>
+      ) : null}
 
-      {/* Три колонки требуют места, которого на ноутбуке нет. Раньше строка
-          держала min-w-[940px] и уезжала за край с горизонтальной прокруткой —
-          вместо этого колонки складываются в столбец, пока ширина не позволит. */}
-      <div className="flex flex-col gap-4 pb-1 xl:h-full xl:min-h-0 xl:flex-1 xl:flex-row">
-        <NotebookSidePanel
-          icon={FileText}
-          title={t('notebook.sources')}
-          collapsed={sourcesCollapsed}
-          onToggle={() => setSourcesCollapsed((prev) => !prev)}
-          expandLabel={t('notebook.expandPanel', { title: t('notebook.sources') })}
-          collapseLabel={t('notebook.collapsePanel', { title: t('notebook.sources') })}
-          renderAction={() => (
-            <AddSourceSplitButton
-              onUpload={handleUploadSourceClick}
-              onExisting={handleOpenExistingSources}
-              isLoading={uploadingSource}
-              uploadProgress={uploadProgress}
-              labels={{
-                loading: t('documents.uploadLoading'),
-                addSource: t('notebook.addSource'),
-                addExistingSources: t('notebook.addExistingSources'),
-                openMenu: t('notebook.openAddSourceMenu'),
-              }}
-            />
-          )}
-          footerLink={{ to: `/notebooks/${notebookId}/sources`, label: t('notebook.openAllSources') }}
-        >
-          <div className="space-y-3" aria-live="polite">
-            {uploadError ? (
-              <p role="alert" className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-                {uploadError}
-              </p>
-            ) : null}
+      {/* Сбой загрузки списка показываем баннером: полоса с уже полученными источниками остаётся на месте. */}
+      {sourcesError ? (
+        <div role="alert" className="flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
+          <span className="flex items-center gap-2 font-semibold">
+            <AlertTriangle className="h-4 w-4" />
+            {sourcesError}
+          </span>
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={reloadSources}>
+            <RefreshCw className="h-4 w-4" />
+            {t('documents.retry')}
+          </Button>
+        </div>
+      ) : null}
 
-            {/* Сбой загрузки списка показываем баннером: панель с уже полученными источниками остаётся на месте. */}
-            {sourcesError ? (
-              <div role="alert" className="flex flex-col gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-                <span className="flex items-center gap-2 font-semibold">
-                  <AlertTriangle className="h-4 w-4" />
-                  {sourcesError}
+      {sourcesLoading && sources.length === 0 ? (
+        <div className="flex items-center justify-center py-6 text-sm text-slate-500">
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          {t('notebook.loadingSources')}
+        </div>
+      ) : sources.length === 0 ? (
+        sourcesError ? null : (
+          <EmptyPanelState
+            icon={FilePlus2}
+            title={t('notebook.noSourcesTitle')}
+            description={t('notebook.noSourcesDescription')}
+          />
+        )
+      ) : (
+        sources.map((source) => {
+          const sourceStatus = resolveStatus(source.status);
+          // Статус error без объяснения не подсказывает, что делать: причину берём
+          // из error_code документа общей таблицей переводов.
+          const sourceErrorMessage = resolveSourceErrorMessage(source, t);
+          // Тема источника — подпись рядом с датой и размером. Нет поля или
+          // источник не размечен — строки просто нет: «не определено» на
+          // карточке рассказывало бы о состоянии модели, а не о документе.
+          const sourceTopicLabel = resolveTopicLabel(source, locale);
+
+          return (
+            <article key={source.id} className="rounded-xl border border-slate-200 p-3 transition hover:border-slate-300 hover:bg-slate-50">
+              <div className="flex items-start justify-between gap-2">
+                <p className="min-w-0 truncate text-sm font-semibold text-slate-900" title={source.name || undefined}>{source.name}</p>
+                <span
+                  className={cn(
+                    'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                    SOURCE_STATUS_BADGE_CLASS[sourceStatus],
+                  )}
+                >
+                  {sourceStatusLabels[sourceStatus]}
                 </span>
-                <Button type="button" variant="outline" size="sm" className="self-start" onClick={reloadSources}>
-                  <RefreshCw className="h-4 w-4" />
-                  {t('documents.retry')}
-                </Button>
               </div>
-            ) : null}
-
-            {sourcesLoading && sources.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-sm text-slate-500">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                {t('notebook.loadingSources')}
+              <div className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-xs text-slate-500">
+                <span>{t('notebook.createdAt', { date: formatLocaleDate(source.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—') })}</span>
+                <span>{formatSize(source.size, t)}</span>
+                {sourceTopicLabel ? (
+                  <span className="inline-flex min-w-0 items-center gap-1" title={t('documents.topic', { value: sourceTopicLabel })}>
+                    <Tag className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{sourceTopicLabel}</span>
+                  </span>
+                ) : null}
               </div>
-            ) : sources.length === 0 ? (
-              sourcesError ? null : (
-                <EmptyPanelState
-                  icon={FilePlus2}
-                  title={t('notebook.noSourcesTitle')}
-                  description={t('notebook.noSourcesDescription')}
-                />
-              )
-            ) : (
-              sources.map((source) => {
-                const sourceStatus = resolveStatus(source.status);
-                // Статус error без объяснения не подсказывает, что делать: причину берём
-                // из error_code документа общей таблицей переводов.
-                const sourceErrorMessage = resolveSourceErrorMessage(source, t);
-                // Тема источника — подпись рядом с датой и размером. Нет поля или
-                // источник не размечен — строки просто нет: «не определено» на
-                // карточке рассказывало бы о состоянии модели, а не о документе.
-                const sourceTopicLabel = resolveTopicLabel(source, locale);
-
-                return (
-                  <article key={source.id} className="rounded-2xl border border-slate-200 p-4 transition hover:border-slate-300 hover:bg-slate-50">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold text-slate-900" title={source.name || undefined}>{source.name}</p>
-                      </div>
-                      <span
-                        className={cn(
-                          'shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold',
-                          sourceStatus === 'error' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600',
-                        )}
-                      >
-                        {sourceStatusLabels[sourceStatus]}
-                      </span>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
-                      <span>{t('notebook.createdAt', { date: formatLocaleDate(source.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—') })}</span>
-                      <span>{formatSize(source.size, t)}</span>
-                      {sourceTopicLabel ? (
-                        <span className="inline-flex min-w-0 items-center gap-1" title={t('documents.topic', { value: sourceTopicLabel })}>
-                          <Tag className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{sourceTopicLabel}</span>
-                        </span>
-                      ) : null}
-                    </div>
-                    {sourceErrorMessage ? (
-                      /* error_text — техническая строка на одном языке (путь, имя библиотеки):
-                         показываем её подсказкой при наведении, а в тексте оставляем перевод. */
-                      <p
-                        className="mt-3 flex items-start gap-1.5 rounded-xl bg-red-50 px-3 py-2 text-xs leading-5 text-red-600"
-                        title={source.error_text || undefined}
-                      >
-                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                        <span className="min-w-0 break-words">{sourceErrorMessage}</span>
-                      </p>
-                    ) : null}
-                  </article>
-                );
-              })
-            )}
-          </div>
-        </NotebookSidePanel>
-
-        <NotebookSidePanel
-          icon={NotebookPen}
-          title={t('notebook.notes')}
-          collapsed={notesCollapsed}
-          onToggle={() => setNotesCollapsed((prev) => !prev)}
-          expandLabel={t('notebook.expandPanel', { title: t('notebook.notes') })}
-          collapseLabel={t('notebook.collapsePanel', { title: t('notebook.notes') })}
-          action={openNoteComposer}
-          actionLabel={t('notebook.writeNote')}
-        >
-
-          {notesLoading ? (
-            <div className="flex h-full items-center justify-center text-sm text-slate-500">
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              {t('notebook.loadingNotes')}
-            </div>
-          ) : notesError ? (
-            /* Сбой загрузки списка: показывать вместо него нечего, поэтому ошибка занимает панель. */
-            <div role="alert" className="flex flex-col gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-              <span className="flex items-center gap-2 font-semibold">
-                <AlertTriangle className="h-4 w-4" />
-                {notesError}
-              </span>
-              {onReloadNotes ? (
-                <Button type="button" variant="outline" size="sm" className="self-start" onClick={onReloadNotes}>
-                  <RefreshCw className="h-4 w-4" />
-                  {t('documents.retry')}
-                </Button>
-              ) : null}
-            </div>
-          ) : notes.length === 0 ? (
-            <EmptyPanelState
-              icon={MessageSquareText}
-              title={t('notebook.noNotesTitle')}
-              description={t('notebook.noNotesDescription')}
-            />
-          ) : (
-            <div className="space-y-3">
-              <div className="rounded-2xl bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-                {noteCountLabel}
-              </div>
-
-              {/* Сбой архивации показываем баннером над списком: сами заметки на месте. */}
-              {noteStatusError ? (
-                <p role="alert" className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-                  {noteStatusError}
+              {sourceErrorMessage ? (
+                /* error_text — техническая строка на одном языке (путь, имя библиотеки):
+                   показываем её подсказкой при наведении, а в тексте оставляем перевод. */
+                <p
+                  className="mt-2 flex items-start gap-1.5 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs leading-5 text-red-600"
+                  title={source.error_text || undefined}
+                >
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 break-words">{sourceErrorMessage}</span>
                 </p>
               ) : null}
+            </article>
+          );
+        })
+      )}
+    </div>
+  );
 
-              {notes.map((note) => {
-                const isArchived = note.status === NOTE_STATUS_ARCHIVED;
-                const isStatusPending = noteStatusPendingId === note.id;
+  const notesContent = notesLoading ? (
+    <div className="flex items-center justify-center py-6 text-sm text-slate-500">
+      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+      {t('notebook.loadingNotes')}
+    </div>
+  ) : notesError ? (
+    /* Сбой загрузки списка: показывать вместо него нечего, поэтому ошибка занимает полосу. */
+    <div role="alert" className="flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
+      <span className="flex items-center gap-2 font-semibold">
+        <AlertTriangle className="h-4 w-4" />
+        {notesError}
+      </span>
+      {onReloadNotes ? (
+        <Button type="button" variant="outline" size="sm" className="self-start" onClick={onReloadNotes}>
+          <RefreshCw className="h-4 w-4" />
+          {t('documents.retry')}
+        </Button>
+      ) : null}
+    </div>
+  ) : notes.length === 0 ? (
+    <EmptyPanelState
+      icon={MessageSquareText}
+      title={t('notebook.noNotesTitle')}
+      description={t('notebook.noNotesDescription')}
+    />
+  ) : (
+    <div className="space-y-3">
+      {/* Сбой архивации показываем баннером над списком: сами заметки на месте. */}
+      {noteStatusError ? (
+        <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
+          {noteStatusError}
+        </p>
+      ) : null}
 
-                return (
-                  <article
-                    key={note.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedNote(note)}
-                    onKeyDown={(e) => e.key === 'Enter' && setSelectedNote(note)}
-                    className={cn(
-                      'cursor-pointer rounded-2xl border border-slate-200 p-4 transition hover:border-[#1f3a60]/40 hover:bg-slate-50',
-                      isArchived && 'bg-slate-50/70',
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <h3 className="min-w-0 break-words text-sm font-semibold text-slate-900">{note.title}</h3>
-                      {isArchived ? (
-                        <span className="shrink-0 rounded-full bg-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
-                          {t('notebook.noteStatusArchived')}
-                        </span>
-                      ) : null}
-                    </div>
-                    <p className="mt-2 line-clamp-4 whitespace-pre-wrap break-words text-sm leading-6 text-slate-500">
-                      {note.body || t('notebook.noteTextMissing')}
-                    </p>
-                    <div className="mt-3 flex items-center justify-between gap-2">
-                      <span className="text-xs text-slate-400">{t('notebook.updatedAt', { date: formatLocaleDate(note.updated_at || note.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—') })}</span>
-                      {/* Действия внутри карточки-кнопки: без stopPropagation каждый клик
-                          заодно открывал бы просмотр заметки. */}
-                      <div className="flex shrink-0 items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={(event) => { event.stopPropagation(); openNoteEditor(note); }}
-                          title={t('notebook.editNote')}
-                          aria-label={t('notebook.editNote')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-[#1f3a60]"
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(event) => { event.stopPropagation(); handleToggleNoteStatus(note); }}
-                          disabled={isStatusPending}
-                          title={isArchived ? t('notebook.unarchiveNote') : t('notebook.archiveNote')}
-                          aria-label={isArchived ? t('notebook.unarchiveNote') : t('notebook.archiveNote')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-[#1f3a60] disabled:pointer-events-none disabled:opacity-60"
-                        >
-                          {isStatusPending ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : isArchived ? (
-                            <ArchiveRestore className="h-4 w-4" />
-                          ) : (
-                            <Archive className="h-4 w-4" />
-                          )}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(event) => { event.stopPropagation(); openNoteDeleteDialog(note); }}
-                          title={t('notebook.deleteNote')}
-                          aria-label={t('notebook.deleteNote')}
-                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </button>
-                      </div>
-                    </div>
-                  </article>
-                );
-              })}
+      {notes.map((note) => {
+        const isArchived = note.status === NOTE_STATUS_ARCHIVED;
+        const isStatusPending = noteStatusPendingId === note.id;
+
+        return (
+          <article
+            key={note.id}
+            role="button"
+            tabIndex={0}
+            onClick={() => setSelectedNote(note)}
+            onKeyDown={(e) => e.key === 'Enter' && setSelectedNote(note)}
+            className={cn(
+              'cursor-pointer rounded-xl border border-slate-200 p-3 transition hover:border-[#1f3a60]/40 hover:bg-slate-50',
+              isArchived && 'bg-slate-50/70',
+            )}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <h3 className="min-w-0 break-words text-sm font-semibold text-slate-900">{note.title}</h3>
+              {isArchived ? (
+                <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
+                  {t('notebook.noteStatusArchived')}
+                </span>
+              ) : null}
             </div>
-          )}
-        </NotebookSidePanel>
+            {/* Две строки вместо четырёх: в узкой полосе превью на четверть
+                экрана вытесняло соседние заметки, а текст целиком открывается
+                одним кликом по карточке. */}
+            <p className="mt-1.5 line-clamp-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-500">
+              {note.body || t('notebook.noteTextMissing')}
+            </p>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <span className="text-xs text-slate-400">{t('notebook.updatedAt', { date: formatLocaleDate(note.updated_at || note.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—') })}</span>
+              {/* Действия внутри карточки-кнопки: без stopPropagation каждый клик
+                  заодно открывал бы просмотр заметки. */}
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={(event) => { event.stopPropagation(); openNoteEditor(note); }}
+                  title={t('notebook.editNote')}
+                  aria-label={t('notebook.editNote')}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-[#1f3a60]"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={(event) => { event.stopPropagation(); handleToggleNoteStatus(note); }}
+                  disabled={isStatusPending}
+                  title={isArchived ? t('notebook.unarchiveNote') : t('notebook.archiveNote')}
+                  aria-label={isArchived ? t('notebook.unarchiveNote') : t('notebook.archiveNote')}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-[#1f3a60] disabled:pointer-events-none disabled:opacity-60"
+                >
+                  {isStatusPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : isArchived ? (
+                    <ArchiveRestore className="h-4 w-4" />
+                  ) : (
+                    <Archive className="h-4 w-4" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={(event) => { event.stopPropagation(); openNoteDeleteDialog(note); }}
+                  title={t('notebook.deleteNote')}
+                  aria-label={t('notebook.deleteNote')}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-red-600"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
 
-        {/* Пока колонки сложены, чату нужна собственная высота: полосу ввода
-            и последний ответ видно без прокрутки страницы. */}
-        <section className="flex h-[28rem] w-full min-w-0 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm xl:h-full xl:flex-1">
-          <ChatPage notebookId={currentNotebookId} mode="notebookPanel" />
-        </section>
-      </div>
+  const railTabs = [
+    {
+      id: RAIL_SOURCES,
+      title: t('notebook.sources'),
+      icon: FileText,
+      count: sources.length,
+      action: (
+        <AddSourceSplitButton
+          onUpload={handleUploadSourceClick}
+          onExisting={handleOpenExistingSources}
+          isLoading={uploadingSource}
+          uploadProgress={uploadProgress}
+          labels={{
+            loading: t('documents.uploadLoading'),
+            addSource: t('notebook.addSource'),
+            addExistingSources: t('notebook.addExistingSources'),
+            openMenu: t('notebook.openAddSourceMenu'),
+          }}
+        />
+      ),
+      footerLink: { to: `/notebooks/${notebookId}/sources`, label: t('notebook.openAllSources') },
+    },
+    {
+      id: RAIL_NOTES,
+      title: t('notebook.notes'),
+      icon: NotebookPen,
+      count: notes.length,
+      action: (
+        <Button type="button" onClick={openNoteComposer} className="w-full justify-center">
+          <Plus className="h-4 w-4" />
+          {t('notebook.writeNote')}
+        </Button>
+      ),
+    },
+  ];
+
+  const activeRailTitle = railTab === RAIL_NOTES ? t('notebook.notes') : t('notebook.sources');
+
+  return (
+    <div className="flex min-h-0 flex-col gap-4 xl:h-full xl:flex-row">
+      <input ref={sourceInputRef} type="file" className="hidden" multiple accept=".pdf,.docx,.txt" onChange={handleSourceUpload} />
+
+      {/* Чат стоит первым и забирает всё свободное место: блокнот открывают,
+          чтобы спросить по его документам, а не чтобы разглядывать списки.
+          Источники и заметки ушли в полосу справа, а на узком экране — под чат,
+          где раньше стояли над ним и отодвигали поле вопроса за нижний край. */}
+      <section
+        aria-label={t('chat.notebookChatTitle')}
+        className="flex h-[68vh] min-h-[22rem] w-full min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm xl:h-full xl:min-h-0 xl:flex-1"
+      >
+        <ChatPage notebookId={currentNotebookId} mode="notebookPanel" />
+      </section>
+
+      <NotebookRail
+        tabs={railTabs}
+        activeTab={railTab}
+        onTabChange={setRailTab}
+        collapsed={railCollapsed}
+        onToggle={() => setRailCollapsed((prev) => !prev)}
+        expandLabel={t('notebook.expandPanel', { title: activeRailTitle })}
+        collapseLabel={t('notebook.collapsePanel', { title: activeRailTitle })}
+        panelLabel={t('notebook.panelLabel')}
+      >
+        {railTab === RAIL_NOTES ? notesContent : sourcesContent}
+      </NotebookRail>
 
       {/* Existing-sources MODAL — opened via dropdown “Добавить существующие источники” */}
       {isExistingSheetOpen ? (

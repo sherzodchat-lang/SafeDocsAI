@@ -165,6 +165,22 @@ const NotebooksPage = () => {
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 
+      {/* Подпись к отметке на карточке, поэтому стоит над списком: со дна
+          страницы она объясняла галочку, до которой ещё надо было домотать. */}
+      {activeNotebook ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+          <span className="min-w-0 break-words">{t('notebooksPage.activeNotebook', { name: activeNotebook.name })}</span>
+          <button
+            type="button"
+            onClick={handleResetActiveNotebook}
+            title={t('notebooksPage.resetActiveNotebookTitle')}
+            className="rounded-lg border border-emerald-300 bg-white px-3 py-1 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+          >
+            {t('notebooksPage.resetActiveNotebook')}
+          </button>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {isLoading ? (
           <div className="rounded-2xl bg-white p-6 text-sm text-slate-500 shadow-sm">{t('notebooksPage.loading')}</div>
@@ -228,20 +244,6 @@ const NotebooksPage = () => {
           );
         })}
       </div>
-
-      {activeNotebook ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-          <span className="min-w-0 break-words">{t('notebooksPage.activeNotebook', { name: activeNotebook.name })}</span>
-          <button
-            type="button"
-            onClick={handleResetActiveNotebook}
-            title={t('notebooksPage.resetActiveNotebookTitle')}
-            className="rounded-lg border border-emerald-300 bg-white px-3 py-1 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
-          >
-            {t('notebooksPage.resetActiveNotebook')}
-          </button>
-        </div>
-      ) : null}
 
       <NotebookEditDialog
         notebook={editTarget}
