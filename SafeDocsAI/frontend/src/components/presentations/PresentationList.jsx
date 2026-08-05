@@ -364,10 +364,13 @@ const PresentationList = ({
                                     {t('presentations.deleteConfirmTitle')}
                                 </h3>
                                 <p id="presentation-delete-description" className="mt-1 break-words text-sm text-slate-500">
+                                    {/* Без внутреннего номера презентации: диалог открыт
+                                        из конкретной карточки, а машинный ID подтвердить
+                                        удаление не помогает — он ничего не значит для
+                                        того, кто заказывал колоду. */}
                                     {t('presentations.deleteConfirmDescription', {
                                         name: resolveTemplateName(templatesByKey[deleteTarget.template_key], deleteTarget.language)
                                             || deleteTarget.template_key,
-                                        id: deleteTarget.id,
                                     })}
                                 </p>
                             </div>

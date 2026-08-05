@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Check, ImageOff, Loader2, RefreshCw } from 'lucide-react';
+import { Check, ImageOff, Loader2 } from 'lucide-react';
 
-import { Button } from '../ui/Button';
 import { cn } from '../../lib/utils';
 import { useLocale } from '../../i18n';
 import { resolveTemplateName } from '../../lib/presentations';
@@ -100,11 +99,8 @@ const PresentationTemplateGallery = ({
     selectedKey,
     onSelect,
     isLoading,
-    error,
-    onRetry,
     disabled = false,
     labelId,
-    describedById,
 }) => {
     const { locale, t } = useLocale();
     const itemRefs = useRef([]);
@@ -152,30 +148,9 @@ const PresentationTemplateGallery = ({
         );
     }
 
-    if (error) {
-        return (
-            <div role="alert" className="flex flex-col gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-                <span className="flex items-center gap-2 font-semibold">
-                    <AlertTriangle className="h-4 w-4" />
-                    {error}
-                </span>
-                {onRetry ? (
-                    <Button type="button" variant="outline" size="sm" className="self-start" onClick={onRetry}>
-                        <RefreshCw className="h-4 w-4" />
-                        {t('presentations.retry')}
-                    </Button>
-                ) : null}
-            </div>
-        );
-    }
-
-    if (templates.length === 0) {
-        return (
-            <p className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-                {t('presentations.templatesEmpty')}
-            </p>
-        );
-    }
+    // Пустой список и сбой загрузки объявляет форма, над раскрытием: причина,
+    // по которой заказ невозможен, не должна прятаться вместе с панелью.
+    if (templates.length === 0) return null;
 
     // Точка входа фокуса: выбранная карточка, а до выбора — первая. Без этого
     // Tab либо проваливался бы мимо группы, либо обходил все карточки подряд.
@@ -185,7 +160,6 @@ const PresentationTemplateGallery = ({
         <div
             role="radiogroup"
             aria-labelledby={labelId}
-            aria-describedby={describedById}
             aria-required="true"
             className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3"
         >
