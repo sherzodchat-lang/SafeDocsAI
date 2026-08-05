@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
     AlertTriangle,
     CheckCircle2,
+    ChevronDown,
     ChevronLeft,
     ChevronRight,
     Clock,
@@ -43,6 +44,16 @@ const STATUS_ORDER = ['all', 'ready', 'pending', 'indexing', 'error'];
 const PAGE_SIZE_OPTIONS = [10, 25, 50];
 const DEFAULT_PAGE_SIZE = 25;
 
+// Раскрытие плотного слоя запоминаем: тому, кому фильтры и страницы нужны
+// каждый день, иначе пришлось бы открывать их при каждом заходе. Значение по
+// умолчанию — свёрнуто, поэтому отсутствие ключа означает «закрыто».
+const DETAILS_STORAGE_KEY = 'knowledgeai.sources.detailsOpen';
+
+const readDetailsPreference = () => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(DETAILS_STORAGE_KEY) === 'true';
+};
+
 const AdminDocumentsPage = ({ notebookId }) => {
     const { locale, t } = useLocale();
     const [isUploading, setIsUploading] = useState(false);
@@ -53,7 +64,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
     const [sortOrder, setSortOrder] = useState('desc');
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-    const [selectedFiles, setSelectedFiles] = useState([]);
+    const [detailsOpen, setDetailsOpen] = useState(readDetailsPreference);
     const [deleteTarget, setDeleteTarget] = useState(null);
     const [isDeleting, setIsDeleting] = useState(false);
     const [deleteError, setDeleteError] = useState('');
@@ -88,6 +99,21 @@ const AdminDocumentsPage = ({ notebookId }) => {
         canResetScope,
         resetScope,
     } = useActiveNotebookScope(notebookId, { withNotebookName: !isNotebookPanel });
+
+    // Внутри блокнота плотный слой (фильтры, сортировка, страницы, колонки
+    // «Язык»/«Размер»/«Дата», просмотр фрагментов) уходит под «Подробности» —
+    // одинаково для всех ролей. Отдельная страница «Все источники» остаётся
+    // рабочим местом администратора и открыта целиком.
+    const showDetails = !isNotebookPanel || detailsOpen;
+
+    const toggleDetails = useCallback(() => {
+        setDetailsOpen((prev) => {
+            const next = !prev;
+            localStorage.setItem(DETAILS_STORAGE_KEY, String(next));
+            return next;
+        });
+    }, []);
+
     const statusMeta = useMemo(() => ({
         ready: {
             label: t('documents.status.ready'),
@@ -129,25 +155,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
         return hasAllowedExt && hasAllowedMime;
     }, []);
 
-    const applyFileSelection = useCallback((files) => {
-        const valid = files.filter(validateFile);
-        const invalid = files.filter((file) => !validateFile(file));
-
-        if (valid.length > 0) {
-            setSelectedFiles(valid);
-        }
-
-        // Предупреждение о непринятых файлах не затираем: при смешанном наборе (PDF + ZIP)
-        // это единственный сигнал о том, что часть файлов отброшена.
-        if (invalid.length > 0) {
-            setUploadError(t('documents.unsupportedFiles', { files: invalid.map((file) => file.name).join(', ') }));
-        } else if (valid.length > 0) {
-            setUploadError('');
-        } else if (files.length > 0) {
-            setUploadError(t('documents.invalidFormats'));
-        }
-    }, [t, validateFile]);
-
     const resetFileInput = useCallback(() => {
         // Без сброса value повторный выбор того же файла не вызывает onChange.
         if (fileInputRef.current) {
@@ -172,19 +179,10 @@ const AdminDocumentsPage = ({ notebookId }) => {
         event.stopPropagation();
     }, []);
 
-    const handleDrop = useCallback((event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        setIsDragActive(false);
-
-        applyFileSelection(Array.from(event.dataTransfer.files));
-    }, [applyFileSelection]);
-
     const uploadFiles = useCallback(async (files) => {
         if (!files || files.length === 0) return;
 
         setIsUploading(true);
-        setUploadError('');
 
         const uploadPromises = files.map(async (file) => {
             try {
@@ -203,17 +201,53 @@ const AdminDocumentsPage = ({ notebookId }) => {
         const failed = results.filter((r) => !r.success);
 
         if (failed.length > 0) {
-            setUploadError(
-                t('notebook.uploadFailed', { files: failed.map((f) => `${f.name}${f.error ? ` (${f.error})` : ''}`).join(', ') })
-            );
+            // Дописываем, а не заменяем: в смешанном наборе рядом уже стоит
+            // предупреждение об отброшенных файлах, и оно тоже нужно.
+            const failedMessage = t('notebook.uploadFailed', {
+                files: failed.map((f) => `${f.name}${f.error ? ` (${f.error})` : ''}`).join(', '),
+            });
+            setUploadError((prev) => (prev ? `${prev} ${failedMessage}` : failedMessage));
         }
 
-        setSelectedFiles([]);
         resetFileInput();
         // Общая инвалидация: список обновляется и здесь, и в панели блокнота, и в его шапке.
         await invalidate();
         setIsUploading(false);
     }, [effectiveNotebookId, invalidate, resetFileInput, t, uploadSource]);
+
+    // Выбор файла и есть команда «загрузить»: отдельная кнопка «Загрузить файл»
+    // была вторым шагом там, где в «Обзоре» его нет, и одно и то же действие
+    // стоило разного числа кликов на соседних экранах.
+    const applyFileSelection = useCallback((files) => {
+        const valid = files.filter(validateFile);
+        const invalid = files.filter((file) => !validateFile(file));
+
+        // Предупреждение о непринятых файлах не затираем: при смешанном наборе (PDF + ZIP)
+        // это единственный сигнал о том, что часть файлов отброшена.
+        if (invalid.length > 0) {
+            setUploadError(t('documents.unsupportedFiles', { files: invalid.map((file) => file.name).join(', ') }));
+        } else if (valid.length > 0) {
+            setUploadError('');
+        } else if (files.length > 0) {
+            setUploadError(t('documents.invalidFormats'));
+        }
+
+        if (valid.length > 0) {
+            uploadFiles(valid);
+        } else {
+            // Ни один файл не принят: без сброса value повторный выбор того же
+            // файла не вызовет onChange, и экран будет выглядеть неотзывчивым.
+            resetFileInput();
+        }
+    }, [resetFileInput, t, uploadFiles, validateFile]);
+
+    const handleDrop = useCallback((event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsDragActive(false);
+
+        applyFileSelection(Array.from(event.dataTransfer.files));
+    }, [applyFileSelection]);
 
     const fetchChunks = useCallback(async (docId, docName) => {
         setChunksModal({
@@ -358,6 +392,10 @@ const AdminDocumentsPage = ({ notebookId }) => {
         ? t('documents.loading')
         : loadError || t('documents.listStatus', { count: sortedDocuments.length });
 
+    // Свёрнутое состояние оставляет имя, статус и действия; язык, дата и размер
+    // уходят под «Подробности» вместе с остальным плотным слоем.
+    const columnCount = showDetails ? 6 : 3;
+
     const openDeleteDialog = (doc) => {
         setDeleteError('');
         setDeleteTarget({ id: doc.id, name: doc.name });
@@ -406,15 +444,27 @@ const AdminDocumentsPage = ({ notebookId }) => {
                     </h3>
                     <p className="mt-1 text-sm text-slate-500">{t('documents.supportedFormats')}</p>
 
-                    <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+                    {/* Одна кнопка на всё действие: выбор файла сразу запускает
+                        загрузку, поэтому она же и показывает её ход. */}
+                    <div className="mt-5 flex flex-wrap items-center justify-center gap-3" aria-live="polite">
                         {/* Кнопка, а не label: скрытый input недоступен с клавиатуры, label не фокусируется. */}
                         <button
                             type="button"
                             onClick={() => fileInputRef.current?.click()}
-                            className="inline-flex items-center gap-2 rounded-lg bg-[#c5a059] px-5 py-2 text-sm font-semibold text-[#1f3a60] transition hover:bg-[#d7b878] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-2"
+                            disabled={isUploading}
+                            className="inline-flex items-center gap-2 rounded-lg bg-[#c5a059] px-5 py-2 text-sm font-semibold text-[#1f3a60] transition hover:bg-[#d7b878] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-60"
                         >
-                            <CloudUpload className="h-4 w-4" />
-                            {t('documents.chooseFile')}
+                            {isUploading ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    {t('documents.uploadLoading')}
+                                </>
+                            ) : (
+                                <>
+                                    <CloudUpload className="h-4 w-4" />
+                                    {t('documents.chooseFile')}
+                                </>
+                            )}
                         </button>
                         <input
                             ref={fileInputRef}
@@ -424,33 +474,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
                             accept=".pdf,.docx,.txt,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             onChange={(event) => applyFileSelection(Array.from(event.target.files || []))}
                         />
-
-                        <Button
-                            type="button"
-                            disabled={isUploading || selectedFiles.length === 0}
-                            onClick={() => uploadFiles(selectedFiles)}
-                        >
-                            {isUploading ? (
-                                <>
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                    {t('documents.uploadLoading')}
-                                </>
-                            ) : selectedFiles.length > 1 ? (
-                                t('documents.uploadMany', { count: selectedFiles.length })
-                            ) : (
-                                t('documents.uploadOne')
-                            )}
-                        </Button>
-                    </div>
-
-                    <div aria-live="polite">
-                        {selectedFiles.length > 0 && (
-                            <div className="mt-4 rounded-lg bg-emerald-50 p-3">
-                                <p className="text-sm font-semibold text-emerald-700">
-                                    {t('documents.pendingUpload', { files: selectedFiles.map((file) => file.name).join(', ') })}
-                                </p>
-                            </div>
-                        )}
                     </div>
 
                     {uploadError && (
@@ -460,47 +483,92 @@ const AdminDocumentsPage = ({ notebookId }) => {
             </section>
 
             <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
-                    <div className="flex flex-wrap gap-2" role="group" aria-label={t('documents.statusFilterLabel')}>
-                        {STATUS_ORDER.map((status) => (
+                <div className="border-b border-slate-200 px-5 py-4">
+                    {isNotebookPanel ? (
+                        <div className="flex flex-wrap items-center justify-between gap-3">
                             <button
-                                key={status}
                                 type="button"
-                                onClick={() => setStatusFilter(status)}
-                                aria-pressed={statusFilter === status}
-                                className={cn(
-                                    'rounded-lg px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1',
-                                    statusFilter === status
-                                        ? 'bg-[#1f3a60] text-white'
-                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200',
-                                )}
+                                onClick={toggleDetails}
+                                aria-expanded={detailsOpen}
+                                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1"
                             >
-                                {status === 'all' ? t('documents.status.all') : statusMeta[status].label}
-                                <span className="ml-1">{stats[status]}</span>
+                                <ChevronDown className={cn('h-4 w-4 transition-transform duration-150', detailsOpen && 'rotate-180')} />
+                                {t('documents.details')}
                             </button>
-                        ))}
-                    </div>
 
-                    <div className="flex items-center gap-2">
-                        <label className="text-sm font-semibold text-slate-500" htmlFor="documents-sort">{t('documents.sort')}</label>
-                        <select
-                            id="documents-sort"
-                            value={`${sortField}-${sortOrder}`}
-                            onChange={(e) => {
-                                const [field, order] = e.target.value.split('-');
-                                setSortField(field);
-                                setSortOrder(order);
-                            }}
-                            className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-[#1f3a60] focus:ring-1 focus:ring-[#1f3a60]"
-                        >
-                            <option value="created_at-desc">{t('documents.sortOptions.dateDesc')}</option>
-                            <option value="created_at-asc">{t('documents.sortOptions.dateAsc')}</option>
-                            <option value="name-asc">{t('documents.sortOptions.nameAsc')}</option>
-                            <option value="name-desc">{t('documents.sortOptions.nameDesc')}</option>
-                            <option value="size-desc">{t('documents.sortOptions.sizeDesc')}</option>
-                            <option value="size-asc">{t('documents.sortOptions.sizeAsc')}</option>
-                        </select>
+                            {/* Свёрнутый блок не должен читаться как «сломалось»: рядом
+                                сказано словами, что внутри. Применённый фильтр и неполная
+                                страница вынесены наружу — иначе список молча неполон, а
+                                причины на экране нет. */}
+                            {!detailsOpen ? (
+                                <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
+                                    {statusFilter !== 'all' ? (
+                                        <span className="inline-flex items-center gap-1.5 rounded-full bg-[#1f3a60]/10 px-2.5 py-1 text-[#1f3a60]">
+                                            {t('documents.activeFilter', { value: statusMeta[statusFilter].label })}
+                                            <button
+                                                type="button"
+                                                onClick={() => setStatusFilter('all')}
+                                                title={t('documents.activeFilterReset')}
+                                                aria-label={t('documents.activeFilterReset')}
+                                                className="rounded-full p-0.5 transition hover:bg-[#1f3a60]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                            >
+                                                <X className="h-3 w-3" />
+                                            </button>
+                                        </span>
+                                    ) : null}
+                                    {pageCount > 1 ? (
+                                        <span>{t('documents.pagination.range', { from: rangeStart, to: rangeEnd, total: sortedDocuments.length })}</span>
+                                    ) : null}
+                                    <span className="font-normal text-slate-400">{t('documents.detailsHint')}</span>
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
+
+                    {showDetails ? (
+                    <div className={cn('flex flex-wrap items-center justify-between gap-3', isNotebookPanel && 'mt-4')}>
+                        <div className="flex flex-wrap gap-2" role="group" aria-label={t('documents.statusFilterLabel')}>
+                            {STATUS_ORDER.map((status) => (
+                                <button
+                                    key={status}
+                                    type="button"
+                                    onClick={() => setStatusFilter(status)}
+                                    aria-pressed={statusFilter === status}
+                                    className={cn(
+                                        'rounded-lg px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1',
+                                        statusFilter === status
+                                            ? 'bg-[#1f3a60] text-white'
+                                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200',
+                                    )}
+                                >
+                                    {status === 'all' ? t('documents.status.all') : statusMeta[status].label}
+                                    <span className="ml-1">{stats[status]}</span>
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <label className="text-sm font-semibold text-slate-500" htmlFor="documents-sort">{t('documents.sort')}</label>
+                            <select
+                                id="documents-sort"
+                                value={`${sortField}-${sortOrder}`}
+                                onChange={(e) => {
+                                    const [field, order] = e.target.value.split('-');
+                                    setSortField(field);
+                                    setSortOrder(order);
+                                }}
+                                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700 outline-none focus:border-[#1f3a60] focus:ring-1 focus:ring-[#1f3a60]"
+                            >
+                                <option value="created_at-desc">{t('documents.sortOptions.dateDesc')}</option>
+                                <option value="created_at-asc">{t('documents.sortOptions.dateAsc')}</option>
+                                <option value="name-asc">{t('documents.sortOptions.nameAsc')}</option>
+                                <option value="name-desc">{t('documents.sortOptions.nameDesc')}</option>
+                                <option value="size-desc">{t('documents.sortOptions.sizeDesc')}</option>
+                                <option value="size-asc">{t('documents.sortOptions.sizeAsc')}</option>
+                            </select>
+                        </div>
                     </div>
+                    ) : null}
                 </div>
 
                 {/* Единственный источник голосового статуса списка для скринридера. */}
@@ -527,13 +595,20 @@ const AdminDocumentsPage = ({ notebookId }) => {
                 )}
 
                 <div className="overflow-x-auto">
-                    <table className="w-full min-w-[820px] text-left">
+                    {/* Свёрнутый вид — три колонки, и таблице больше не нужна ширина
+                        под шесть: горизонтальная прокрутка появлялась даже там, где
+                        показывать нечего. */}
+                    <table className={cn('w-full text-left', showDetails ? 'min-w-[820px]' : 'min-w-[420px]')}>
                         <thead className="bg-slate-50 text-xs uppercase tracking-[0.08em] text-slate-500">
                             <tr>
                                 <th className="px-5 py-3 font-semibold">{t('documents.table.fileName')}</th>
-                                <th className="px-5 py-3 font-semibold">{t('documents.table.language')}</th>
-                                <th className="px-5 py-3 font-semibold">{t('documents.table.uploadedAt')}</th>
-                                <th className="px-5 py-3 font-semibold">{t('documents.table.size')}</th>
+                                {showDetails ? (
+                                    <>
+                                        <th className="px-5 py-3 font-semibold">{t('documents.table.language')}</th>
+                                        <th className="px-5 py-3 font-semibold">{t('documents.table.uploadedAt')}</th>
+                                        <th className="px-5 py-3 font-semibold">{t('documents.table.size')}</th>
+                                    </>
+                                ) : null}
                                 <th className="px-5 py-3 font-semibold">{t('documents.table.status')}</th>
                                 <th className="px-5 py-3 text-right font-semibold">{t('documents.table.actions')}</th>
                             </tr>
@@ -542,7 +617,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                         <tbody>
                             {isLoading ? (
                                 <tr>
-                                    <td colSpan="6" className="px-5 py-12 text-center text-slate-500">
+                                    <td colSpan={columnCount} className="px-5 py-12 text-center text-slate-500">
                                         <div className="inline-flex items-center gap-2">
                                             <Loader2 className="h-5 w-5 animate-spin" />
                                             {t('documents.loading')}
@@ -551,7 +626,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                 </tr>
                             ) : loadError && documents.length === 0 ? (
                                 <tr>
-                                    <td colSpan="6" className="px-5 py-12">
+                                    <td colSpan={columnCount} className="px-5 py-12">
                                         {/* Сбой загрузки: явно отличаем от пустой базы и даём повторить. */}
                                         <div role="alert" className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-xl bg-red-50 p-6 text-center">
                                             <AlertTriangle className="h-6 w-6 text-red-600" />
@@ -565,7 +640,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                 </tr>
                             ) : visibleDocuments.length === 0 ? (
                                 <tr>
-                                    <td colSpan="6" className="px-5 py-12 text-center text-slate-500">
+                                    <td colSpan={columnCount} className="px-5 py-12 text-center text-slate-500">
                                         {t('documents.empty')}
                                     </td>
                                 </tr>
@@ -573,7 +648,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                 visibleDocuments.map((doc) => {
                                     const statusKey = resolveStatus(doc.status);
                                     const documentStatusMeta = statusMeta[statusKey];
-                                    const languageTag = formatDocumentLanguage(doc.language);
+                                    const languageTag = showDetails ? formatDocumentLanguage(doc.language) : null;
                                     // Причина провала индексации: error_code документа переводится
                                     // той же таблицей, что и коды HTTP-ошибок.
                                     const documentErrorMessage = resolveSourceErrorMessage(doc, t);
@@ -591,23 +666,27 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                 </div>
                                             </td>
 
-                                            <td className="px-5 py-3">
-                                                <span className={cn('rounded px-2 py-0.5 text-xs font-semibold', languageTag.className)}>
-                                                    {languageTag.text}
-                                                </span>
-                                            </td>
+                                            {showDetails ? (
+                                                <>
+                                                    <td className="px-5 py-3">
+                                                        <span className={cn('rounded px-2 py-0.5 text-xs font-semibold', languageTag.className)}>
+                                                            {languageTag.text}
+                                                        </span>
+                                                    </td>
 
-                                            <td className="px-5 py-3 text-slate-500">
-                                                {formatLocaleDate(doc.created_at, locale, {
-                                                    month: 'short',
-                                                    day: 'numeric',
-                                                    year: 'numeric',
-                                                })}
-                                            </td>
+                                                    <td className="px-5 py-3 text-slate-500">
+                                                        {formatLocaleDate(doc.created_at, locale, {
+                                                            month: 'short',
+                                                            day: 'numeric',
+                                                            year: 'numeric',
+                                                        })}
+                                                    </td>
 
-                                            <td className="px-5 py-3 text-slate-500">
-                                                {formatSize(doc.size, t)}
-                                            </td>
+                                                    <td className="px-5 py-3 text-slate-500">
+                                                        {formatSize(doc.size, t)}
+                                                    </td>
+                                                </>
+                                            ) : null}
 
                                             <td className="px-5 py-3">
                                                 <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold', documentStatusMeta.badgeClass)}>
@@ -637,15 +716,19 @@ const AdminDocumentsPage = ({ notebookId }) => {
 
                                             <td className="px-5 py-3 text-right">
                                                 <div className="inline-flex items-center gap-1">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => fetchChunks(doc.id, doc.name)}
-                                                        className="rounded-md p-1.5 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
-                                                        title={t('documents.viewChunks')}
-                                                        aria-label={t('documents.viewChunksFor', { name: doc.name })}
-                                                    >
-                                                        <Eye className="h-4 w-4" />
-                                                    </button>
+                                                    {/* Разбор источника на фрагменты — работа отладочная:
+                                                        она осталась целиком, но под тем же раскрытием. */}
+                                                    {showDetails ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => fetchChunks(doc.id, doc.name)}
+                                                            className="rounded-md p-1.5 text-slate-500 transition hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                                            title={t('documents.viewChunks')}
+                                                            aria-label={t('documents.viewChunksFor', { name: doc.name })}
+                                                        >
+                                                            <Eye className="h-4 w-4" />
+                                                        </button>
+                                                    ) : null}
                                                     <button
                                                         type="button"
                                                         onClick={() => openDeleteDialog(doc)}
@@ -665,7 +748,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
                     </table>
                 </div>
 
-                {!isLoading && sortedDocuments.length > 0 && (
+                {showDetails && !isLoading && sortedDocuments.length > 0 && (
                     <nav
                         className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3"
                         aria-label={t('documents.pagination.label')}

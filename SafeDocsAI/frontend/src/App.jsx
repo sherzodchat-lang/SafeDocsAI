@@ -33,11 +33,6 @@ const NotebookSourcesRoute = () => {
   return <AdminSourcesPage notebookId={Number(notebookId)} />;
 };
 
-const NotebookNotesRoute = () => {
-  const { notebookId } = useParams();
-  return <NotesPage notebookId={Number(notebookId)} />;
-};
-
 function App() {
   return (
     // Граница стоит над роутером: ошибка рендера любой страницы должна давать
@@ -64,7 +59,11 @@ function App() {
                 <Route index element={<NotebookOverviewPage />} />
                 <Route path="chat" element={<NotebookChatRoute />} />
                 <Route path="sources" element={<NotebookSourcesRoute />} />
-                <Route path="notes" element={<NotebookNotesRoute />} />
+                {/* Заметки блокнота живут в «Обзоре» — там они умеют правку,
+                    архивацию и удаление. Старый адрес не оставляем мёртвым:
+                    ссылка из закладок или письма ведёт туда, где работа с
+                    заметками теперь и идёт, а не в пустой экран. */}
+                <Route path="notes" element={<Navigate to=".." relative="path" replace />} />
                 {/* Презентации бэкенд отдаёт контент-менеджеру и админу
                     (presentation.role_not_allowed остальным). Гард здесь
                     ничего не разрешает: он лишь заменяет форму, из которой всё

@@ -1,14 +1,14 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { FileSearch, Sparkles } from 'lucide-react';
 
 import { askService } from '../services/askService';
 import { Button } from '../components/ui/Button';
 import Input from '../components/ui/Input';
+import { useActiveNotebookScope } from '../hooks/useActiveNotebookScope';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
 
 
-const ACTIVE_NOTEBOOK_STORAGE_KEY = 'knowledgeai.activeNotebookId';
 // Тот же предел, что у чата и у бэкенда (QUESTION_MAX_LENGTH в
 // backend/app/api/deps.py): вопрос уходит в то же окно контекста модели.
 const MAX_QUESTION_LENGTH = 2000;
@@ -16,12 +16,13 @@ const MAX_QUESTION_LENGTH = 2000;
 
 const AskPage = () => {
   const { t } = useLocale();
+  // Тот же хук, что у чата и списка источников: он же приносит имя блокнота —
+  // по номеру из localStorage пользователь всё равно не узнаёт, чей это блокнот.
+  const { notebookId: activeNotebookId, notebookName } = useActiveNotebookScope(undefined);
   const [question, setQuestion] = useState('');
   const [result, setResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-
-  const activeNotebookId = useMemo(() => localStorage.getItem(ACTIVE_NOTEBOOK_STORAGE_KEY), []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -31,7 +32,7 @@ const AskPage = () => {
     try {
       setIsLoading(true);
       setError('');
-      const response = await askService.ask(cleanQuestion, activeNotebookId ? Number(activeNotebookId) : null);
+      const response = await askService.ask(cleanQuestion, activeNotebookId);
       setResult(response.data);
     } catch (requestError) {
       console.error('Ask request failed', requestError);
@@ -72,7 +73,13 @@ const AskPage = () => {
           <div className="flex items-center justify-between gap-3">
             {/* Строку собирает словарь целиком: порядок слов и знак после метки в ru и tg разный. */}
             <div className="text-sm font-semibold text-slate-600">
-              {t('askPage.activeNotebook', { value: activeNotebookId || t('askPage.notebookNotSelected') })}
+              {/* Пока имя не пришло, показываем «#id» — тем же способом, что бейдж области
+                  чата: это заметно временное значение, а не выдача номера за название. */}
+              {t('askPage.activeNotebook', {
+                value: activeNotebookId == null
+                  ? t('askPage.notebookNotSelected')
+                  : notebookName || `#${activeNotebookId}`,
+              })}
             </div>
             {/* disabled рядом с isLoading: их объединяет сам Button. Пустой
                 вопрос отправлять нечего — он не дойдёт даже до поиска. */}

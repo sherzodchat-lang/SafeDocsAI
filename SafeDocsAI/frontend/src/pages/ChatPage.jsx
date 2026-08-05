@@ -551,12 +551,12 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
 
                 <div className={cn('scrollbar-soft flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 sm:px-8', isNotebookPanel ? 'bg-slate-50' : 'space-y-6 bg-[#f6f8fc]')}>
                     {isNotebookPanel && !hasConversation ? (
-                        <div className="flex h-full min-h-[260px] flex-col items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-white px-6 text-center shadow-sm">
-                            <div className="rounded-2xl bg-[#1f3a60]/10 p-4 text-[#1f3a60]">
-                                <Shield className="h-6 w-6" />
-                            </div>
-                            <h4 className="mt-4 text-lg font-semibold text-slate-900">{t('chat.emptyTitle')}</h4>
-                            <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">
+                        /* Та же мера, что у пустых панелей источников и заметок:
+                           колонка объясняет себя строкой, а не рамкой в треть экрана. */
+                        <div className="flex flex-col items-center gap-1.5 rounded-2xl border border-dashed border-slate-200 bg-white px-4 py-5 text-center">
+                            <Shield className="h-5 w-5 text-slate-400" />
+                            <h4 className="text-sm font-semibold text-slate-900">{t('chat.emptyTitle')}</h4>
+                            <p className="max-w-md text-xs leading-5 text-slate-500">
                                 {t('chat.emptyDescription')}
                             </p>
                         </div>

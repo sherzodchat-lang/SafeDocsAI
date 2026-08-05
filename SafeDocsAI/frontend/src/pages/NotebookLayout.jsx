@@ -41,11 +41,15 @@ const clearNotebookLocalState = (notebookId) => {
  * contentOnly — вкладка контент-менеджера: пользовательской роли она не
  * рисуется. Это не защита (её держит сервер и гард маршрута), а отсутствие
  * тупика: ссылка, ведущая на «недостаточно прав», — не пункт меню.
+ *
+ * Вкладки «Заметки» здесь нет: страница блокнота была беднее панели заметок в
+ * «Обзоре» — ни правки, ни архивации, ни удаления, ни статуса и дат. Две точки
+ * работы с одними и теми же заметками, из которых одна умеет меньше, — повод
+ * гадать, где работать; работа с заметками осталась в «Обзоре».
  */
 const NOTEBOOK_TABS = [
   { path: '', labelKey: 'notebookTabs.overview' },
   { path: 'sources', labelKey: 'notebookTabs.sources' },
-  { path: 'notes', labelKey: 'notebookTabs.notes' },
   { path: 'presentations', labelKey: 'notebookTabs.presentations', contentOnly: true },
 ];
 
