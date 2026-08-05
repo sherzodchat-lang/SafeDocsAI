@@ -1,0 +1,52 @@
+{
+  "status": "passed",
+  "record_count": 840,
+  "unique_ids": 840,
+  "unique_normalized_texts": 840,
+  "counts_by_language": {
+    "en": 280,
+    "ru": 280,
+    "tg": 280
+  },
+  "counts_by_split": {
+    "train": 420,
+    "test": 210,
+    "validation": 210
+  },
+  "counts_by_topic": {
+    "A01": 96,
+    "A02": 72,
+    "A03": 72,
+    "A04": 72,
+    "A05": 72,
+    "A06": 72,
+    "A07": 72,
+    "A08": 60,
+    "A09": 60,
+    "A10": 72,
+    "A11": 60,
+    "A12": 60
+  },
+  "language_subtopic_groups": 210,
+  "records_per_language_subtopic": [
+    4
+  ],
+  "max_same_subtopic_sequence_similarity": {
+    "score": 0.2028301886792453,
+    "ids": [
+      "A08_S05_en_b01_049",
+      "A08_S05_en_b02_049"
+    ]
+  },
+  "max_same_subtopic_5word_jaccard": {
+    "score": 0.009259259259259259,
+    "ids": [
+      "A12_S02_en_b02_067",
+      "A12_S02_en_b04_067"
+    ]
+  },
+  "language_heuristic_flags": [],
+  "exact_overlap_with_real_dataset": 0,
+  "errors": [],
+  "warnings": []
+}

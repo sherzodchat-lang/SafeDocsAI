@@ -33,6 +33,7 @@ from app.api.endpoints import (
     logs,
     analytics,
     presentations,
+    topics,
     settings as runtime_settings,
 )
 
@@ -109,18 +110,53 @@ async def lifespan(_app: FastAPI):
     await presentation_worker.recover()
     presentation_worker.start()
     _app.state.presentation_worker = presentation_worker
+
+    # Раздел тем: реестр моделей сводится с артефактом на диске, и только здесь.
+    # Обученную модель кладёт на диск обучающая сторона (cluster_topics.py), а
+    # ручки «зарегистрировать модель» в API нет намеренно — второй обязательный
+    # шаг после обучения однажды забыли бы, и раздел молча показывал бы прошлую
+    # модель. Отсюда автоматическая регистрация в двух местах, где побочный
+    # эффект уместен: здесь и в POST /topics/reassign.
+    #
+    # Отсутствующий или непригодный артефакт старт НЕ роняет — по тому же
+    # доводу, что незаданная embedding-модель и отсутствующий Chrome выше:
+    # сломан один раздел из полутора десятков, а невзлетевший бэкенд отбирает и
+    # админ-панель, и логи, то есть инструменты, которыми это чинят.
+    from app.core.database import session_context
+    from app.modules.topics.service import TopicsWorker, TopicsService
+
+    try:
+        async with session_context() as session:
+            topic_model = await TopicsService.sync_active_model(session)
+        if topic_model is None:
+            logger.warning(
+                "Обученной модели тем нет: раздел тем отвечает пустым списком, "
+                "а новые документы индексируются без темы."
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Реестр моделей тем не сведён с диском: %s", exc, exc_info=True)
+
+    # Свой воркер, а не задача в очереди индексации: переразметка проходит по
+    # всем документам сразу и надолго занимает ChromaDB — в общей очереди она
+    # задержала бы загрузку файлов ровно на своё время.
+    topics_worker = TopicsWorker()
+    topics_worker.start()
+    _app.state.topics_worker = topics_worker
     try:
         yield
     finally:
         # Останавливаемся штатно: воркер успевает вернуть текущую задачу
         # в очередь, а документ — из 'indexing' в 'pending'.
         #
-        # Остановка презентаций идёт в своём try: отказ на одном воркере не
-        # должен оставить второй работать в уже закрывающемся приложении.
+        # Каждая остановка в своём try: отказ на одном воркере не должен
+        # оставить остальные работать в уже закрывающемся приложении.
         try:
-            await presentation_worker.stop()
+            await topics_worker.stop()
         finally:
-            await worker.stop()
+            try:
+                await presentation_worker.stop()
+            finally:
+                await worker.stop()
 
 
 app = FastAPI(
@@ -312,6 +348,11 @@ app.include_router(
 app.include_router(
     presentations.router, prefix=settings.API_V1_STR, tags=["presentations"]
 )
+# Без собственного префикса, как презентации: пути раздела зафиксированы
+# контрактом ровно как /topics, /topics/model и /topics/reassign, и префикс
+# роутера добавил бы к ним второе «topics» либо потребовал бы пустого пути у
+# первой ручки.
+app.include_router(topics.router, prefix=settings.API_V1_STR, tags=["topics"])
 
 
 @app.exception_handler(ApiError)

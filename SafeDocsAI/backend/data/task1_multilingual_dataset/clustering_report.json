@@ -1,0 +1,2958 @@
+{
+  "generated_at": "2026-08-05T10:56:01.850076+00:00",
+  "embedding": {
+    "model": "qwen3-embedding:8b",
+    "dim": 4096,
+    "n_vectors": 2278,
+    "batch_size": 32,
+    "seconds_spent_computing": 460.5,
+    "vectors_computed": 998,
+    "cache_path": "/home/ubuntu/SafeDocsAI/SafeDocsAI/backend/data/task1_multilingual_dataset/embeddings.npz"
+  },
+  "dataset": {
+    "n_documents": 2278,
+    "splits": {
+      "train": 1514,
+      "validation": 382,
+      "test": 382
+    },
+    "by_language": {
+      "en": 760,
+      "ru": 760,
+      "tg": 758
+    },
+    "by_origin": {
+      "real": 1438,
+      "synthetic": 840
+    },
+    "by_topic": {
+      "A01": 96,
+      "A02": 72,
+      "A03": 72,
+      "A04": 72,
+      "A05": 72,
+      "A06": 72,
+      "A07": 72,
+      "A08": 60,
+      "A09": 60,
+      "A10": 72,
+      "A11": 60,
+      "A12": 60,
+      "B01": 180,
+      "B02": 180,
+      "B03": 180,
+      "B04": 180,
+      "B05": 180,
+      "B06": 180,
+      "B07": 180,
+      "B08": 178
+    },
+    "n_topics": 20,
+    "n_subtopics": 104,
+    "origin_by_split": {
+      "train": {
+        "real": 1094,
+        "synthetic": 420
+      },
+      "validation": {
+        "real": 172,
+        "synthetic": 210
+      },
+      "test": {
+        "real": 172,
+        "synthetic": 210
+      }
+    }
+  },
+  "random_state": 42,
+  "k_search": {
+    "k_values": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16,
+      18,
+      20,
+      22,
+      24,
+      26,
+      28,
+      30,
+      35,
+      40
+    ],
+    "best_k_by_silhouette": 4,
+    "elbow_k": 10,
+    "seconds": 68.9,
+    "table": [
+      {
+        "k": 2,
+        "inertia": 1100.5472313534642,
+        "silhouette": 0.05424509362844925,
+        "n_iter": 6
+      },
+      {
+        "k": 3,
+        "inertia": 1053.0000699851296,
+        "silhouette": 0.061886127593083644,
+        "n_iter": 6
+      },
+      {
+        "k": 4,
+        "inertia": 1022.8025751588465,
+        "silhouette": 0.0706227800837551,
+        "n_iter": 11
+      },
+      {
+        "k": 5,
+        "inertia": 996.1763827208819,
+        "silhouette": 0.032499487704251914,
+        "n_iter": 11
+      },
+      {
+        "k": 6,
+        "inertia": 981.6108309915933,
+        "silhouette": 0.03530870079679648,
+        "n_iter": 7
+      },
+      {
+        "k": 8,
+        "inertia": 968.7671335789112,
+        "silhouette": 0.03607086504510257,
+        "n_iter": 14
+      },
+      {
+        "k": 10,
+        "inertia": 949.2275363923806,
+        "silhouette": 0.041275114397340266,
+        "n_iter": 12
+      },
+      {
+        "k": 12,
+        "inertia": 936.1818928070775,
+        "silhouette": 0.04683371320346538,
+        "n_iter": 14
+      },
+      {
+        "k": 14,
+        "inertia": 929.1160377757203,
+        "silhouette": 0.04648198855447245,
+        "n_iter": 13
+      },
+      {
+        "k": 16,
+        "inertia": 920.7083977601279,
+        "silhouette": 0.04426542153818129,
+        "n_iter": 13
+      },
+      {
+        "k": 18,
+        "inertia": 911.2114994251908,
+        "silhouette": 0.04993341771501351,
+        "n_iter": 17
+      },
+      {
+        "k": 20,
+        "inertia": 902.2028686540809,
+        "silhouette": 0.053826074587006285,
+        "n_iter": 17
+      },
+      {
+        "k": 22,
+        "inertia": 899.8148145883977,
+        "silhouette": 0.04772900071587641,
+        "n_iter": 16
+      },
+      {
+        "k": 24,
+        "inertia": 889.6985464938036,
+        "silhouette": 0.03271168083049955,
+        "n_iter": 16
+      },
+      {
+        "k": 26,
+        "inertia": 885.2830903076673,
+        "silhouette": 0.05549260967034449,
+        "n_iter": 14
+      },
+      {
+        "k": 28,
+        "inertia": 879.152571298904,
+        "silhouette": 0.03374326009512347,
+        "n_iter": 27
+      },
+      {
+        "k": 30,
+        "inertia": 874.4909856092291,
+        "silhouette": 0.05813735960777039,
+        "n_iter": 12
+      },
+      {
+        "k": 35,
+        "inertia": 863.1971738028212,
+        "silhouette": 0.05753844530636377,
+        "n_iter": 19
+      },
+      {
+        "k": 40,
+        "inertia": 847.9018338982029,
+        "silhouette": 0.05750127217150077,
+        "n_iter": 10
+      }
+    ]
+  },
+  "chosen_k": {
+    "value": 4,
+    "why": "максимум силуэта в таблице; локоть инерции указывает на k=10"
+  },
+  "main": {
+    "k": 4,
+    "n_iter": 11,
+    "splits": {
+      "train": {
+        "inertia": 1022.8025751588484,
+        "silhouette": 0.0706227800837551,
+        "n_clusters_used": 4,
+        "n_samples": 1514,
+        "external": {
+          "topic_id": {
+            "purity": 0.130779392338177,
+            "ari": 0.06788658135734572,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.027080581241743725,
+            "ari": 0.012309401549040153,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.8183619550858653,
+            "ari": 0.5610511792384446,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 0.9966974900924703,
+            "ari": 0.3597611998030929,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.1096433289299868,
+            "ari": 0.13339045361692087,
+            "n_classes": 60
+          }
+        }
+      },
+      "validation": {
+        "inertia": 245.7059189249922,
+        "silhouette": 0.0881515867789441,
+        "n_clusters_used": 4,
+        "n_samples": 382,
+        "external": {
+          "topic_id": {
+            "purity": 0.1256544502617801,
+            "ari": 0.07093469308311584,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.02356020942408377,
+            "ari": 0.004558276470502976,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.6413612565445026,
+            "ari": 0.20169219180225412,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 0.9921465968586387,
+            "ari": 0.707752083326033,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.08376963350785341,
+            "ari": 0.05022773873082286,
+            "n_classes": 60
+          }
+        }
+      },
+      "test": {
+        "inertia": 244.60246289204125,
+        "silhouette": 0.09037046941435604,
+        "n_clusters_used": 4,
+        "n_samples": 382,
+        "external": {
+          "topic_id": {
+            "purity": 0.1256544502617801,
+            "ari": 0.07137555240607353,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.02356020942408377,
+            "ari": 0.004594190355735787,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.6387434554973822,
+            "ari": 0.19886411740262858,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 0.9947643979057592,
+            "ari": 0.7149573248010075,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.08376963350785341,
+            "ari": 0.05009759806776371,
+            "n_classes": 60
+          }
+        }
+      }
+    },
+    "clusters": [
+      {
+        "cluster": 0,
+        "size": 369,
+        "dominant_topic_id": "B01",
+        "dominant_topic": "Legislation and law",
+        "topic_share": 0.13550135501355012,
+        "dominant_language": "en",
+        "language_share": 1.0,
+        "languages": {
+          "en": 369
+        },
+        "origins": {
+          "real": 364,
+          "synthetic": 5
+        },
+        "n_topics_present": 11,
+        "silhouette": 0.024776534077839085
+      },
+      {
+        "cluster": 1,
+        "size": 364,
+        "dominant_topic_id": "B01",
+        "dominant_topic": "Законодательство и право",
+        "topic_share": 0.13736263736263737,
+        "dominant_language": "ru",
+        "language_share": 1.0,
+        "languages": {
+          "ru": 364
+        },
+        "origins": {
+          "real": 364
+        },
+        "n_topics_present": 8,
+        "silhouette": 0.04295046011984281
+      },
+      {
+        "cluster": 2,
+        "size": 366,
+        "dominant_topic_id": "B01",
+        "dominant_topic": "Қонунгузорӣ ва ҳуқуқ",
+        "topic_share": 0.1366120218579235,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 366
+        },
+        "origins": {
+          "real": 366
+        },
+        "n_topics_present": 8,
+        "silhouette": 0.08542206696663011
+      },
+      {
+        "cluster": 3,
+        "size": 415,
+        "dominant_topic_id": "A01",
+        "dominant_topic": "Human resources documents",
+        "topic_share": 0.11566265060240964,
+        "dominant_language": "tg",
+        "language_share": 0.3373493975903614,
+        "languages": {
+          "en": 135,
+          "ru": 140,
+          "tg": 140
+        },
+        "origins": {
+          "synthetic": 415
+        },
+        "n_topics_present": 12,
+        "silhouette": 0.1226069975389715
+      }
+    ]
+  },
+  "reference_true_k": {
+    "k": 20,
+    "n_iter": 17,
+    "splits": {
+      "train": {
+        "inertia": 902.2028686540821,
+        "silhouette": 0.053826074587006285,
+        "n_clusters_used": 20,
+        "n_samples": 1514,
+        "external": {
+          "topic_id": {
+            "purity": 0.35535006605019814,
+            "ari": 0.1260988367441362,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.1406869220607662,
+            "ari": 0.059521688825876364,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.9630118890356671,
+            "ari": 0.248864970240508,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.09362108504698018,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.32232496697490093,
+            "ari": 0.2399600696811625,
+            "n_classes": 60
+          }
+        }
+      },
+      "validation": {
+        "inertia": 215.85200246171595,
+        "silhouette": 0.07167549906053286,
+        "n_clusters_used": 20,
+        "n_samples": 382,
+        "external": {
+          "topic_id": {
+            "purity": 0.2774869109947644,
+            "ari": 0.06655298381850167,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.112565445026178,
+            "ari": -0.0006483983313845731,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.9685863874345549,
+            "ari": 0.41153955292174443,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.22708232388955957,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.24607329842931938,
+            "ari": 0.1335884532837899,
+            "n_classes": 60
+          }
+        }
+      },
+      "test": {
+        "inertia": 215.79174622275696,
+        "silhouette": 0.0700899529032018,
+        "n_clusters_used": 20,
+        "n_samples": 382,
+        "external": {
+          "topic_id": {
+            "purity": 0.2643979057591623,
+            "ari": 0.063243021834205,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.10732984293193717,
+            "ari": -0.0038832665838696157,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.981675392670157,
+            "ari": 0.4152748078589249,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.22827806914276313,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.2486910994764398,
+            "ari": 0.13586244050704366,
+            "n_classes": 60
+          }
+        }
+      }
+    },
+    "clusters": [
+      {
+        "cluster": 0,
+        "size": 50,
+        "dominant_topic_id": "B06",
+        "dominant_topic": "History",
+        "topic_share": 0.82,
+        "dominant_language": "en",
+        "language_share": 0.88,
+        "languages": {
+          "en": 44,
+          "ru": 6
+        },
+        "origins": {
+          "real": 50
+        },
+        "n_topics_present": 4,
+        "silhouette": 0.06253643580042474
+      },
+      {
+        "cluster": 1,
+        "size": 160,
+        "dominant_topic_id": "B01",
+        "dominant_topic": "Законодательство и право",
+        "topic_share": 0.2875,
+        "dominant_language": "ru",
+        "language_share": 1.0,
+        "languages": {
+          "ru": 160
+        },
+        "origins": {
+          "real": 160
+        },
+        "n_topics_present": 8,
+        "silhouette": 0.03917187730957972
+      },
+      {
+        "cluster": 2,
+        "size": 39,
+        "dominant_topic_id": "B08",
+        "dominant_topic": "Иқтисод ва таҳлили соҳибкорӣ",
+        "topic_share": 0.3076923076923077,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 39
+        },
+        "origins": {
+          "real": 39
+        },
+        "n_topics_present": 7,
+        "silhouette": 0.01482504325000968
+      },
+      {
+        "cluster": 3,
+        "size": 86,
+        "dominant_topic_id": "B01",
+        "dominant_topic": "Қонунгузорӣ ва ҳуқуқ",
+        "topic_share": 0.3953488372093023,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 86
+        },
+        "origins": {
+          "real": 86
+        },
+        "n_topics_present": 7,
+        "silhouette": -0.0031352117734237263
+      },
+      {
+        "cluster": 4,
+        "size": 25,
+        "dominant_topic_id": "B07",
+        "dominant_topic": "Маориф",
+        "topic_share": 0.64,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 25
+        },
+        "origins": {
+          "real": 25
+        },
+        "n_topics_present": 3,
+        "silhouette": 0.290750342740988
+      },
+      {
+        "cluster": 5,
+        "size": 53,
+        "dominant_topic_id": "B02",
+        "dominant_topic": "Сиёсат ва идоракунии давлатӣ",
+        "topic_share": 0.4339622641509434,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 53
+        },
+        "origins": {
+          "real": 53
+        },
+        "n_topics_present": 6,
+        "silhouette": 0.07099247171303216
+      },
+      {
+        "cluster": 6,
+        "size": 21,
+        "dominant_topic_id": "B05",
+        "dominant_topic": "Fiction and literature",
+        "topic_share": 0.9047619047619048,
+        "dominant_language": "en",
+        "language_share": 1.0,
+        "languages": {
+          "en": 21
+        },
+        "origins": {
+          "real": 21
+        },
+        "n_topics_present": 3,
+        "silhouette": 0.06937074465924796
+      },
+      {
+        "cluster": 7,
+        "size": 25,
+        "dominant_topic_id": "B02",
+        "dominant_topic": "Politics and public administration",
+        "topic_share": 0.88,
+        "dominant_language": "ru",
+        "language_share": 0.56,
+        "languages": {
+          "en": 11,
+          "ru": 14
+        },
+        "origins": {
+          "real": 25
+        },
+        "n_topics_present": 3,
+        "silhouette": 0.10591650414390698
+      },
+      {
+        "cluster": 8,
+        "size": 28,
+        "dominant_topic_id": "B07",
+        "dominant_topic": "Education",
+        "topic_share": 0.7857142857142857,
+        "dominant_language": "en",
+        "language_share": 0.6428571428571429,
+        "languages": {
+          "en": 18,
+          "ru": 10
+        },
+        "origins": {
+          "real": 28
+        },
+        "n_topics_present": 2,
+        "silhouette": 0.08210762657550408
+      },
+      {
+        "cluster": 9,
+        "size": 140,
+        "dominant_topic_id": "A01",
+        "dominant_topic": "Кадровые документы (HR)",
+        "topic_share": 0.11428571428571428,
+        "dominant_language": "ru",
+        "language_share": 1.0,
+        "languages": {
+          "ru": 140
+        },
+        "origins": {
+          "synthetic": 140
+        },
+        "n_topics_present": 12,
+        "silhouette": 0.05415266111300497
+      },
+      {
+        "cluster": 10,
+        "size": 145,
+        "dominant_topic_id": "B05",
+        "dominant_topic": "Художественная литература",
+        "topic_share": 0.21379310344827587,
+        "dominant_language": "ru",
+        "language_share": 1.0,
+        "languages": {
+          "ru": 145
+        },
+        "origins": {
+          "real": 145
+        },
+        "n_topics_present": 8,
+        "silhouette": -0.00046629060106222225
+      },
+      {
+        "cluster": 11,
+        "size": 51,
+        "dominant_topic_id": "B08",
+        "dominant_topic": "Economics and business analytics",
+        "topic_share": 0.7843137254901961,
+        "dominant_language": "en",
+        "language_share": 0.7058823529411765,
+        "languages": {
+          "en": 36,
+          "ru": 15
+        },
+        "origins": {
+          "real": 51
+        },
+        "n_topics_present": 4,
+        "silhouette": 0.032469350261049336
+      },
+      {
+        "cluster": 12,
+        "size": 140,
+        "dominant_topic_id": "A01",
+        "dominant_topic": "Human resources documents",
+        "topic_share": 0.11428571428571428,
+        "dominant_language": "en",
+        "language_share": 1.0,
+        "languages": {
+          "en": 140
+        },
+        "origins": {
+          "synthetic": 140
+        },
+        "n_topics_present": 12,
+        "silhouette": -0.021252199697212322
+      },
+      {
+        "cluster": 13,
+        "size": 140,
+        "dominant_topic_id": "A01",
+        "dominant_topic": "Ҳуҷҷатҳои кадрӣ",
+        "topic_share": 0.11428571428571428,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 140
+        },
+        "origins": {
+          "synthetic": 140
+        },
+        "n_topics_present": 12,
+        "silhouette": 0.2820516589837712
+      },
+      {
+        "cluster": 14,
+        "size": 59,
+        "dominant_topic_id": "B05",
+        "dominant_topic": "Fiction and literature",
+        "topic_share": 0.4745762711864407,
+        "dominant_language": "en",
+        "language_share": 0.9322033898305084,
+        "languages": {
+          "en": 55,
+          "ru": 4
+        },
+        "origins": {
+          "real": 59
+        },
+        "n_topics_present": 5,
+        "silhouette": 0.02161819064501326
+      },
+      {
+        "cluster": 15,
+        "size": 59,
+        "dominant_topic_id": "B05",
+        "dominant_topic": "Адабиёти бадеӣ",
+        "topic_share": 0.23728813559322035,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 59
+        },
+        "origins": {
+          "real": 59
+        },
+        "n_topics_present": 8,
+        "silhouette": 0.023961815907131652
+      },
+      {
+        "cluster": 16,
+        "size": 107,
+        "dominant_topic_id": "B04",
+        "dominant_topic": "Medicine and health",
+        "topic_share": 0.40186915887850466,
+        "dominant_language": "en",
+        "language_share": 1.0,
+        "languages": {
+          "en": 107
+        },
+        "origins": {
+          "real": 107
+        },
+        "n_topics_present": 7,
+        "silhouette": 0.008796829599434768
+      },
+      {
+        "cluster": 17,
+        "size": 59,
+        "dominant_topic_id": "B01",
+        "dominant_topic": "Legislation and law",
+        "topic_share": 0.8305084745762712,
+        "dominant_language": "en",
+        "language_share": 1.0,
+        "languages": {
+          "en": 59
+        },
+        "origins": {
+          "real": 59
+        },
+        "n_topics_present": 5,
+        "silhouette": 0.023720237875474625
+      },
+      {
+        "cluster": 18,
+        "size": 104,
+        "dominant_topic_id": "B04",
+        "dominant_topic": "Тиб ва тандурустӣ",
+        "topic_share": 0.27884615384615385,
+        "dominant_language": "tg",
+        "language_share": 1.0,
+        "languages": {
+          "tg": 104
+        },
+        "origins": {
+          "real": 104
+        },
+        "n_topics_present": 6,
+        "silhouette": 0.019055735458297873
+      },
+      {
+        "cluster": 19,
+        "size": 23,
+        "dominant_topic_id": "B02",
+        "dominant_topic": "Politics and public administration",
+        "topic_share": 0.9130434782608695,
+        "dominant_language": "en",
+        "language_share": 0.5652173913043478,
+        "languages": {
+          "en": 13,
+          "ru": 10
+        },
+        "origins": {
+          "real": 23
+        },
+        "n_topics_present": 3,
+        "silhouette": 0.07223224686677004
+      }
+    ]
+  },
+  "layers": {
+    "synthetic": {
+      "k": 12,
+      "n_true_topics": 12,
+      "topic_ids": [
+        "A01",
+        "A02",
+        "A03",
+        "A04",
+        "A05",
+        "A06",
+        "A07",
+        "A08",
+        "A09",
+        "A10",
+        "A11",
+        "A12"
+      ],
+      "n_documents": {
+        "train": 420,
+        "validation": 210,
+        "test": 210
+      },
+      "splits": {
+        "train": {
+          "inertia": 185.79626386967013,
+          "silhouette": 0.028154282643972524,
+          "n_clusters_used": 12,
+          "n_samples": 420,
+          "external": {
+            "topic_id": {
+              "purity": 0.25,
+              "ari": 0.03538030806716485,
+              "n_classes": 12
+            },
+            "subtopic_id": {
+              "purity": 0.06190476190476191,
+              "ari": 0.0005294192734328867,
+              "n_classes": 70
+            },
+            "language": {
+              "purity": 0.9880952380952381,
+              "ari": 0.3926903075458538,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.0,
+              "n_classes": 1
+            },
+            "topic_and_language": {
+              "purity": 0.23809523809523808,
+              "ari": 0.13927624926070406,
+              "n_classes": 36
+            }
+          }
+        },
+        "validation": {
+          "inertia": 97.50806901927808,
+          "silhouette": 0.02376561781471482,
+          "n_clusters_used": 12,
+          "n_samples": 210,
+          "external": {
+            "topic_id": {
+              "purity": 0.2523809523809524,
+              "ari": 0.02913675121775065,
+              "n_classes": 12
+            },
+            "subtopic_id": {
+              "purity": 0.05714285714285714,
+              "ari": -0.017956959956415147,
+              "n_classes": 70
+            },
+            "language": {
+              "purity": 1.0,
+              "ari": 0.4096307251450983,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.0,
+              "n_classes": 1
+            },
+            "topic_and_language": {
+              "purity": 0.2523809523809524,
+              "ari": 0.1367655110602229,
+              "n_classes": 36
+            }
+          }
+        },
+        "test": {
+          "inertia": 97.64892294213028,
+          "silhouette": 0.021614966748972966,
+          "n_clusters_used": 12,
+          "n_samples": 210,
+          "external": {
+            "topic_id": {
+              "purity": 0.22857142857142856,
+              "ari": 0.021844344597425493,
+              "n_classes": 12
+            },
+            "subtopic_id": {
+              "purity": 0.05714285714285714,
+              "ari": -0.01791044776119403,
+              "n_classes": 70
+            },
+            "language": {
+              "purity": 1.0,
+              "ari": 0.3980099502487562,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.0,
+              "n_classes": 1
+            },
+            "topic_and_language": {
+              "purity": 0.22857142857142856,
+              "ari": 0.1267119951684233,
+              "n_classes": 36
+            }
+          }
+        }
+      },
+      "clusters": [
+        {
+          "cluster": 0,
+          "size": 76,
+          "dominant_topic_id": "A01",
+          "dominant_topic": "Ҳуҷҷатҳои кадрӣ",
+          "topic_share": 0.14473684210526316,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 76
+          },
+          "origins": {
+            "synthetic": 76
+          },
+          "n_topics_present": 12,
+          "silhouette": 0.043250519014815865
+        },
+        {
+          "cluster": 1,
+          "size": 40,
+          "dominant_topic_id": "A01",
+          "dominant_topic": "Human resources documents",
+          "topic_share": 0.25,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 40
+          },
+          "origins": {
+            "synthetic": 40
+          },
+          "n_topics_present": 10,
+          "silhouette": -0.022746805697419194
+        },
+        {
+          "cluster": 2,
+          "size": 28,
+          "dominant_topic_id": "A04",
+          "dominant_topic": "Legal documents",
+          "topic_share": 0.39285714285714285,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 28
+          },
+          "origins": {
+            "synthetic": 28
+          },
+          "n_topics_present": 7,
+          "silhouette": -0.015000685415504547
+        },
+        {
+          "cluster": 3,
+          "size": 10,
+          "dominant_topic_id": "A02",
+          "dominant_topic": "IT documentation",
+          "topic_share": 0.7,
+          "dominant_language": "ru",
+          "language_share": 0.8,
+          "languages": {
+            "en": 2,
+            "ru": 8
+          },
+          "origins": {
+            "synthetic": 10
+          },
+          "n_topics_present": 4,
+          "silhouette": 0.05560546179210174
+        },
+        {
+          "cluster": 4,
+          "size": 9,
+          "dominant_topic_id": "A06",
+          "dominant_topic": "Financial planning",
+          "topic_share": 0.7777777777777778,
+          "dominant_language": "en",
+          "language_share": 0.6666666666666666,
+          "languages": {
+            "en": 6,
+            "ru": 3
+          },
+          "origins": {
+            "synthetic": 9
+          },
+          "n_topics_present": 2,
+          "silhouette": 0.023082724468911266
+        },
+        {
+          "cluster": 5,
+          "size": 51,
+          "dominant_topic_id": "A05",
+          "dominant_topic": "Бухгалтерия и налоги",
+          "topic_share": 0.19607843137254902,
+          "dominant_language": "ru",
+          "language_share": 1.0,
+          "languages": {
+            "ru": 51
+          },
+          "origins": {
+            "synthetic": 51
+          },
+          "n_topics_present": 11,
+          "silhouette": 0.01064889318550413
+        },
+        {
+          "cluster": 6,
+          "size": 48,
+          "dominant_topic_id": "A12",
+          "dominant_topic": "Project management",
+          "topic_share": 0.20833333333333334,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 48
+          },
+          "origins": {
+            "synthetic": 48
+          },
+          "n_topics_present": 9,
+          "silhouette": -0.008015623012502256
+        },
+        {
+          "cluster": 7,
+          "size": 34,
+          "dominant_topic_id": "A06",
+          "dominant_topic": "Банақшагирии молиявӣ",
+          "topic_share": 0.14705882352941177,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 34
+          },
+          "origins": {
+            "synthetic": 34
+          },
+          "n_topics_present": 12,
+          "silhouette": 0.11404022296756444
+        },
+        {
+          "cluster": 8,
+          "size": 17,
+          "dominant_topic_id": "A09",
+          "dominant_topic": "Охрана труда и безопасность",
+          "topic_share": 0.5294117647058824,
+          "dominant_language": "ru",
+          "language_share": 1.0,
+          "languages": {
+            "ru": 17
+          },
+          "origins": {
+            "synthetic": 17
+          },
+          "n_topics_present": 6,
+          "silhouette": 0.049919159561566284
+        },
+        {
+          "cluster": 9,
+          "size": 16,
+          "dominant_topic_id": "A09",
+          "dominant_topic": "Occupational health and safety",
+          "topic_share": 0.625,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 16
+          },
+          "origins": {
+            "synthetic": 16
+          },
+          "n_topics_present": 3,
+          "silhouette": 0.038937350375110674
+        },
+        {
+          "cluster": 10,
+          "size": 30,
+          "dominant_topic_id": "A09",
+          "dominant_topic": "Ҳифзи меҳнат ва бехатарӣ",
+          "topic_share": 0.13333333333333333,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 30
+          },
+          "origins": {
+            "synthetic": 30
+          },
+          "n_topics_present": 12,
+          "silhouette": 0.06957117181105184
+        },
+        {
+          "cluster": 11,
+          "size": 61,
+          "dominant_topic_id": "A01",
+          "dominant_topic": "Кадровые документы (HR)",
+          "topic_share": 0.18032786885245902,
+          "dominant_language": "ru",
+          "language_share": 1.0,
+          "languages": {
+            "ru": 61
+          },
+          "origins": {
+            "synthetic": 61
+          },
+          "n_topics_present": 11,
+          "silhouette": 0.024743964673678454
+        }
+      ]
+    },
+    "real": {
+      "k": 8,
+      "n_true_topics": 8,
+      "topic_ids": [
+        "B01",
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B06",
+        "B07",
+        "B08"
+      ],
+      "n_documents": {
+        "train": 1094,
+        "validation": 172,
+        "test": 172
+      },
+      "splits": {
+        "train": {
+          "inertia": 739.8561990077745,
+          "silhouette": 0.033711296072532156,
+          "n_clusters_used": 8,
+          "n_samples": 1094,
+          "external": {
+            "topic_id": {
+              "purity": 0.2687385740402194,
+              "ari": 0.04584903006812572,
+              "n_classes": 8
+            },
+            "subtopic_id": {
+              "purity": 0.08683729433272395,
+              "ari": 0.01834679126624755,
+              "n_classes": 34
+            },
+            "language": {
+              "purity": 0.9817184643510055,
+              "ari": 0.6185781138628325,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.0,
+              "n_classes": 1
+            },
+            "topic_and_language": {
+              "purity": 0.2522851919561243,
+              "ari": 0.1979201057013419,
+              "n_classes": 24
+            }
+          }
+        },
+        "validation": {
+          "inertia": 117.95062591606734,
+          "silhouette": 0.03041249593100095,
+          "n_clusters_used": 8,
+          "n_samples": 172,
+          "external": {
+            "topic_id": {
+              "purity": 0.27325581395348836,
+              "ari": 0.026626479315879834,
+              "n_classes": 8
+            },
+            "subtopic_id": {
+              "purity": 0.10465116279069768,
+              "ari": -0.004956769542507929,
+              "n_classes": 34
+            },
+            "language": {
+              "purity": 0.9767441860465116,
+              "ari": 0.6099273222401019,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.0,
+              "n_classes": 1
+            },
+            "topic_and_language": {
+              "purity": 0.25,
+              "ari": 0.17551744452391257,
+              "n_classes": 24
+            }
+          }
+        },
+        "test": {
+          "inertia": 117.01409933340302,
+          "silhouette": 0.03315336653486134,
+          "n_clusters_used": 8,
+          "n_samples": 172,
+          "external": {
+            "topic_id": {
+              "purity": 0.28488372093023256,
+              "ari": 0.025572074894451895,
+              "n_classes": 8
+            },
+            "subtopic_id": {
+              "purity": 0.10465116279069768,
+              "ari": -0.008175141667076547,
+              "n_classes": 34
+            },
+            "language": {
+              "purity": 0.9883720930232558,
+              "ari": 0.6361906258155444,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.0,
+              "n_classes": 1
+            },
+            "topic_and_language": {
+              "purity": 0.27325581395348836,
+              "ari": 0.18052825477660747,
+              "n_classes": 24
+            }
+          }
+        }
+      },
+      "clusters": [
+        {
+          "cluster": 0,
+          "size": 194,
+          "dominant_topic_id": "B04",
+          "dominant_topic": "Medicine and health",
+          "topic_share": 0.21649484536082475,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 194
+          },
+          "origins": {
+            "real": 194
+          },
+          "n_topics_present": 8,
+          "silhouette": 0.019674948523117727
+        },
+        {
+          "cluster": 1,
+          "size": 344,
+          "dominant_topic_id": "B03",
+          "dominant_topic": "Наука и технологии",
+          "topic_share": 0.14534883720930233,
+          "dominant_language": "ru",
+          "language_share": 1.0,
+          "languages": {
+            "ru": 344
+          },
+          "origins": {
+            "real": 344
+          },
+          "n_topics_present": 8,
+          "silhouette": 0.02546551042334033
+        },
+        {
+          "cluster": 2,
+          "size": 105,
+          "dominant_topic_id": "B06",
+          "dominant_topic": "Таърих",
+          "topic_share": 0.2857142857142857,
+          "dominant_language": "tg",
+          "language_share": 0.9904761904761905,
+          "languages": {
+            "ru": 1,
+            "tg": 104
+          },
+          "origins": {
+            "real": 105
+          },
+          "n_topics_present": 8,
+          "silhouette": 0.007242530030714716
+        },
+        {
+          "cluster": 3,
+          "size": 90,
+          "dominant_topic_id": "B01",
+          "dominant_topic": "Қонунгузорӣ ва ҳуқуқ",
+          "topic_share": 0.5,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 90
+          },
+          "origins": {
+            "real": 90
+          },
+          "n_topics_present": 6,
+          "silhouette": 0.07147901021776498
+        },
+        {
+          "cluster": 4,
+          "size": 149,
+          "dominant_topic_id": "B05",
+          "dominant_topic": "Fiction and literature",
+          "topic_share": 0.2751677852348993,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 149
+          },
+          "origins": {
+            "real": 149
+          },
+          "n_topics_present": 8,
+          "silhouette": 0.014580123675543576
+        },
+        {
+          "cluster": 5,
+          "size": 40,
+          "dominant_topic_id": "B08",
+          "dominant_topic": "Economics and business analytics",
+          "topic_share": 0.975,
+          "dominant_language": "en",
+          "language_share": 0.525,
+          "languages": {
+            "en": 21,
+            "ru": 19
+          },
+          "origins": {
+            "real": 40
+          },
+          "n_topics_present": 2,
+          "silhouette": 0.0777009058185453
+        },
+        {
+          "cluster": 6,
+          "size": 25,
+          "dominant_topic_id": "B07",
+          "dominant_topic": "Маориф",
+          "topic_share": 0.64,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 25
+          },
+          "origins": {
+            "real": 25
+          },
+          "n_topics_present": 3,
+          "silhouette": 0.3220337543895681
+        },
+        {
+          "cluster": 7,
+          "size": 147,
+          "dominant_topic_id": "B03",
+          "dominant_topic": "Илм ва технология",
+          "topic_share": 0.2108843537414966,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 147
+          },
+          "origins": {
+            "real": 147
+          },
+          "n_topics_present": 8,
+          "silhouette": 0.025701953818199806
+        }
+      ]
+    },
+    "mixed": {
+      "k": 20,
+      "n_true_topics": 20,
+      "topic_ids": [
+        "A01",
+        "A02",
+        "A03",
+        "A04",
+        "A05",
+        "A06",
+        "A07",
+        "A08",
+        "A09",
+        "A10",
+        "A11",
+        "A12",
+        "B01",
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B06",
+        "B07",
+        "B08"
+      ],
+      "n_documents": {
+        "train": 1514,
+        "validation": 382,
+        "test": 382
+      },
+      "splits": {
+        "train": {
+          "inertia": 902.2028686540821,
+          "silhouette": 0.053826074587006285,
+          "n_clusters_used": 20,
+          "n_samples": 1514,
+          "external": {
+            "topic_id": {
+              "purity": 0.35535006605019814,
+              "ari": 0.1260988367441362,
+              "n_classes": 20
+            },
+            "subtopic_id": {
+              "purity": 0.1406869220607662,
+              "ari": 0.059521688825876364,
+              "n_classes": 104
+            },
+            "language": {
+              "purity": 0.9630118890356671,
+              "ari": 0.248864970240508,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.09362108504698018,
+              "n_classes": 2
+            },
+            "topic_and_language": {
+              "purity": 0.32232496697490093,
+              "ari": 0.2399600696811625,
+              "n_classes": 60
+            }
+          }
+        },
+        "validation": {
+          "inertia": 215.85200246171595,
+          "silhouette": 0.07167549906053286,
+          "n_clusters_used": 20,
+          "n_samples": 382,
+          "external": {
+            "topic_id": {
+              "purity": 0.2774869109947644,
+              "ari": 0.06655298381850167,
+              "n_classes": 20
+            },
+            "subtopic_id": {
+              "purity": 0.112565445026178,
+              "ari": -0.0006483983313845731,
+              "n_classes": 104
+            },
+            "language": {
+              "purity": 0.9685863874345549,
+              "ari": 0.41153955292174443,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.22708232388955957,
+              "n_classes": 2
+            },
+            "topic_and_language": {
+              "purity": 0.24607329842931938,
+              "ari": 0.1335884532837899,
+              "n_classes": 60
+            }
+          }
+        },
+        "test": {
+          "inertia": 215.79174622275696,
+          "silhouette": 0.0700899529032018,
+          "n_clusters_used": 20,
+          "n_samples": 382,
+          "external": {
+            "topic_id": {
+              "purity": 0.2643979057591623,
+              "ari": 0.063243021834205,
+              "n_classes": 20
+            },
+            "subtopic_id": {
+              "purity": 0.10732984293193717,
+              "ari": -0.0038832665838696157,
+              "n_classes": 104
+            },
+            "language": {
+              "purity": 0.981675392670157,
+              "ari": 0.4152748078589249,
+              "n_classes": 3
+            },
+            "dataset_origin": {
+              "purity": 1.0,
+              "ari": 0.22827806914276313,
+              "n_classes": 2
+            },
+            "topic_and_language": {
+              "purity": 0.2486910994764398,
+              "ari": 0.13586244050704366,
+              "n_classes": 60
+            }
+          }
+        }
+      },
+      "clusters": [
+        {
+          "cluster": 0,
+          "size": 50,
+          "dominant_topic_id": "B06",
+          "dominant_topic": "History",
+          "topic_share": 0.82,
+          "dominant_language": "en",
+          "language_share": 0.88,
+          "languages": {
+            "en": 44,
+            "ru": 6
+          },
+          "origins": {
+            "real": 50
+          },
+          "n_topics_present": 4,
+          "silhouette": 0.06253643580042474
+        },
+        {
+          "cluster": 1,
+          "size": 160,
+          "dominant_topic_id": "B01",
+          "dominant_topic": "Законодательство и право",
+          "topic_share": 0.2875,
+          "dominant_language": "ru",
+          "language_share": 1.0,
+          "languages": {
+            "ru": 160
+          },
+          "origins": {
+            "real": 160
+          },
+          "n_topics_present": 8,
+          "silhouette": 0.03917187730957972
+        },
+        {
+          "cluster": 2,
+          "size": 39,
+          "dominant_topic_id": "B08",
+          "dominant_topic": "Иқтисод ва таҳлили соҳибкорӣ",
+          "topic_share": 0.3076923076923077,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 39
+          },
+          "origins": {
+            "real": 39
+          },
+          "n_topics_present": 7,
+          "silhouette": 0.01482504325000968
+        },
+        {
+          "cluster": 3,
+          "size": 86,
+          "dominant_topic_id": "B01",
+          "dominant_topic": "Қонунгузорӣ ва ҳуқуқ",
+          "topic_share": 0.3953488372093023,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 86
+          },
+          "origins": {
+            "real": 86
+          },
+          "n_topics_present": 7,
+          "silhouette": -0.0031352117734237263
+        },
+        {
+          "cluster": 4,
+          "size": 25,
+          "dominant_topic_id": "B07",
+          "dominant_topic": "Маориф",
+          "topic_share": 0.64,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 25
+          },
+          "origins": {
+            "real": 25
+          },
+          "n_topics_present": 3,
+          "silhouette": 0.290750342740988
+        },
+        {
+          "cluster": 5,
+          "size": 53,
+          "dominant_topic_id": "B02",
+          "dominant_topic": "Сиёсат ва идоракунии давлатӣ",
+          "topic_share": 0.4339622641509434,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 53
+          },
+          "origins": {
+            "real": 53
+          },
+          "n_topics_present": 6,
+          "silhouette": 0.07099247171303216
+        },
+        {
+          "cluster": 6,
+          "size": 21,
+          "dominant_topic_id": "B05",
+          "dominant_topic": "Fiction and literature",
+          "topic_share": 0.9047619047619048,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 21
+          },
+          "origins": {
+            "real": 21
+          },
+          "n_topics_present": 3,
+          "silhouette": 0.06937074465924796
+        },
+        {
+          "cluster": 7,
+          "size": 25,
+          "dominant_topic_id": "B02",
+          "dominant_topic": "Politics and public administration",
+          "topic_share": 0.88,
+          "dominant_language": "ru",
+          "language_share": 0.56,
+          "languages": {
+            "en": 11,
+            "ru": 14
+          },
+          "origins": {
+            "real": 25
+          },
+          "n_topics_present": 3,
+          "silhouette": 0.10591650414390698
+        },
+        {
+          "cluster": 8,
+          "size": 28,
+          "dominant_topic_id": "B07",
+          "dominant_topic": "Education",
+          "topic_share": 0.7857142857142857,
+          "dominant_language": "en",
+          "language_share": 0.6428571428571429,
+          "languages": {
+            "en": 18,
+            "ru": 10
+          },
+          "origins": {
+            "real": 28
+          },
+          "n_topics_present": 2,
+          "silhouette": 0.08210762657550408
+        },
+        {
+          "cluster": 9,
+          "size": 140,
+          "dominant_topic_id": "A01",
+          "dominant_topic": "Кадровые документы (HR)",
+          "topic_share": 0.11428571428571428,
+          "dominant_language": "ru",
+          "language_share": 1.0,
+          "languages": {
+            "ru": 140
+          },
+          "origins": {
+            "synthetic": 140
+          },
+          "n_topics_present": 12,
+          "silhouette": 0.05415266111300497
+        },
+        {
+          "cluster": 10,
+          "size": 145,
+          "dominant_topic_id": "B05",
+          "dominant_topic": "Художественная литература",
+          "topic_share": 0.21379310344827587,
+          "dominant_language": "ru",
+          "language_share": 1.0,
+          "languages": {
+            "ru": 145
+          },
+          "origins": {
+            "real": 145
+          },
+          "n_topics_present": 8,
+          "silhouette": -0.00046629060106222225
+        },
+        {
+          "cluster": 11,
+          "size": 51,
+          "dominant_topic_id": "B08",
+          "dominant_topic": "Economics and business analytics",
+          "topic_share": 0.7843137254901961,
+          "dominant_language": "en",
+          "language_share": 0.7058823529411765,
+          "languages": {
+            "en": 36,
+            "ru": 15
+          },
+          "origins": {
+            "real": 51
+          },
+          "n_topics_present": 4,
+          "silhouette": 0.032469350261049336
+        },
+        {
+          "cluster": 12,
+          "size": 140,
+          "dominant_topic_id": "A01",
+          "dominant_topic": "Human resources documents",
+          "topic_share": 0.11428571428571428,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 140
+          },
+          "origins": {
+            "synthetic": 140
+          },
+          "n_topics_present": 12,
+          "silhouette": -0.021252199697212322
+        },
+        {
+          "cluster": 13,
+          "size": 140,
+          "dominant_topic_id": "A01",
+          "dominant_topic": "Ҳуҷҷатҳои кадрӣ",
+          "topic_share": 0.11428571428571428,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 140
+          },
+          "origins": {
+            "synthetic": 140
+          },
+          "n_topics_present": 12,
+          "silhouette": 0.2820516589837712
+        },
+        {
+          "cluster": 14,
+          "size": 59,
+          "dominant_topic_id": "B05",
+          "dominant_topic": "Fiction and literature",
+          "topic_share": 0.4745762711864407,
+          "dominant_language": "en",
+          "language_share": 0.9322033898305084,
+          "languages": {
+            "en": 55,
+            "ru": 4
+          },
+          "origins": {
+            "real": 59
+          },
+          "n_topics_present": 5,
+          "silhouette": 0.02161819064501326
+        },
+        {
+          "cluster": 15,
+          "size": 59,
+          "dominant_topic_id": "B05",
+          "dominant_topic": "Адабиёти бадеӣ",
+          "topic_share": 0.23728813559322035,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 59
+          },
+          "origins": {
+            "real": 59
+          },
+          "n_topics_present": 8,
+          "silhouette": 0.023961815907131652
+        },
+        {
+          "cluster": 16,
+          "size": 107,
+          "dominant_topic_id": "B04",
+          "dominant_topic": "Medicine and health",
+          "topic_share": 0.40186915887850466,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 107
+          },
+          "origins": {
+            "real": 107
+          },
+          "n_topics_present": 7,
+          "silhouette": 0.008796829599434768
+        },
+        {
+          "cluster": 17,
+          "size": 59,
+          "dominant_topic_id": "B01",
+          "dominant_topic": "Legislation and law",
+          "topic_share": 0.8305084745762712,
+          "dominant_language": "en",
+          "language_share": 1.0,
+          "languages": {
+            "en": 59
+          },
+          "origins": {
+            "real": 59
+          },
+          "n_topics_present": 5,
+          "silhouette": 0.023720237875474625
+        },
+        {
+          "cluster": 18,
+          "size": 104,
+          "dominant_topic_id": "B04",
+          "dominant_topic": "Тиб ва тандурустӣ",
+          "topic_share": 0.27884615384615385,
+          "dominant_language": "tg",
+          "language_share": 1.0,
+          "languages": {
+            "tg": 104
+          },
+          "origins": {
+            "real": 104
+          },
+          "n_topics_present": 6,
+          "silhouette": 0.019055735458297873
+        },
+        {
+          "cluster": 19,
+          "size": 23,
+          "dominant_topic_id": "B02",
+          "dominant_topic": "Politics and public administration",
+          "topic_share": 0.9130434782608695,
+          "dominant_language": "en",
+          "language_share": 0.5652173913043478,
+          "languages": {
+            "en": 13,
+            "ru": 10
+          },
+          "origins": {
+            "real": 23
+          },
+          "n_topics_present": 3,
+          "silhouette": 0.07223224686677004
+        }
+      ]
+    }
+  },
+  "layers_language_controlled": {
+    "cells": {
+      "synthetic/en": {
+        "origin": "synthetic",
+        "language": "en",
+        "k": 12,
+        "n_true_topics": 12,
+        "n_documents": {
+          "train": 140,
+          "validation": 70,
+          "test": 70
+        },
+        "splits": {
+          "train": {
+            "inertia": 77.53346239262329,
+            "silhouette": 0.021554953247667215,
+            "n_clusters_used": 12,
+            "n_samples": 140,
+            "external": {
+              "topic_id": {
+                "purity": 0.4714285714285714,
+                "ari": 0.19558834610729425,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.17142857142857143,
+                "ari": 0.07531013773162773,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.4714285714285714,
+                "ari": 0.19558834610729425,
+                "n_classes": 12
+              }
+            }
+          },
+          "validation": {
+            "inertia": 44.4286358641202,
+            "silhouette": 0.0021566274401212905,
+            "n_clusters_used": 11,
+            "n_samples": 70,
+            "external": {
+              "topic_id": {
+                "purity": 0.5142857142857142,
+                "ari": 0.2500891925104719,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.15714285714285714,
+                "ari": 0.0,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.5142857142857142,
+                "ari": 0.2500891925104719,
+                "n_classes": 12
+              }
+            }
+          },
+          "test": {
+            "inertia": 45.046617405679534,
+            "silhouette": 0.00030103068292266003,
+            "n_clusters_used": 11,
+            "n_samples": 70,
+            "external": {
+              "topic_id": {
+                "purity": 0.45714285714285713,
+                "ari": 0.1657894683053754,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.15714285714285714,
+                "ari": 0.0,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.45714285714285713,
+                "ari": 0.1657894683053754,
+                "n_classes": 12
+              }
+            }
+          }
+        }
+      },
+      "synthetic/ru": {
+        "origin": "synthetic",
+        "language": "ru",
+        "k": 12,
+        "n_true_topics": 12,
+        "n_documents": {
+          "train": 140,
+          "validation": 70,
+          "test": 70
+        },
+        "splits": {
+          "train": {
+            "inertia": 57.609183452487414,
+            "silhouette": 0.016497208965156687,
+            "n_clusters_used": 12,
+            "n_samples": 140,
+            "external": {
+              "topic_id": {
+                "purity": 0.37142857142857144,
+                "ari": 0.11287750602910664,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.15,
+                "ari": 0.031816406988021614,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.37142857142857144,
+                "ari": 0.11287750602910664,
+                "n_classes": 12
+              }
+            }
+          },
+          "validation": {
+            "inertia": 33.062856103101254,
+            "silhouette": -0.02371395284421653,
+            "n_clusters_used": 9,
+            "n_samples": 70,
+            "external": {
+              "topic_id": {
+                "purity": 0.35714285714285715,
+                "ari": 0.13982749000768502,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.12857142857142856,
+                "ari": 0.0,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.35714285714285715,
+                "ari": 0.13982749000768502,
+                "n_classes": 12
+              }
+            }
+          },
+          "test": {
+            "inertia": 33.494585077358245,
+            "silhouette": -0.02666972174924811,
+            "n_clusters_used": 9,
+            "n_samples": 70,
+            "external": {
+              "topic_id": {
+                "purity": 0.32857142857142857,
+                "ari": 0.06313789192999662,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.12857142857142856,
+                "ari": 0.0,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.32857142857142857,
+                "ari": 0.06313789192999662,
+                "n_classes": 12
+              }
+            }
+          }
+        }
+      },
+      "synthetic/tg": {
+        "origin": "synthetic",
+        "language": "tg",
+        "k": 12,
+        "n_true_topics": 12,
+        "n_documents": {
+          "train": 140,
+          "validation": 70,
+          "test": 70
+        },
+        "splits": {
+          "train": {
+            "inertia": 27.558552981127093,
+            "silhouette": 0.07826760609809763,
+            "n_clusters_used": 12,
+            "n_samples": 140,
+            "external": {
+              "topic_id": {
+                "purity": 0.18571428571428572,
+                "ari": -0.02168133630596408,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.08571428571428572,
+                "ari": -0.013561746823062269,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.18571428571428572,
+                "ari": -0.02168133630596408,
+                "n_classes": 12
+              }
+            }
+          },
+          "validation": {
+            "inertia": 17.09282984896906,
+            "silhouette": 0.03976619907733424,
+            "n_clusters_used": 12,
+            "n_samples": 70,
+            "external": {
+              "topic_id": {
+                "purity": 0.2571428571428571,
+                "ari": -0.016377821451968307,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.17142857142857143,
+                "ari": 0.0,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.2571428571428571,
+                "ari": -0.016377821451968307,
+                "n_classes": 12
+              }
+            }
+          },
+          "test": {
+            "inertia": 16.73860758797152,
+            "silhouette": 0.0670342037897063,
+            "n_clusters_used": 12,
+            "n_samples": 70,
+            "external": {
+              "topic_id": {
+                "purity": 0.2571428571428571,
+                "ari": -0.028127247904402592,
+                "n_classes": 12
+              },
+              "subtopic_id": {
+                "purity": 0.17142857142857143,
+                "ari": 0.0,
+                "n_classes": 70
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.2571428571428571,
+                "ari": -0.028127247904402592,
+                "n_classes": 12
+              }
+            }
+          }
+        }
+      },
+      "real/en": {
+        "origin": "real",
+        "language": "en",
+        "k": 8,
+        "n_true_topics": 8,
+        "n_documents": {
+          "train": 364,
+          "validation": 58,
+          "test": 58
+        },
+        "splits": {
+          "train": {
+            "inertia": 244.65125053662695,
+            "silhouette": 0.03841682755827291,
+            "n_clusters_used": 8,
+            "n_samples": 364,
+            "external": {
+              "topic_id": {
+                "purity": 0.6785714285714286,
+                "ari": 0.4703446924422587,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.23626373626373626,
+                "ari": 0.22301664308297983,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.6785714285714286,
+                "ari": 0.4703446924422587,
+                "n_classes": 8
+              }
+            }
+          },
+          "validation": {
+            "inertia": 41.23545466633351,
+            "silhouette": 0.026762947549835436,
+            "n_clusters_used": 8,
+            "n_samples": 58,
+            "external": {
+              "topic_id": {
+                "purity": 0.6896551724137931,
+                "ari": 0.4511060399460227,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.25862068965517243,
+                "ari": 0.1658737024221453,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.6896551724137931,
+                "ari": 0.4511060399460227,
+                "n_classes": 8
+              }
+            }
+          },
+          "test": {
+            "inertia": 40.5437864563785,
+            "silhouette": 0.01675261823999825,
+            "n_clusters_used": 8,
+            "n_samples": 58,
+            "external": {
+              "topic_id": {
+                "purity": 0.6206896551724138,
+                "ari": 0.33359586169121563,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.25862068965517243,
+                "ari": 0.10949667102281954,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.6206896551724138,
+                "ari": 0.33359586169121563,
+                "n_classes": 8
+              }
+            }
+          }
+        }
+      },
+      "real/ru": {
+        "origin": "real",
+        "language": "ru",
+        "k": 8,
+        "n_true_topics": 8,
+        "n_documents": {
+          "train": 364,
+          "validation": 58,
+          "test": 58
+        },
+        "splits": {
+          "train": {
+            "inertia": 235.26842592989087,
+            "silhouette": 0.03761266648094945,
+            "n_clusters_used": 8,
+            "n_samples": 364,
+            "external": {
+              "topic_id": {
+                "purity": 0.6346153846153846,
+                "ari": 0.4280469178623399,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.21703296703296704,
+                "ari": 0.16257878708999507,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.6346153846153846,
+                "ari": 0.4280469178623399,
+                "n_classes": 8
+              }
+            }
+          },
+          "validation": {
+            "inertia": 38.3893742548848,
+            "silhouette": 0.025618453908244646,
+            "n_clusters_used": 8,
+            "n_samples": 58,
+            "external": {
+              "topic_id": {
+                "purity": 0.6206896551724138,
+                "ari": 0.40784084549592153,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.25862068965517243,
+                "ari": 0.10186464340796292,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.6206896551724138,
+                "ari": 0.40784084549592153,
+                "n_classes": 8
+              }
+            }
+          },
+          "test": {
+            "inertia": 38.61070067811996,
+            "silhouette": 0.03161348963846581,
+            "n_clusters_used": 8,
+            "n_samples": 58,
+            "external": {
+              "topic_id": {
+                "purity": 0.6551724137931034,
+                "ari": 0.43679543798387055,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.25862068965517243,
+                "ari": 0.08310300744898907,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.6551724137931034,
+                "ari": 0.43679543798387055,
+                "n_classes": 8
+              }
+            }
+          }
+        }
+      },
+      "real/tg": {
+        "origin": "real",
+        "language": "tg",
+        "k": 8,
+        "n_true_topics": 8,
+        "n_documents": {
+          "train": 366,
+          "validation": 56,
+          "test": 56
+        },
+        "splits": {
+          "train": {
+            "inertia": 197.49589798318192,
+            "silhouette": 0.05671885477742947,
+            "n_clusters_used": 8,
+            "n_samples": 366,
+            "external": {
+              "topic_id": {
+                "purity": 0.46174863387978143,
+                "ari": 0.21765052860758305,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.18579234972677597,
+                "ari": 0.10513841097696325,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.46174863387978143,
+                "ari": 0.21765052860758305,
+                "n_classes": 8
+              }
+            }
+          },
+          "validation": {
+            "inertia": 31.679704408832208,
+            "silhouette": 0.04823714396059041,
+            "n_clusters_used": 8,
+            "n_samples": 56,
+            "external": {
+              "topic_id": {
+                "purity": 0.4642857142857143,
+                "ari": 0.1267480810538807,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.25,
+                "ari": 0.05746573695599905,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.4642857142857143,
+                "ari": 0.1267480810538807,
+                "n_classes": 8
+              }
+            }
+          },
+          "test": {
+            "inertia": 31.35791266844898,
+            "silhouette": 0.04899530577410741,
+            "n_clusters_used": 8,
+            "n_samples": 56,
+            "external": {
+              "topic_id": {
+                "purity": 0.5,
+                "ari": 0.21517056551055613,
+                "n_classes": 8
+              },
+              "subtopic_id": {
+                "purity": 0.25,
+                "ari": 0.04970440113860302,
+                "n_classes": 34
+              },
+              "language": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "dataset_origin": {
+                "purity": 1.0,
+                "ari": 0.0,
+                "n_classes": 1
+              },
+              "topic_and_language": {
+                "purity": 0.5,
+                "ari": 0.21517056551055613,
+                "n_classes": 8
+              }
+            }
+          }
+        }
+      }
+    },
+    "by_layer": {
+      "synthetic": {
+        "train": {
+          "mean_ari_topic": 0.0955948386101456,
+          "mean_purity_topic": 0.3428571428571428
+        },
+        "validation": {
+          "mean_ari_topic": 0.12451295368872954,
+          "mean_purity_topic": 0.3761904761904762
+        },
+        "test": {
+          "mean_ari_topic": 0.06693337077698981,
+          "mean_purity_topic": 0.34761904761904755
+        }
+      },
+      "real": {
+        "train": {
+          "mean_ari_topic": 0.3720140463040605,
+          "mean_purity_topic": 0.5916451490221982
+        },
+        "validation": {
+          "mean_ari_topic": 0.3285649888319417,
+          "mean_purity_topic": 0.5915435139573071
+        },
+        "test": {
+          "mean_ari_topic": 0.32852062172854746,
+          "mean_purity_topic": 0.5919540229885057
+        }
+      }
+    },
+    "gap_ari_topic": {
+      "train": -0.27641920769391487,
+      "validation": -0.20405203514321213,
+      "test": -0.26158725095155766
+    }
+  },
+  "layers_within_global_model": {
+    "train": {
+      "synthetic": {
+        "n_documents": 420,
+        "n_clusters_used": 2,
+        "external": {
+          "topic_id": {
+            "purity": 0.12142857142857143,
+            "ari": 0.0002185719590350624,
+            "n_classes": 12
+          },
+          "subtopic_id": {
+            "purity": 0.01904761904761905,
+            "ari": 4.14849300229918e-05,
+            "n_classes": 70
+          },
+          "language": {
+            "purity": 0.34523809523809523,
+            "ari": 0.0004600604856308165,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.0,
+            "n_classes": 1
+          },
+          "topic_and_language": {
+            "purity": 0.04523809523809524,
+            "ari": 0.00016501622819050965,
+            "n_classes": 36
+          }
+        }
+      },
+      "real": {
+        "n_documents": 1094,
+        "n_clusters_used": 3,
+        "external": {
+          "topic_id": {
+            "purity": 0.13711151736745886,
+            "ari": -0.0028417894939958277,
+            "n_classes": 8
+          },
+          "subtopic_id": {
+            "purity": 0.031992687385740404,
+            "ari": -0.003449384936396657,
+            "n_classes": 34
+          },
+          "language": {
+            "purity": 1.0,
+            "ari": 1.0,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.0,
+            "n_classes": 1
+          },
+          "topic_and_language": {
+            "purity": 0.13711151736745886,
+            "ari": 0.1576554747156275,
+            "n_classes": 24
+          }
+        }
+      },
+      "mixed": {
+        "n_documents": 1514,
+        "n_clusters_used": 4,
+        "external": {
+          "topic_id": {
+            "purity": 0.130779392338177,
+            "ari": 0.06788658135734572,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.027080581241743725,
+            "ari": 0.012309401549040153,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.8183619550858653,
+            "ari": 0.5610511792384446,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 0.9966974900924703,
+            "ari": 0.3597611998030929,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.1096433289299868,
+            "ari": 0.13339045361692087,
+            "n_classes": 60
+          }
+        }
+      }
+    },
+    "validation": {
+      "synthetic": {
+        "n_documents": 210,
+        "n_clusters_used": 2,
+        "external": {
+          "topic_id": {
+            "purity": 0.12380952380952381,
+            "ari": 0.00010200917104730294,
+            "n_classes": 12
+          },
+          "subtopic_id": {
+            "purity": 0.01904761904761905,
+            "ari": -5.435631926184273e-06,
+            "n_classes": 70
+          },
+          "language": {
+            "purity": 0.3476190476190476,
+            "ari": 0.0005547833719535054,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.0,
+            "n_classes": 1
+          },
+          "topic_and_language": {
+            "purity": 0.047619047619047616,
+            "ari": 0.0001619123547217008,
+            "n_classes": 36
+          }
+        }
+      },
+      "real": {
+        "n_documents": 172,
+        "n_clusters_used": 3,
+        "external": {
+          "topic_id": {
+            "purity": 0.13953488372093023,
+            "ari": -0.018196619521776872,
+            "n_classes": 8
+          },
+          "subtopic_id": {
+            "purity": 0.03488372093023256,
+            "ari": -0.02219634783349312,
+            "n_classes": 34
+          },
+          "language": {
+            "purity": 1.0,
+            "ari": 1.0,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.0,
+            "n_classes": 1
+          },
+          "topic_and_language": {
+            "purity": 0.13953488372093023,
+            "ari": 0.1465220744434809,
+            "n_classes": 24
+          }
+        }
+      },
+      "mixed": {
+        "n_documents": 382,
+        "n_clusters_used": 4,
+        "external": {
+          "topic_id": {
+            "purity": 0.1256544502617801,
+            "ari": 0.07093469308311584,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.02356020942408377,
+            "ari": 0.004558276470502976,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.6413612565445026,
+            "ari": 0.20169219180225412,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 0.9921465968586387,
+            "ari": 0.707752083326033,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.08376963350785341,
+            "ari": 0.05022773873082286,
+            "n_classes": 60
+          }
+        }
+      }
+    },
+    "test": {
+      "synthetic": {
+        "n_documents": 210,
+        "n_clusters_used": 2,
+        "external": {
+          "topic_id": {
+            "purity": 0.11904761904761904,
+            "ari": 0.00025176306187896295,
+            "n_classes": 12
+          },
+          "subtopic_id": {
+            "purity": 0.01904761904761905,
+            "ari": -1.7947944231250798e-06,
+            "n_classes": 70
+          },
+          "language": {
+            "purity": 0.34285714285714286,
+            "ari": 0.0001840431923080827,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.0,
+            "n_classes": 1
+          },
+          "topic_and_language": {
+            "purity": 0.04285714285714286,
+            "ari": 7.973629116619808e-05,
+            "n_classes": 36
+          }
+        }
+      },
+      "real": {
+        "n_documents": 172,
+        "n_clusters_used": 3,
+        "external": {
+          "topic_id": {
+            "purity": 0.13953488372093023,
+            "ari": -0.018196619521776872,
+            "n_classes": 8
+          },
+          "subtopic_id": {
+            "purity": 0.03488372093023256,
+            "ari": -0.02219634783349312,
+            "n_classes": 34
+          },
+          "language": {
+            "purity": 1.0,
+            "ari": 1.0,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 1.0,
+            "ari": 0.0,
+            "n_classes": 1
+          },
+          "topic_and_language": {
+            "purity": 0.13953488372093023,
+            "ari": 0.1465220744434809,
+            "n_classes": 24
+          }
+        }
+      },
+      "mixed": {
+        "n_documents": 382,
+        "n_clusters_used": 4,
+        "external": {
+          "topic_id": {
+            "purity": 0.1256544502617801,
+            "ari": 0.07137555240607353,
+            "n_classes": 20
+          },
+          "subtopic_id": {
+            "purity": 0.02356020942408377,
+            "ari": 0.004594190355735787,
+            "n_classes": 104
+          },
+          "language": {
+            "purity": 0.6387434554973822,
+            "ari": 0.19886411740262858,
+            "n_classes": 3
+          },
+          "dataset_origin": {
+            "purity": 0.9947643979057592,
+            "ari": 0.7149573248010075,
+            "n_classes": 2
+          },
+          "topic_and_language": {
+            "purity": 0.08376963350785341,
+            "ari": 0.05009759806776371,
+            "n_classes": 60
+          }
+        }
+      }
+    }
+  },
+  "embedding_geometry": {
+    "same_label_as_nearest_neighbour": {
+      "topic_id": 0.6834942932396839,
+      "subtopic_id": 0.591747146619842,
+      "language": 0.946883230904302,
+      "dataset_origin": 0.9982440737489026
+    },
+    "chance_level": {
+      "topic_id": 0.061354899828184394,
+      "subtopic_id": 0.013771456717342893,
+      "language": 0.3333338472128332,
+      "dataset_origin": 0.534456005876726
+    }
+  },
+  "experiment_seconds": 86.8,
+  "headline": {
+    "chosen_k": 4,
+    "ari_topic_test": 0.07137555240607353,
+    "ari_language_test": 0.19886411740262858,
+    "ari_origin_test": 0.7149573248010075,
+    "ari_subtopic_test": 0.004594190355735787,
+    "ari_topic_and_language_test": 0.05009759806776371,
+    "clusters_explained_better_by": "dataset_origin",
+    "true_k": 20,
+    "ari_topic_test_at_true_k": 0.063243021834205,
+    "ari_language_test_at_true_k": 0.4152748078589249,
+    "ari_origin_test_at_true_k": 0.22827806914276313,
+    "ari_subtopic_test_at_true_k": -0.0038832665838696157,
+    "purity_topic_test_at_true_k": 0.2643979057591623,
+    "synthetic_vs_real_gap_ari": -0.003727730297026402,
+    "synthetic_ari_test": 0.021844344597425493,
+    "real_ari_test": 0.025572074894451895,
+    "synthetic_purity_test": 0.22857142857142856,
+    "real_purity_test": 0.28488372093023256,
+    "synthetic_ari_test_per_language": 0.06693337077698981,
+    "real_ari_test_per_language": 0.32852062172854746,
+    "synthetic_vs_real_gap_ari_per_language": -0.26158725095155766,
+    "nearest_neighbour_same_topic": 0.6834942932396839,
+    "nearest_neighbour_same_language": 0.946883230904302,
+    "nearest_neighbour_same_origin": 0.9982440737489026
+  }
+}

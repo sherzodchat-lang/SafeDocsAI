@@ -86,6 +86,16 @@ class DocumentRead(BaseModel):
     created_at: datetime
     error_text: str | None = None
     error_code: str | None = None
+    # Тема документа. Оба поля необязательные и добавлены В КОНЕЦ: порядок
+    # существующих полей — часть уже выданного обещания, а null здесь означает
+    # честное «темы нет» (модель не обучена, документ ещё не размечен, векторов
+    # не нашлось), а не ошибку.
+    #
+    # Подпись приходит ХРАНИМАЯ, а не собранная по номеру кластера из активной
+    # модели: после переобучения номер 3 означает уже другую тему, и сборка на
+    # лету переписала бы задним числом то, что пользователь видел вчера.
+    topic_label: str | None = None
+    topic_cluster_index: int | None = None
 
     @field_serializer("created_at")
     def _serialize_created_at(self, value: datetime) -> str:
@@ -168,6 +178,11 @@ async def read_documents(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     notebook_id: int | None = Query(default=None, ge=1, le=deps.MAX_ID),
+    # Номер кластера активной модели тем. ge=0, а не ge=1: нулевой кластер
+    # существует и является такой же темой, как остальные. Верхняя граница —
+    # общая для целых параметров запроса; несуществующий номер даст пустую
+    # страницу, а не отказ, потому что «в этой теме ничего нет» — обычный ответ.
+    topic: int | None = Query(default=None, ge=0, le=deps.MAX_ID),
     session: AsyncSession = Depends(deps.get_session),
     current_user: User = Depends(deps.get_current_user),
 ) -> Any:
@@ -192,15 +207,42 @@ async def read_documents(
 
     Без notebook_id всё как было: выборка ограничена своими документами
     фильтром по owner_id.
+
+    topic сужает страницу до одной темы, и делает это СЕРВЕР. Отбор на клиенте
+    по уже загруженному списку врёт на больших объёмах: клиент долистывает
+    ограниченное число страниц, и «источников по теме: 12» при сорока
+    настоящих выглядит как правда. Здесь же фильтр стоит рядом с остальными
+    условиями, то есть попадает и в X-Total-Count.
+
+    Номер кластера осмыслен только вместе с версией модели, поэтому она
+    подставляется здесь же — от АКТИВНОЙ модели. Без обученной модели ни у
+    одного документа темы активной версии нет, и честный ответ — пустая
+    страница: подставить вместо этого нефильтрованный список значило бы
+    показать по запросу «покажи тему N» вообще всё.
     """
     if notebook_id is not None:
         await deps.assert_owns_notebook(notebook_id, session, current_user)
+
+    topic_model_version: int | None = None
+    if topic is not None:
+        # Локальный импорт: раздел источников не должен тянуть numpy и артефакт
+        # модели тем ради параметра, которым пользуются не все запросы.
+        from app.modules.topics.service import TopicsService
+
+        model = await TopicsService.active_model(session)
+        if model is None:
+            response.headers[TOTAL_COUNT_HEADER] = "0"
+            return []
+        topic_model_version = model.version
+
     documents, total = await DocumentModuleService.read_documents(
         session=session,
         skip=skip,
         limit=limit,
         notebook_id=notebook_id,
         owner_id=_owner_filter(current_user),
+        topic_cluster_index=topic,
+        topic_model_version=topic_model_version,
     )
     response.headers[TOTAL_COUNT_HEADER] = str(total)
     return documents

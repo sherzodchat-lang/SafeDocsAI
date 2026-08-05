@@ -1,0 +1,71 @@
+{
+  "validated_at": "2026-07-29T19:53:21.352831+00:00",
+  "status": "passed",
+  "record_count": 1438,
+  "unique_record_ids": 1438,
+  "unique_source_pages": 1435,
+  "exact_duplicate_texts": 0,
+  "synthetic_record_count": 0,
+  "counts_by_language": {
+    "en": 480,
+    "ru": 480,
+    "tg": 478
+  },
+  "counts_by_topic_language": {
+    "en/B01": 60,
+    "en/B02": 60,
+    "en/B03": 60,
+    "en/B04": 60,
+    "en/B05": 60,
+    "en/B06": 60,
+    "en/B07": 60,
+    "en/B08": 60,
+    "ru/B01": 60,
+    "ru/B02": 60,
+    "ru/B03": 60,
+    "ru/B04": 60,
+    "ru/B05": 60,
+    "ru/B06": 60,
+    "ru/B07": 60,
+    "ru/B08": 60,
+    "tg/B01": 60,
+    "tg/B02": 60,
+    "tg/B03": 60,
+    "tg/B04": 60,
+    "tg/B05": 60,
+    "tg/B06": 60,
+    "tg/B07": 60,
+    "tg/B08": 58
+  },
+  "counts_by_split": {
+    "train": 1094,
+    "validation": 172,
+    "test": 172
+  },
+  "length_stats": {
+    "en": {
+      "count": 480,
+      "min": 40,
+      "median": 142.0,
+      "p95": 279,
+      "max": 321
+    },
+    "ru": {
+      "count": 480,
+      "min": 40,
+      "median": 88.0,
+      "p95": 263,
+      "max": 332
+    },
+    "tg": {
+      "count": 478,
+      "min": 40,
+      "median": 90.5,
+      "p95": 273,
+      "max": 337
+    }
+  },
+  "tajik_language_heuristic_flags": [],
+  "errors": [],
+  "warnings": []
+}

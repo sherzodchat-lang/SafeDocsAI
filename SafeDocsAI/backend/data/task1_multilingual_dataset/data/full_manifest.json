@@ -1,0 +1,55 @@
+{
+  "created_at": "2026-07-29T21:02:07.500847+00:00",
+  "record_count": 2278,
+  "unique_record_ids": 2278,
+  "unique_normalized_texts": 2278,
+  "counts_by_origin": {
+    "synthetic": 840,
+    "real": 1438
+  },
+  "counts_by_language": {
+    "en": 760,
+    "ru": 760,
+    "tg": 758
+  },
+  "counts_by_split": {
+    "train": 1514,
+    "test": 382,
+    "validation": 382
+  },
+  "counts_by_topic": {
+    "A01": 96,
+    "A02": 72,
+    "A03": 72,
+    "A04": 72,
+    "A05": 72,
+    "A06": 72,
+    "A07": 72,
+    "A08": 60,
+    "A09": 60,
+    "A10": 72,
+    "A11": 60,
+    "A12": 60,
+    "B01": 180,
+    "B02": 180,
+    "B03": 180,
+    "B04": 180,
+    "B05": 180,
+    "B06": 180,
+    "B07": 180,
+    "B08": 178
+  },
+  "source_manifests": [
+    "manifest.json",
+    "synthetic_manifest.json"
+  ],
+  "output_sha256": {
+    "full_multilingual.jsonl": "57fe1035af5883f0ce51e21572f0b39ff821b4ab9e6686b769426b17e1a7c255",
+    "full_en.jsonl": "33d5d5bcd907d111d37e071153ce304285f9381c13567bb5f04cfccbfccca67c",
+    "full_ru.jsonl": "14d26180ca15db4c132e6a5c5c29fc7fc9362e55cd9ab9620c78e6b0f60bf92c",
+    "full_tg.jsonl": "0a9ec7f0cd55e6ccdd2e06f7460eac8f3f60fa42fe606c34e734e1b4ed0e48be",
+    "full_train.jsonl": "667d7b5dcc187257bd9d00e8778ca279dba15e33bb77e10e3a1dfae4e1a10fcb",
+    "full_validation.jsonl": "ec2287751e15cf8938a97d7552494c564c6ac3a425b4200575c746de0d702f9f",
+    "full_test.jsonl": "f2c0aa81494f4f8df73998e8d6353a53d0938df7bd375b4f7fca0d4a7821b520"
+  }
+}

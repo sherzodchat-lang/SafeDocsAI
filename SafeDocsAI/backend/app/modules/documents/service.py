@@ -476,11 +476,23 @@ class DocumentModuleService:
         limit: int = 100,
         notebook_id: int | None = None,
         owner_id: int | None = None,
+        topic_cluster_index: int | None = None,
+        topic_model_version: int | None = None,
     ) -> tuple[list[Document], int]:
         """Страница документов и общее число записей под теми же фильтрами.
 
         total считается отдельным запросом, а не по длине страницы: иначе
         клиент не может отличить «это всё» от «есть ещё» и не строит пагинацию.
+
+        Фильтр по теме идёт ПАРОЙ: номер кластера и версия модели. Порознь они
+        врут. Номер без версии подмешал бы к теме «Налоги» новой модели всё, что
+        прошлая модель положила в свой третий кластер, — а это другая тема с тем
+        же номером. Поэтому версия здесь обязательна: без неё фильтр по теме не
+        применяется вовсе (вызывающий отвечает пустой страницей — см.
+        app/api/endpoints/documents.py).
+
+        Ноль — валидный номер кластера, поэтому проверка именно `is not None`:
+        `if topic_cluster_index` молча выбросил бы нулевую тему из фильтруемых.
         """
 
         def _filtered(statement):
@@ -489,6 +501,11 @@ class DocumentModuleService:
             # owner_id=None — вызов от админа: отдаём всё, включая документы без владельца
             if owner_id is not None:
                 statement = statement.where(Document.owner_id == owner_id)
+            if topic_cluster_index is not None and topic_model_version is not None:
+                statement = statement.where(
+                    Document.topic_cluster_index == topic_cluster_index,
+                    Document.topic_model_version == topic_model_version,
+                )
             return statement
 
         # ORDER BY обязателен: с OFFSET/LIMIT без него порядок строк не

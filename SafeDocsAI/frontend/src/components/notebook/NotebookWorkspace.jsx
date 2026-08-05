@@ -16,6 +16,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Tag,
   Trash2,
   X,
 } from 'lucide-react';
@@ -30,6 +31,7 @@ import { useLocale } from '../../i18n';
 import { resolveApiErrorMessage } from '../../lib/apiError';
 import { formatLocaleDate } from '../../lib/locale';
 import { formatSize, resolveSourceErrorMessage, resolveStatus } from '../../lib/sources';
+import { resolveTopicLabel } from '../../lib/topics';
 import { notesService } from '../../services/notesService';
 import { notebooksService } from '../../services/notebooksService';
 import ChatPage from '../../pages/ChatPage';
@@ -635,6 +637,10 @@ const NotebookWorkspace = ({
                 // Статус error без объяснения не подсказывает, что делать: причину берём
                 // из error_code документа общей таблицей переводов.
                 const sourceErrorMessage = resolveSourceErrorMessage(source, t);
+                // Тема источника — подпись рядом с датой и размером. Нет поля или
+                // источник не размечен — строки просто нет: «не определено» на
+                // карточке рассказывало бы о состоянии модели, а не о документе.
+                const sourceTopicLabel = resolveTopicLabel(source);
 
                 return (
                   <article key={source.id} className="rounded-2xl border border-slate-200 p-4 transition hover:border-slate-300 hover:bg-slate-50">
@@ -654,6 +660,12 @@ const NotebookWorkspace = ({
                     <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
                       <span>{t('notebook.createdAt', { date: formatLocaleDate(source.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—') })}</span>
                       <span>{formatSize(source.size, t)}</span>
+                      {sourceTopicLabel ? (
+                        <span className="inline-flex min-w-0 items-center gap-1" title={t('documents.topic', { value: sourceTopicLabel })}>
+                          <Tag className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">{sourceTopicLabel}</span>
+                        </span>
+                      ) : null}
                     </div>
                     {sourceErrorMessage ? (
                       /* error_text — техническая строка на одном языке (путь, имя библиотеки):

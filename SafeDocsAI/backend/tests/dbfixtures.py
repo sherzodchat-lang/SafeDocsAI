@@ -87,6 +87,7 @@ _TABLES = (
     "chunk",
     "job",
     "presentation",
+    "topicmodelversion",
     "insight",
     "note",
     "log",

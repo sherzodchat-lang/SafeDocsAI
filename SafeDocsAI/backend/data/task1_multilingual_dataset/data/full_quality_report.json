@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "record_count": 2278,
+  "unique_ids": 2278,
+  "unique_normalized_texts": 2278,
+  "counts_by_origin": {
+    "synthetic": 840,
+    "real": 1438
+  },
+  "counts_by_language": {
+    "en": 760,
+    "ru": 760,
+    "tg": 758
+  },
+  "counts_by_split": {
+    "train": 1514,
+    "test": 382,
+    "validation": 382
+  },
+  "errors": []
+}

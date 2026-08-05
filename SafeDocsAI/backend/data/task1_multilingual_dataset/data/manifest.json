@@ -1,0 +1,66 @@
+{
+  "created_at": "2026-07-29T19:53:07.720676+00:00",
+  "generator": "scripts/collect_wikipedia.py",
+  "contains_synthetic_data": false,
+  "languages": [
+    "en",
+    "ru",
+    "tg"
+  ],
+  "target_per_topic_language": 60,
+  "record_count": 1438,
+  "unique_source_pages": 1435,
+  "license": "CC BY-SA 4.0",
+  "counts_by_language": {
+    "en": 480,
+    "ru": 480,
+    "tg": 478
+  },
+  "counts_by_topic_language": {
+    "en/B01": 60,
+    "en/B02": 60,
+    "en/B03": 60,
+    "en/B04": 60,
+    "en/B05": 60,
+    "en/B06": 60,
+    "en/B07": 60,
+    "en/B08": 60,
+    "ru/B01": 60,
+    "ru/B02": 60,
+    "ru/B03": 60,
+    "ru/B04": 60,
+    "ru/B05": 60,
+    "ru/B06": 60,
+    "ru/B07": 60,
+    "ru/B08": 60,
+    "tg/B01": 60,
+    "tg/B02": 60,
+    "tg/B03": 60,
+    "tg/B04": 60,
+    "tg/B05": 60,
+    "tg/B06": 60,
+    "tg/B07": 60,
+    "tg/B08": 58
+  },
+  "counts_by_split": {
+    "train": 1094,
+    "test": 172,
+    "validation": 172
+  },
+  "shortfalls": [
+    {
+      "language": "tg",
+      "topic_id": "B08",
+      "subtopic_id": "B08_S04",
+      "target": 15,
+      "actual": 13
+    }
+  ],
+  "collection_parameters": {
+    "search_limit": 40,
+    "max_chunks_per_page": 2,
+    "min_words": 40,
+    "target_chunk_words": 260,
+    "max_chunk_words": 360
+  }
+}

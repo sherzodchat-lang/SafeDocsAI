@@ -12,6 +12,7 @@ import {
     FileText,
     Loader2,
     RefreshCw,
+    Tag,
     Trash2,
     X,
 } from 'lucide-react';
@@ -26,6 +27,7 @@ import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatDocumentLanguage, formatLocaleDate, parseTimestamp } from '../lib/locale';
 import { formatSize, resolveSourceErrorMessage, resolveStatus } from '../lib/sources';
+import { TOPIC_LABEL_PARAM, TOPIC_PARAM, matchesTopicFilter, readTopicFilter, resolveTopicLabel } from '../lib/topics';
 
 const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
 const ALLOWED_MIME_TYPES = new Set([
@@ -70,8 +72,11 @@ const AdminDocumentsPage = ({ notebookId }) => {
     const [deleteError, setDeleteError] = useState('');
 
     // Поиск читаем из URL param ?q= (устанавливается хедером)
-    const [searchParams] = useSearchParams();
+    const [searchParams, setSearchParams] = useSearchParams();
     const searchTerm = searchParams.get('q') || '';
+    // Фильтр по теме приходит с экрана «Темы» ссылкой. В адресе он и живёт:
+    // так его видно, им можно поделиться, и «Назад» возвращает к полному списку.
+    const topicFilter = readTopicFilter(searchParams);
     const [chunksModal, setChunksModal] = useState({
         isOpen: false,
         docId: null,
@@ -336,6 +341,8 @@ const AdminDocumentsPage = ({ notebookId }) => {
         return counts;
     }, [documents]);
 
+    const topicClusterIndex = topicFilter.clusterIndex;
+
     const filteredDocuments = useMemo(() => {
         const query = searchTerm.trim().toLowerCase();
 
@@ -343,9 +350,28 @@ const AdminDocumentsPage = ({ notebookId }) => {
             const status = resolveStatus(doc.status);
             const statusMatch = statusFilter === 'all' || statusFilter === status;
             const queryMatch = !query || String(doc.name || '').toLowerCase().includes(query);
-            return statusMatch && queryMatch;
+            return statusMatch && queryMatch && matchesTopicFilter(doc, topicClusterIndex);
         });
-    }, [documents, searchTerm, statusFilter]);
+    }, [documents, searchTerm, statusFilter, topicClusterIndex]);
+
+    // Подпись темы для бейджа: сначала та, что пришла ссылкой, затем — взятая у
+    // самих документов. Обе могут отсутствовать (адрес набрали руками, под тему
+    // не попал ни один источник), и тогда бейдж всё равно обязан сказать, что
+    // фильтр стоит, — иначе список опять неполон без объяснения.
+    const topicFilterLabel = useMemo(() => {
+        if (topicClusterIndex == null) return '';
+        if (topicFilter.label) return topicFilter.label;
+
+        const labelled = documents.find((doc) => matchesTopicFilter(doc, topicClusterIndex) && resolveTopicLabel(doc));
+        return labelled ? resolveTopicLabel(labelled) : t('documents.topicFilterUnknown');
+    }, [documents, t, topicClusterIndex, topicFilter.label]);
+
+    const resetTopicFilter = useCallback(() => {
+        const params = new URLSearchParams(searchParams);
+        params.delete(TOPIC_PARAM);
+        params.delete(TOPIC_LABEL_PARAM);
+        setSearchParams(params, { replace: true });
+    }, [searchParams, setSearchParams]);
 
     const sortedDocuments = useMemo(() => {
         const sorted = [...filteredDocuments];
@@ -377,7 +403,7 @@ const AdminDocumentsPage = ({ notebookId }) => {
     // Смена фильтра, поиска или размера страницы возвращает пользователя на первую страницу.
     useEffect(() => {
         setPage(1);
-    }, [searchTerm, statusFilter, sortField, sortOrder, pageSize]);
+    }, [searchTerm, statusFilter, sortField, sortOrder, pageSize, topicClusterIndex]);
 
     const pageCount = Math.max(1, Math.ceil(sortedDocuments.length / pageSize));
     const currentPage = Math.min(page, pageCount);
@@ -404,16 +430,36 @@ const AdminDocumentsPage = ({ notebookId }) => {
     return (
         <div className="space-y-6 px-4">
             {/* Бейдж стоит над загрузкой, а не только над таблицей: активный блокнот
-                сужает список и одновременно задаёт, куда попадёт новый источник. */}
-            {!isNotebookPanel ? (
+                сужает список и одновременно задаёт, куда попадёт новый источник.
+                Рядом — тема, если пришли по ней: обе области сужают один список,
+                и показывать их порознь значило бы прятать одну из них. */}
+            {!isNotebookPanel || topicClusterIndex != null ? (
                 <div className="flex flex-wrap items-center gap-2">
-                    <NotebookScopeBadge
-                        notebookId={effectiveNotebookId}
-                        notebookName={notebookName}
-                        canReset={canResetScope}
-                        onReset={resetScope}
-                        resetTitle={t('documents.scopeResetTitle')}
-                    />
+                    {!isNotebookPanel ? (
+                        <NotebookScopeBadge
+                            notebookId={effectiveNotebookId}
+                            notebookName={notebookName}
+                            canReset={canResetScope}
+                            onReset={resetScope}
+                            resetTitle={t('documents.scopeResetTitle')}
+                        />
+                    ) : null}
+
+                    {topicClusterIndex != null ? (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-[#1f3a60]/10 px-3 py-1 text-xs font-semibold text-[#1f3a60]">
+                            <Tag className="h-3.5 w-3.5" />
+                            {t('documents.topic', { value: topicFilterLabel })}
+                            <button
+                                type="button"
+                                onClick={resetTopicFilter}
+                                title={t('documents.topicFilterReset')}
+                                aria-label={t('documents.topicFilterReset')}
+                                className="rounded-full p-0.5 transition hover:bg-[#1f3a60]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        </span>
+                    ) : null}
                 </div>
             ) : null}
 
@@ -652,6 +698,12 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                     // Причина провала индексации: error_code документа переводится
                                     // той же таблицей, что и коды HTTP-ошибок.
                                     const documentErrorMessage = resolveSourceErrorMessage(doc, t);
+                                    // Тема — подпись, а не статус: строкой ниже имени и
+                                    // серым. Поля может не быть вовсе (модель не обучена,
+                                    // источник не размечен) — тогда не показываем ничего:
+                                    // прочерк на месте темы сообщал бы о ней больше, чем
+                                    // о самом источнике.
+                                    const topicLabel = resolveTopicLabel(doc);
 
                                     return (
                                         <tr key={doc.id} className="border-t border-slate-100 text-sm hover:bg-slate-50/70">
@@ -662,6 +714,15 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                     </div>
                                                     <div className="min-w-0">
                                                         <p className="max-w-[320px] break-words font-semibold text-slate-800">{doc.name}</p>
+                                                        {topicLabel ? (
+                                                            <p
+                                                                className="mt-0.5 flex max-w-[320px] items-center gap-1 text-xs text-slate-400"
+                                                                title={t('documents.topic', { value: topicLabel })}
+                                                            >
+                                                                <Tag className="h-3 w-3 shrink-0" />
+                                                                <span className="truncate">{topicLabel}</span>
+                                                            </p>
+                                                        ) : null}
                                                     </div>
                                                 </div>
                                             </td>

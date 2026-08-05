@@ -1,0 +1,142 @@
+{
+  "created_at": "2026-07-29T20:57:48.018709+00:00",
+  "generator": "scripts/merge_synthetic.py",
+  "contains_synthetic_data": true,
+  "source_files": [
+    "synthetic_en_batch01.jsonl",
+    "synthetic_en_batch02.jsonl",
+    "synthetic_en_batch03.jsonl",
+    "synthetic_en_batch04.jsonl",
+    "synthetic_ru_batch01.jsonl",
+    "synthetic_ru_batch02.jsonl",
+    "synthetic_ru_batch03.jsonl",
+    "synthetic_ru_batch04.jsonl",
+    "synthetic_tg_batch01.jsonl",
+    "synthetic_tg_batch02.jsonl",
+    "synthetic_tg_batch03.jsonl",
+    "synthetic_tg_batch04.jsonl"
+  ],
+  "record_count": 840,
+  "unique_record_ids": 840,
+  "unique_normalized_texts": 840,
+  "languages": [
+    "en",
+    "ru",
+    "tg"
+  ],
+  "batches": [
+    "batch01",
+    "batch02",
+    "batch03",
+    "batch04"
+  ],
+  "subtopics_per_language": 70,
+  "records_per_language_subtopic": 4,
+  "counts_by_language": {
+    "en": 280,
+    "ru": 280,
+    "tg": 280
+  },
+  "counts_by_split": {
+    "train": 420,
+    "validation": 210,
+    "test": 210
+  },
+  "counts_by_language_split": {
+    "en/train": 140,
+    "en/validation": 70,
+    "en/test": 70,
+    "ru/train": 140,
+    "ru/validation": 70,
+    "ru/test": 70,
+    "tg/train": 140,
+    "tg/validation": 70,
+    "tg/test": 70
+  },
+  "counts_by_topic_language": {
+    "en/A01": 32,
+    "en/A02": 24,
+    "en/A03": 24,
+    "en/A04": 24,
+    "en/A05": 24,
+    "en/A06": 24,
+    "en/A07": 24,
+    "en/A08": 20,
+    "en/A09": 20,
+    "en/A10": 24,
+    "en/A11": 20,
+    "en/A12": 20,
+    "ru/A01": 32,
+    "ru/A02": 24,
+    "ru/A03": 24,
+    "ru/A04": 24,
+    "ru/A05": 24,
+    "ru/A06": 24,
+    "ru/A07": 24,
+    "ru/A08": 20,
+    "ru/A09": 20,
+    "ru/A10": 24,
+    "ru/A11": 20,
+    "ru/A12": 20,
+    "tg/A01": 32,
+    "tg/A02": 24,
+    "tg/A03": 24,
+    "tg/A04": 24,
+    "tg/A05": 24,
+    "tg/A06": 24,
+    "tg/A07": 24,
+    "tg/A08": 20,
+    "tg/A09": 20,
+    "tg/A10": 24,
+    "tg/A11": 20,
+    "tg/A12": 20
+  },
+  "split_policy": {
+    "group_by": [
+      "language",
+      "subtopic_id"
+    ],
+    "per_group": {
+      "train": 2,
+      "validation": 1,
+      "test": 1
+    },
+    "ranking": "SHA-256(seed|language|subtopic_id|id)",
+    "seed": "task1-synthetic-v1"
+  },
+  "removed_service_fields": {
+    "exact_names": [
+      "_meta",
+      "batch",
+      "created_at",
+      "generated_at",
+      "generation_model",
+      "generation_prompt",
+      "generator",
+      "model",
+      "prompt",
+      "prompt_version",
+      "raw_response",
+      "request_id",
+      "split",
+      "validation",
+      "validation_notes"
+    ],
+    "prefixes": [
+      "_",
+      "generation_",
+      "prompt_",
+      "raw_",
+      "validation_"
+    ]
+  },
+  "output_sha256": {
+    "synthetic_en.jsonl": "049810d30d49f00579fc2fc78b1c7c0d132a2e5c8f1c7b9b2182109b113c14f3",
+    "synthetic_multilingual.jsonl": "7a0f6274db9a66126347f1a2b0e37053308a2319af8cb7552d2a5d098da6a448",
+    "synthetic_ru.jsonl": "89b8fad56b3a941e0b8c7d3b86340db98358bb0205d0bd7d1da735a6c43cb854",
+    "synthetic_test.jsonl": "17b692a29e903fe6b5ff49227fbd42661bff95b589c7f9aede310001ca9bd0bc",
+    "synthetic_tg.jsonl": "bba8fefc9dd23d6abff12f4cea9ffaf679404616fab3f2bde6fee31c2b4e4278",
+    "synthetic_train.jsonl": "84c2ab6f029228052d32b90a0b0eb0975ecaf01fe46d46b08698b7d0fc3577bf",
+    "synthetic_validation.jsonl": "44bcac9e800d4a935d6a5186502e17bd27e7f435070f78120f1c2aae08be0149"
+  }
+}

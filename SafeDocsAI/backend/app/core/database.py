@@ -28,6 +28,29 @@ logger = logging.getLogger(__name__)
 PRESENTATION_ACTIVE_INDEX = "uq_presentation_active_notebook"
 PRESENTATION_ACTIVE_STATUSES = (STATUS_QUEUED, STATUS_GENERATING)
 
+# --- Инварианты раздела тем ----------------------------------------------
+#
+# Оба держит БАЗА, и оба объявлены здесь, а не в app/modules/topics/service.py,
+# по одной причине: их читает миграция ниже, и импорт из раздела тем сюда
+# завернул бы цикл (сервис тем берёт отсюда session_context). Обратное
+# направление безопасно — сервис и эндпоинт импортируют эти имена отсюда, как
+# эндпоинт презентаций импортирует PRESENTATION_ACTIVE_INDEX.
+
+# Активная обученная модель ровно одна. Вторая означала бы, что «текущая тема
+# документа» зависит от того, какую строку вернул SELECT без ORDER BY.
+TOPIC_MODEL_ACTIVE_INDEX = "uq_topic_model_active"
+
+# Переразметка — задача в общей таблице job, а не своя очередь: она нужна
+# ровно за тем же, за чем очередь индексации (пережить перезапуск, атомарный
+# захват при uvicorn --workers 2), и вторая реализация того же разошлась бы с
+# первой на первой правке.
+TOPIC_REASSIGN_JOB_TYPE = "reassign_topics"
+# Не больше одной активной переразметки на всю систему. Предпроверка в
+# хендлере — это то самое место, которое гонится: два клика в секунду проходят
+# её оба, а переразметка ходит по всем документам разом и держит ChromaDB.
+TOPIC_REASSIGN_ACTIVE_INDEX = "uq_topic_reassign_active"
+TOPIC_REASSIGN_ACTIVE_STATUSES = ("queued", "running")
+
 # Echo SQL queries only in development
 engine = create_async_engine(
     settings.SQLALCHEMY_DATABASE_URI,
@@ -219,6 +242,118 @@ async def init_db():
                         PRESENTATION_ACTIVE_INDEX,
                         exc,
                     )
+
+            # --- Раздел тем ------------------------------------------------
+            #
+            # Тема документа: номер кластера, хранимая подпись и версия модели,
+            # которая это назначение сделала. Три колонки добавляются отдельно
+            # от create_all по той же причине, что и все остальные ALTER выше:
+            # на существующих базах таблица document уже есть.
+            #
+            # Все три nullable и остаются такими навсегда: документ без темы —
+            # нормальное состояние, а не незаполненная миграция. Тему может не
+            # получить документ, загруженный до обучения модели, документ, чьи
+            # векторы не отдала ChromaDB, и вообще любой документ, пока
+            # переразметка до него не дошла. NOT NULL здесь означал бы, что
+            # индексация обязана дождаться темы, — а она не обязана: тема
+            # украшение, поиск по документу основная функция.
+            for column in (
+                "topic_cluster_index INTEGER",
+                "topic_label VARCHAR",
+                "topic_model_version INTEGER",
+            ):
+                await conn.execute(
+                    text(
+                        f"""
+                        ALTER TABLE IF EXISTS document
+                        ADD COLUMN IF NOT EXISTS {column}
+                        """
+                    )
+                )
+
+            # Распределение тем считается GROUP BY topic_cluster_index при
+            # фиксированной версии модели — и делает это КАЖДЫЙ показ раздела.
+            # Без индекса это seq scan по всей таблице документов. Порядок
+            # колонок именно такой: версия в запросе всегда задана равенством,
+            # кластер только группируется.
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_document_topic
+                    ON document (topic_model_version, topic_cluster_index)
+                    """
+                )
+            )
+
+            # Активная обученная модель ровно одна — инвариантом БАЗЫ, а не
+            # дисциплиной кода. Регистрация модели идёт в две операции (снять
+            # флаг со старой, вставить новую), и два процесса uvicorn,
+            # обнаружившие новый артефакт одновременно, прошли бы её оба.
+            #
+            # Индекс частичный по is_active: в него попадают только активные
+            # строки, а среди них значение колонки всегда одно и то же — то
+            # есть уникальность по ней и означает «не больше одной». История
+            # неактивных версий при этом не ограничена ничем, ради неё реестр
+            # и заведён.
+            #
+            # Таблица topicmodelversion создаётся самим create_all выше (она
+            # новая), поэтому грязных данных в ней быть не может; SAVEPOINT
+            # оставлен на случай гонки со вторым процессом на старте — по тому
+            # же доводу, что у индекса презентаций.
+            try:
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text(
+                            f"""
+                            CREATE UNIQUE INDEX IF NOT EXISTS
+                            {TOPIC_MODEL_ACTIVE_INDEX}
+                            ON topicmodelversion (is_active)
+                            WHERE is_active
+                            """
+                        )
+                    )
+            except Exception as exc:  # pragma: no cover - гонка на старте
+                logger.error(
+                    "Could not create the unique index %s: %s. Two active topic "
+                    "models would become possible; the index will be created on "
+                    "the next start.",
+                    TOPIC_MODEL_ACTIVE_INDEX,
+                    exc,
+                )
+
+            # Не больше ОДНОЙ активной переразметки тем. Довод тот же, что у
+            # uq_presentation_active_notebook: предпроверка в хендлере (SELECT,
+            # потом INSERT) гонится между двумя кликами, а цена промаха здесь —
+            # два прохода по всем документам сразу, каждый со своими запросами
+            # в ChromaDB.
+            #
+            # Уникальность по job_type, а не по чему-то содержательному: в
+            # предикат уже входит и тип, и множество активных статусов, поэтому
+            # в индекс попадает не больше одной строки на всю таблицу.
+            reassign_statuses = ", ".join(
+                f"'{status}'" for status in TOPIC_REASSIGN_ACTIVE_STATUSES
+            )
+            try:
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text(
+                            f"""
+                            CREATE UNIQUE INDEX IF NOT EXISTS
+                            {TOPIC_REASSIGN_ACTIVE_INDEX}
+                            ON job (job_type)
+                            WHERE job_type = '{TOPIC_REASSIGN_JOB_TYPE}'
+                              AND status IN ({reassign_statuses})
+                            """
+                        )
+                    )
+            except Exception as exc:  # pragma: no cover - гонка на старте
+                logger.error(
+                    "Could not create the unique index %s: %s. A second topic "
+                    "reassignment could be queued in parallel; the index will "
+                    "be created on the next start.",
+                    TOPIC_REASSIGN_ACTIVE_INDEX,
+                    exc,
+                )
 
             # Владение источниками. Колонка добавляется отдельно от create_all,
             # потому что на существующих базах таблица document уже есть.

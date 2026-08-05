@@ -14,6 +14,7 @@ import NotebookLayout from './pages/NotebookLayout';
 import NotebookOverviewPage from './pages/NotebookOverviewPage';
 import NotebookPresentationsPage from './pages/NotebookPresentationsPage';
 import SettingsPage from './pages/SettingsPage';
+import TopicsPage from './pages/TopicsPage';
 
 import RegisterPage from './pages/RegisterPage';
 import RequireAdmin, { RequireContentAccess } from './components/auth/RequireAdmin';
@@ -51,6 +52,9 @@ function App() {
                   localStorage — тот же, что выбирается на странице «Блокноты». */}
               <Route path="chat" element={<ChatPage />} />
               <Route path="sources" element={<AdminSourcesPage notebookId={null} />} />
+              {/* Темы — надстройка над теми же источниками: экран открыт всем,
+                  правами ограничена только переразметка внутри него. */}
+              <Route path="topics" element={<TopicsPage />} />
               <Route path="ask" element={<AskPage />} />
               <Route path="notes" element={<NotesPage />} />
               <Route path="insights" element={<InsightsPage />} />

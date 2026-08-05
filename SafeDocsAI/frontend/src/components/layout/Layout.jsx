@@ -12,6 +12,7 @@ import {
     MessageSquare,
     Pencil,
     Settings,
+    Shapes,
     Trash2,
     UserCircle2,
 } from 'lucide-react';
@@ -32,6 +33,9 @@ const resolvePageMeta = (pathname, t) => {
     }
     if (pathname.startsWith('/notes')) {
         return { title: t('layout.pageMeta.notesTitle'), badge: t('layout.pageMeta.notesBadge'), searchPlaceholder: t('layout.pageMeta.notesSearch') };
+    }
+    if (pathname.startsWith('/topics')) {
+        return { title: t('layout.pageMeta.topicsTitle'), badge: t('layout.pageMeta.topicsBadge'), searchPlaceholder: t('layout.pageMeta.topicsSearch') };
     }
     if (pathname.startsWith('/insights')) {
         return { title: t('layout.pageMeta.insightsTitle'), badge: t('layout.pageMeta.insightsBadge'), searchPlaceholder: t('layout.pageMeta.insightsSearch') };
@@ -70,6 +74,9 @@ const Layout = () => {
     // защита, а лишний тупик. Сама защита остаётся на сервере.
     const navItems = useMemo(() => ([
         { name: t('layout.nav.sources'), href: '/sources', icon: FileText },
+        // Темы стоят рядом с источниками: это второй способ смотреть на тот же
+        // список, и из него же в него и ведёт переход по теме.
+        { name: t('layout.nav.topics'), href: '/topics', icon: Shapes },
         { name: t('layout.nav.notebooks'), href: '/notebooks', icon: Bookmark },
         { name: t('layout.nav.chat'), href: '/chat', icon: MessageSquare },
         { name: t('layout.nav.logs'), href: '/admin/logs', icon: ChartNoAxesCombined, adminOnly: true },
@@ -94,17 +101,34 @@ const Layout = () => {
 
     const searchValue = searchParams.get('q') || '';
 
+    // Правим только свой параметр: адрес страницы может нести и её собственное
+    // состояние (фильтр по теме), а набор текста в поиске не должен его сбивать.
+    // replace — чтобы каждая буква не оставляла шаг в истории браузера.
     const handleSearchChange = (e) => {
         const val = e.target.value;
+        const params = new URLSearchParams(searchParams);
+
         if (val) {
-            setSearchParams({ q: val });
+            params.set('q', val);
         } else {
-            setSearchParams({});
+            params.delete('q');
         }
+
+        setSearchParams(params, { replace: true });
     };
 
+    // Поле поиска принадлежит странице, поэтому на новой странице оно пустое.
+    // Гасим ровно свой параметр, а не адрес целиком: остальные параметры —
+    // состояние самой страницы (например, фильтр по теме, с которым на список
+    // источников приходят с экрана «Темы»), и чистка «всего» молча снимала бы
+    // фильтр в тот же миг, когда пользователь его поставил.
     useEffect(() => {
-        setSearchParams({});
+        const params = new URLSearchParams(location.search);
+        if (!params.has('q')) return;
+
+        params.delete('q');
+        // replace: иначе в истории остаётся лишний шаг и «Назад» возвращает на ту же страницу.
+        setSearchParams(params, { replace: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.pathname]);
 
