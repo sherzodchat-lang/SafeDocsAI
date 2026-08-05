@@ -69,6 +69,8 @@ def plan_system_prompt() -> str:
 def slide_system_prompt() -> str:
     return build_slide_messages(
         heading="Роҳсозӣ",
+        # Раскладку слайд-вызову назначает план, и без неё промпт не собрать.
+        layout=LAYOUT_BULLETS,
         description="Про дороги",
         language=LANGUAGE_TJ,
         context_block="",
@@ -127,6 +129,7 @@ class PresentationCitationsSurviveTests(unittest.TestCase):
     def test_slide_prompt_still_lists_the_allowed_chunk_ids(self):
         prompt = build_slide_messages(
             heading="Роҳсозӣ",
+            layout=LAYOUT_BULLETS,
             description="",
             language=LANGUAGE_TJ,
             context_block="",

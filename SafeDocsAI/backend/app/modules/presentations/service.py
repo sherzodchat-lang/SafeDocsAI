@@ -468,6 +468,19 @@ class CallTimings:
     slide_calls: int = 0
     retries: int = 0
     unclassified: int = 0
+    # Слайдов, вернувшихся НЕ в той раскладке, которую назначил план.
+    #
+    # Такое расхождение законно: план размечает секцию, видя дайджест корпуса, а
+    # слайд пишется по пяти найденным под секцию чанкам, и второй стороны
+    # сравнения в них может не оказаться. Отдать в этом случае bullets честнее,
+    # чем выдумать её, и слайд за это не отвергается — работа модели уже
+    # оплачена временем пользователя, а буллеты вместо сравнения теряют форму, а
+    # не содержание.
+    #
+    # Но молчать об этом нельзя: без счётчика «колода снова однообразная»
+    # неотличимо от «промпт не работает», а это ровно тот вопрос, ради которого
+    # выбор раскладки и переехал в план.
+    layout_mismatches: int = 0
     # Длительность стадии рендера — ОТДЕЛЬНЫМ полем, а не ещё одним значением в
     # durations. Это другая природа: вызовы модели измеряют скорость чат-модели
     # (её меняют мышкой из админ-панели), а рендер — скорость внешнего
@@ -500,6 +513,10 @@ class CallTimings:
         одну джобу.
         """
         self.unclassified += 1
+
+    def record_layout_mismatch(self) -> None:
+        """Слайд вернулся не в назначенной планом раскладке."""
+        self.layout_mismatches += 1
 
     @staticmethod
     def percentile(values: list[float], share: float) -> float:
@@ -544,6 +561,11 @@ class CallTimings:
             # строке журнала перестаёт читаться на второй неделе, и появление
             # там единицы не заметит никто.
             counters += f", неклассифицированных {self.unclassified}"
+        if self.layout_mismatches:
+            # По тому же правилу «только когда не ноль»: строку читают глазами
+            # один раз, и постоянный «раскладок не по плану 0» в каждой записи
+            # перестал бы читаться раньше, чем в нём появилась бы восьмёрка.
+            counters += f", раскладок не по плану {self.layout_mismatches}"
         return (
             f"вызовов модели {len(self.durations)} "
             f"({counters}) -> "
@@ -1110,6 +1132,11 @@ async def generate_presentation(
                 model=model,
                 messages=build_slide_messages(
                     heading=section.heading,
+                    # Раскладку выбрал план — вызов, который единственный видел
+                    # весь материал сразу. Слайд-вызов её исполняет: выбирая
+                    # заново, он видел бы одну секцию, а из этой позиции список
+                    # подходит любому материалу и потому выигрывает всегда.
+                    layout=section.layout,
                     description=description,
                     language=language,
                     context_block=context_block,
@@ -1118,14 +1145,6 @@ async def generate_presentation(
                     # физически не может не повторяться — он не видит
                     # предыдущих.
                     digest=build_written_digest(previous_texts),
-                    # То же лекарство, но от однообразия ФОРМЫ, а не фактов.
-                    # Вызовы независимы, и раскладку каждый выбирает в вакууме:
-                    # пять секций, в материале которых есть цифра, честно дадут
-                    # пять metric подряд. История передаётся СПИСКОМ, в порядке
-                    # написания и с повторами: «bullets, bullets, bullets» и
-                    # «bullets» — разные положения, и разницу между ними модель
-                    # обязана видеть.
-                    used_layouts=[written.layout for written in slides],
                 ),
                 validate=lambda raw: validate_slide(
                     raw, allowed_citations=allowed_citations
@@ -1134,6 +1153,24 @@ async def generate_presentation(
                 stage=slide_stage(index, section_count, section.heading),
                 timings=timings,
             )
+
+            if slide.layout != section.layout:
+                # Слайд НЕ отвергается: назначение плана — это задание по
+                # материалу корпуса, а пишется слайд по чанкам, найденным под
+                # секцию, и второй стороны сравнения в них может не быть. Отдать
+                # тогда bullets — честно. Но происходить это обязано ГРОМКО:
+                # сосчитанное расхождение отличает «материал не дал» от «промпт
+                # не работает», а на глаз эти два случая дают одну и ту же
+                # однообразную колоду.
+                timings.record_layout_mismatch()
+                logger.info(
+                    "Presentation %s: section %r was planned as %s, "
+                    "the model returned %s",
+                    presentation_id,
+                    section.heading,
+                    section.layout,
+                    slide.layout,
+                )
 
             slides.append(slide)
             # Что считать текстом слайда, знает сама раскладка (digest_texts в

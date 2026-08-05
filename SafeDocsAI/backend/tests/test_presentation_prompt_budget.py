@@ -90,6 +90,12 @@ NOTEBOOK_NAME_MAX = TITLE_MAX_LENGTH
 # Синтаксис JSON вокруг полей ответа: скобки, кавычки, запятые, имена ключей.
 # Округлено вверх — место под ответ закладывается щедро намеренно, ошибка
 # здесь в короткую сторону означает обрезанный ответ модели.
+#
+# У секции плана к ним добавилась раскладка: имя из закрытого списка плюс ключ
+# "layout" с кавычками и двоеточием. Считается по САМОМУ ДЛИННОМУ имени —
+# короткое занизило бы худший случай ровно тем способом, против которого этот
+# файл и написан.
+PLAN_SECTION_LAYOUT_CHARS = max(len(name) for name in SLIDE_LAYOUTS) + 14
 PLAN_SECTION_SYNTAX_CHARS = 40
 PLAN_ENVELOPE_SYNTAX_CHARS = 60
 SLIDE_SYNTAX_CHARS = 200
@@ -155,6 +161,7 @@ class PromptBudgetFitsTheWindowTests(unittest.TestCase):
             * (
                 SECTION_HEADING_MAX_CHARS
                 + SECTION_SEARCH_QUERY_MAX_CHARS
+                + PLAN_SECTION_LAYOUT_CHARS
                 + PLAN_SECTION_SYNTAX_CHARS
             )
         )
@@ -194,7 +201,15 @@ class PromptBudgetFitsTheWindowTests(unittest.TestCase):
             + SLIDE_QUOTE_ATTRIBUTION_MAX_CHARS,
         }
 
-    def slide_answer_chars(self) -> int:
+    def slide_answer_chars(self, layout: str) -> int:
+        """Предельный ответ на слайд-вызов с НАЗНАЧЕННОЙ раскладкой.
+
+        Ответов у такого вызова ровно два вида: назначенная раскладка и bullets
+        — единственная законная замена, когда материал назначенную не держит
+        (правило 5 слайд-промпта). Место закладывается под больший из двух:
+        слайду, назначенному metric, модель имеет право ответить пятью
+        полноширинными буллетами, и они длиннее величины с подписью.
+        """
         by_layout = self.slide_answer_chars_by_layout()
         # Ни одна раскладка не должна выпасть из расчёта: добавили шестую в
         # схему, забыли здесь — и бюджет снова считается не по худшему случаю.
@@ -202,7 +217,7 @@ class PromptBudgetFitsTheWindowTests(unittest.TestCase):
             "расчёт бюджета не знает про раскладки "
             f"{sorted(set(SLIDE_LAYOUTS) - set(by_layout))}"
         )
-        return max(by_layout.values())
+        return max(by_layout[layout], by_layout["bullets"])
 
     def test_plan_call_fits(self) -> None:
         """План-вызов на предельном заказе: промпт + ответ дважды + претензия."""
@@ -232,7 +247,13 @@ class PromptBudgetFitsTheWindowTests(unittest.TestCase):
         )
 
     def test_slide_call_fits(self) -> None:
-        """Слайд-вызов: чанки, описание, ПОЛНЫЙ дайджест и ответ дважды."""
+        """Слайд-вызов: чанки, описание, ПОЛНЫЙ дайджест и ответ дважды.
+
+        Проверяется КАЖДАЯ назначаемая раскладка, а не одна: с переносом выбора
+        в план системный промпт слайда зависит от назначения — в нём описана
+        назначенная форма и bullets как замена. Значит, и длина его разная, и
+        худший случай — максимум по всем пяти назначениям, а не по одному.
+        """
         context_block, allowed = worst_case_context_block(SLIDE_RETRIEVAL_TOP_K)
         # Дайджест предельного размера: буллеты предельной длины, пока
         # build_written_digest не начнёт их выбрасывать.
@@ -246,32 +267,33 @@ class PromptBudgetFitsTheWindowTests(unittest.TestCase):
             "дайджест не дорос до своего потолка — проверка выродилась",
         )
 
-        messages = build_slide_messages(
-            heading="З" * SECTION_HEADING_MAX_CHARS,
-            description="о" * DESCRIPTION_MAX,
-            language="ru",
-            context_block=context_block,
-            allowed_citations=allowed,
-            digest=digest,
-            # Последний слайд колоды видел все раскладки: блок про уже
-            # использованные тоже занимает место в окне.
-            used_layouts=SLIDE_LAYOUTS,
-        )
-        retry = build_retry_messages(
-            messages,
-            "x" * self.slide_answer_chars(),
-            "e" * VALIDATOR_COMPLAINT_CHARS,
-        )
-        needed = tokens(messages_chars(retry) + self.slide_answer_chars())
+        for layout in SLIDE_LAYOUTS:
+            with self.subTest(layout=layout):
+                messages = build_slide_messages(
+                    heading="З" * SECTION_HEADING_MAX_CHARS,
+                    layout=layout,
+                    description="о" * DESCRIPTION_MAX,
+                    language="ru",
+                    context_block=context_block,
+                    allowed_citations=allowed,
+                    digest=digest,
+                )
+                answer_chars = self.slide_answer_chars(layout)
+                retry = build_retry_messages(
+                    messages,
+                    "x" * answer_chars,
+                    "e" * VALIDATOR_COMPLAINT_CHARS,
+                )
+                needed = tokens(messages_chars(retry) + answer_chars)
 
-        self.assertLessEqual(
-            needed,
-            self.window_tokens(),
-            f"слайд-вызов не влезает в окно: {needed:.0f} токенов из "
-            f"{self.window_tokens()}. Пересчитайте DIGEST_MAX_CHARS, "
-            "DESCRIPTION_MAX или SLIDE_RETRIEVAL_TOP_K — расчёт в "
-            "constants.py устарел",
-        )
+                self.assertLessEqual(
+                    needed,
+                    self.window_tokens(),
+                    f"слайд-вызов ({layout}) не влезает в окно: {needed:.0f} "
+                    f"токенов из {self.window_tokens()}. Пересчитайте "
+                    "DIGEST_MAX_CHARS, DESCRIPTION_MAX или "
+                    "SLIDE_RETRIEVAL_TOP_K — расчёт в constants.py устарел",
+                )
 
 
 class WindowMatchesTheActualSettingTests(unittest.TestCase):

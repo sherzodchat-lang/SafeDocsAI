@@ -30,7 +30,10 @@ test_presentation_call_timeout_single_source.py).
   клиент со своим LLM_CALL_TIMEOUT, и это ровно тот случай, ради которого
   страховка и оставлена: зависание, которого клиент не видит;
 * дайджест уже написанного доезжает до второго слайд-вызова (мера 2 правила
-  «не добивать»).
+  «не добивать»);
+* раскладка, назначенная ПЛАНОМ, доезжает до слайд-вызова своей секции, а
+  слайд, вернувшийся не в ней, считается и попадает в строку статистики —
+  оставшись незамеченным, он не отличим от неработающего промпта.
 """
 
 import asyncio
@@ -62,6 +65,7 @@ from app.core.exceptions import ExternalServiceError, PresentationErrors  # noqa
 from app.modules.presentations.constants import (  # noqa: E402
     LAYOUT_BULLETS,
     LAYOUT_COMPARE,
+    LAYOUT_METRIC,
     RENDERER_ADDED_SLIDES,
     SLIDE_COUNT_MIN,
     SLIDE_LAYOUTS,
@@ -98,10 +102,27 @@ DECK_SLIDES = SLIDE_COUNT_MIN
 # честно упал бы — но упал бы не на том, что проверяет этот файл.
 TEMPLATE_KEY = "draft"
 
+# Раскладку каждой секции назначает ПЛАН — с этим полем фикстура и живёт: без
+# него план не проходит валидацию, и проверялся бы ответ, недостижимый в бою.
+# Здесь все три секции размечены списками, потому что и слайды фикстуры отвечают
+# списками: расхождение назначенного с отданным — отдельный случай, и мерить его
+# надо там, где оно заведено нарочно (LayoutMismatchTests).
 PLAN_SECTIONS = [
-    {"heading": "Кто имеет право", "search_query": "право на льготу"},
-    {"heading": "Как оформить", "search_query": "порядок оформления"},
-    {"heading": "Куда обращаться", "search_query": "куда обращаться"},
+    {
+        "heading": "Кто имеет право",
+        "search_query": "право на льготу",
+        "layout": LAYOUT_BULLETS,
+    },
+    {
+        "heading": "Как оформить",
+        "search_query": "порядок оформления",
+        "layout": LAYOUT_BULLETS,
+    },
+    {
+        "heading": "Куда обращаться",
+        "search_query": "куда обращаться",
+        "layout": LAYOUT_BULLETS,
+    },
 ]
 assert len(PLAN_SECTIONS) == content_section_count(DECK_SLIDES), (
     "план фикстуры разошёлся с числом слайдов заказа"
@@ -133,9 +154,16 @@ def slide_json(heading: str, bullets: list[str], chunk_id: int) -> str:
 # встречается по разу, — единственная, про которую можно сказать, что печатается
 # КАЖДАЯ. Число слайдов заказа отсюда и выводится, а не выписывается рядом.
 LAYOUT_DECK_SLIDES = len(SLIDE_LAYOUTS) + RENDERER_ADDED_SLIDES
+# План размечает секции теми же раскладками и в том же порядке, в каком слайды
+# фикстуры на них отвечают: колода, где каждый слайд ИСПОЛНИЛ назначенное, — это
+# и есть та дорога, которую проверяет весь класс.
 LAYOUT_PLAN_SECTIONS = [
-    {"heading": f"Секция {index}", "search_query": f"запрос {index}"}
-    for index in range(1, len(SLIDE_LAYOUTS) + 1)
+    {
+        "heading": f"Секция {index}",
+        "search_query": f"запрос {index}",
+        "layout": layout,
+    }
+    for index, layout in enumerate(SLIDE_LAYOUTS, start=1)
 ]
 LAYOUT_PLAN_JSON = json.dumps(
     {"title": "Налоговые льготы", "sections": LAYOUT_PLAN_SECTIONS},
@@ -420,28 +448,26 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
         # И правило про два буллета стоит в системной части.
         self.assertIn("give exactly two bullets", second_slide[0]["content"])
 
-    async def test_repeated_layouts_reach_the_next_call_with_their_repeats(self):
-        """История раскладок — список, а не множество.
+    async def test_every_slide_call_is_told_the_layout_the_plan_assigned(self):
+        """Провод назначения: слайд-вызов получает раскладку своей секции.
 
-        Эта колода написана тремя списками подряд, и третий вызов обязан увидеть
-        именно «bullets, bullets»: схлопнутое до одного значения множество
-        сказало бы модели «список в колоде был», хотя сказать надо «в колоде уже
-        два списка подряд» — а это единственное, что отличает разнообразную
-        колоду от однообразной.
+        Обрыв здесь бесшумный — колода соберётся, просто раскладку снова начнёт
+        выбирать вызов, который видит одну секцию и не видит колоды. Ровно так
+        она и получалась однообразной: из этой позиции список подходит любому
+        материалу и выигрывает всегда.
         """
         await self.run_one_job()
 
-        _plan, _first, second_slide, third_slide = self.model_calls
-
-        self.assertIn(
-            f"<layouts_already_used>{LAYOUT_BULLETS}</layouts_already_used>",
-            second_slide[1]["content"],
-        )
-        self.assertIn(
-            f"<layouts_already_used>{LAYOUT_BULLETS}, {LAYOUT_BULLETS}"
-            "</layouts_already_used>",
-            third_slide[1]["content"],
-        )
+        slide_calls = self.model_calls[1:]
+        self.assertEqual(len(slide_calls), len(PLAN_SECTIONS))
+        for number, (messages, section) in enumerate(
+            zip(slide_calls, PLAN_SECTIONS), start=1
+        ):
+            with self.subTest(slide=number):
+                self.assertIn(
+                    f'assigned this section its layout: "{section["layout"]}"',
+                    messages[0]["content"],
+                )
 
     async def test_each_section_is_retrieved_by_its_own_query(self):
         await self.run_one_job()
@@ -546,33 +572,109 @@ class LayoutDeckTests(PresentationPipelineTestCase):
             with self.subTest(text=text):
                 self.assertIn(text, next_call)
 
-    async def test_each_slide_call_sees_the_layouts_already_written(self):
-        """Провод разнообразия: вызов слайда знает, каких форм колода уже набрала.
+    async def test_each_slide_call_executes_its_own_assignment(self):
+        """Каждая раскладка плана доехала до СВОЕГО вызова, и только до него.
 
-        Слайд-вызовы независимы, и без этого списка правило промпта «если две
-        раскладки подходят одинаково, бери ту, которой ещё не было» ссылалось бы
-        на то, чего в бою не существует: параметр есть, а передавать его некому.
-        Обрыв этот бесшумный — колода соберётся, просто окажется однообразной,
-        то есть ровно такой, ради борьбы с которой волна и затевалась.
-
-        Порядок в блоке — порядок написания, и он проверяется целиком: множество
-        вместо списка потеряло бы и очерёдность, и повторы.
+        Проверяется не только присутствие назначенной формы, но и отсутствие
+        остальных: меню из пяти форм в вызове, которому выбирать нечего, — это
+        приглашение выбрать заново, то есть ровно то поведение, которое волна и
+        убирает. Исключение одно — bullets: единственная законная замена, когда
+        материал назначенную форму не держит.
         """
         await self.run_one_job()
 
-        slide_calls = [messages[1]["content"] for messages in self.model_calls[1:]]
+        slide_calls = [messages[0]["content"] for messages in self.model_calls[1:]]
         self.assertEqual(len(slide_calls), len(SLIDE_LAYOUTS))
 
-        # У первого слайда истории нет по определению — и блока быть не должно.
-        self.assertNotIn("layouts_already_used", slide_calls[0])
-        for number, call in enumerate(slide_calls[1:], start=1):
-            with self.subTest(slide=number + 1):
-                self.assertIn(
-                    "<layouts_already_used>"
-                    f"{', '.join(SLIDE_LAYOUTS[:number])}"
-                    "</layouts_already_used>",
-                    call,
-                )
+        for prompt, layout in zip(slide_calls, SLIDE_LAYOUTS):
+            with self.subTest(layout=layout):
+                self.assertIn(f'assigned this section its layout: "{layout}"', prompt)
+                for other in SLIDE_LAYOUTS:
+                    if other in (layout, LAYOUT_BULLETS):
+                        continue
+                    self.assertNotIn(f'"layout": "{other}"', prompt)
+
+    async def test_a_deck_that_obeys_the_plan_counts_no_mismatches(self):
+        """Счётчик расхождений молчит, когда расхождений нет.
+
+        Иначе он ловил бы не «модель не исполнила назначенное», а собственную
+        ошибку сравнения — и первое же расхождение в бою утонуло бы в фоне.
+        """
+        timings = presentation_service.CallTimings()
+        await self.run_pipeline(timings=timings)
+
+        self.assertEqual(timings.layout_mismatches, 0)
+        self.assertNotIn("не по плану", timings.summary())
+
+
+class LayoutMismatchTests(PresentationPipelineTestCase):
+    """Слайд отдал не ту раскладку, что назначил план.
+
+    Случай законный, и слайд за него не отвергается: план размечает секцию,
+    видя дайджест корпуса, а слайд пишется по пяти найденным под неё чанкам —
+    второй стороны сравнения в них может не оказаться. Отдать тогда список
+    честнее, чем выдумать её, а отказ стоил бы пользователю времени ради формы,
+    не содержания.
+
+    Но молчать об этом нельзя. Без счётчика «колода снова однообразная»
+    неотличимо от «промпт не работает» — а это ровно тот вопрос, ради которого
+    выбор раскладки и переехал в план.
+    """
+
+    # План просит сравнение и цифру, а модель отдаёт сравнение списком: ровно
+    # тот случай, когда второй стороны в найденных чанках не нашлось.
+    PLANNED = [LAYOUT_COMPARE, LAYOUT_METRIC, LAYOUT_BULLETS]
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.use_retrieval()
+        plan = json.dumps(
+            {
+                "title": "Налоговые льготы",
+                "sections": [
+                    {**section, "layout": layout}
+                    for section, layout in zip(PLAN_SECTIONS, self.PLANNED)
+                ],
+            },
+            ensure_ascii=False,
+        )
+        self.use_model(
+            [
+                plan,
+                slide_json("Кто имеет право", ["Первый факт", "Второй факт"], 1),
+                layout_slide_json(LAYOUT_METRIC, index=2, chunk_id=2),
+                slide_json("Куда обращаться", ["Пятый факт", "Шестой факт"], 3),
+            ]
+        )
+        await self.prepare()
+
+    async def test_the_mismatch_is_counted_and_named_in_the_statistics_line(self):
+        timings = presentation_service.CallTimings()
+        await self.run_pipeline(timings=timings)
+
+        # Разошлась одна секция из трёх: compare отдан списком, metric и bullets
+        # исполнены. Считаются именно расхождения, а не «слайды не bullets».
+        self.assertEqual(timings.layout_mismatches, 1)
+        summary = timings.summary()
+        self.assertIn("раскладок не по плану 1", summary)
+        # Рядом с повторами, а не в конце строки после замеров: обе величины
+        # отвечают на вопрос «что было с вызовами», а не «сколько они шли».
+        self.assertLess(summary.index("повторных"), summary.index("не по плану"))
+        self.assertLess(summary.index("не по плану"), summary.index("p50"))
+
+    async def test_the_slide_is_kept_and_the_deck_is_still_ready(self):
+        """Расхождение не отвергает слайд и не роняет заказ.
+
+        Работа модели уже оплачена временем пользователя, а список вместо
+        сравнения — потеря формы, не содержания. Повторная попытка ради формы
+        стоила бы вдвое дороже ровно в том случае, когда материала для формы
+        всё равно нет.
+        """
+        row = await self.run_one_job()
+
+        self.assertEqual(row.status, STATUS_READY, row.error_text)
+        # Ни одного повторного вызова: расхождение — не отказ валидатора.
+        self.assertEqual(len(self.model_calls), 1 + len(PLAN_SECTIONS))
 
 
 class MissingSourcesTests(PresentationPipelineTestCase):

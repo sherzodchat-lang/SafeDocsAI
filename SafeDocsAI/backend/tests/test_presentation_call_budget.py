@@ -299,16 +299,40 @@ class CallStatisticsTests(unittest.TestCase):
         self.assertLess(summary.index("повторных"), summary.index("неклассиф"))
         self.assertLess(summary.index("неклассиф"), summary.index("p50"))
 
+    def test_layout_mismatches_show_up_next_to_the_retries_too(self) -> None:
+        """Слайдов, вернувшихся не в назначенной планом раскладке.
+
+        Раскладку выбирает план — он один видит колоду целиком, — а пишется
+        слайд по найденным под секцию чанкам, и второй стороны сравнения в них
+        может не оказаться. Отдать тогда список честнее, и слайд за это не
+        отвергается. Но без счётчика «материал не дал» неотличимо от «промпт не
+        работает» — а это ровно тот вопрос, ради которого выбор и переехал в
+        план.
+        """
+        timings = CallTimings()
+        timings.record(stage="план презентации", attempt=1, seconds=12.0)
+        timings.record(stage="слайд 1 из 2", attempt=1, seconds=30.0)
+        timings.record(stage="слайд 2 из 2", attempt=1, seconds=30.0)
+        timings.record_layout_mismatch()
+        timings.record_layout_mismatch()
+
+        summary = timings.summary()
+        self.assertIn("раскладок не по плану 2", summary)
+        self.assertLess(summary.index("повторных"), summary.index("не по плану"))
+        self.assertLess(summary.index("не по плану"), summary.index("p50"))
+
     def test_a_zero_counter_does_not_litter_the_line(self) -> None:
         """Ноль не печатается — иначе счётчик перестаёт быть заметным.
 
         Величина заведена ради РЕДКОГО события: постоянный «0» в каждой строке
         журнала перестаёт читаться на второй неделе, и появление там единицы не
-        заметит никто.
+        заметит никто. Правило общее для обоих счётчиков: колода, целиком
+        исполнившая план, — норма, и писать о ней в каждой строке незачем.
         """
         timings = CallTimings()
         timings.record(stage="план презентации", attempt=1, seconds=12.0)
         self.assertNotIn("неклассиф", timings.summary())
+        self.assertNotIn("не по плану", timings.summary())
 
 
 if __name__ == "__main__":  # pragma: no cover
