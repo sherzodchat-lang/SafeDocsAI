@@ -4,26 +4,16 @@ import { NotebookPen } from 'lucide-react';
 import { notesService } from '../services/notesService';
 import { Button } from '../components/ui/Button';
 import Input from '../components/ui/Input';
+import { useActiveNotebookScope } from '../hooks/useActiveNotebookScope';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
 
 
-const ACTIVE_NOTEBOOK_STORAGE_KEY = 'knowledgeai.activeNotebookId';
-
-
-const resolveNotebookId = (notebookId) => {
-  if (notebookId !== undefined) {
-    return notebookId == null ? null : Number(notebookId);
-  }
-
-  const storedValue = localStorage.getItem(ACTIVE_NOTEBOOK_STORAGE_KEY);
-  return storedValue ? Number(storedValue) : null;
-};
-
-
 const NotesPage = ({ notebookId }) => {
   const { t } = useLocale();
-  const activeNotebookId = resolveNotebookId(notebookId);
+  // Тот же хук, что у чата и списка источников: он же приносит имя блокнота —
+  // по номеру из localStorage пользователь всё равно не узнаёт, чей это блокнот.
+  const { notebookId: activeNotebookId, notebookName } = useActiveNotebookScope(notebookId);
   const [notes, setNotes] = useState([]);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -81,7 +71,13 @@ const NotesPage = ({ notebookId }) => {
 
         {/* Строку собирает словарь целиком: порядок слов и знак после метки в ru и tg разный. */}
         <div className="rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
-          {t('notesPage.activeNotebook', { value: activeNotebookId || t('notesPage.notebookNotSelected') })}
+          {/* Пока имя не пришло, показываем «#id» — тем же способом, что бейдж области
+              чата: это заметно временное значение, а не выдача номера за название. */}
+          {t('notesPage.activeNotebook', {
+            value: activeNotebookId == null
+              ? t('notesPage.notebookNotSelected')
+              : notebookName || `#${activeNotebookId}`,
+          })}
           {/* Активный блокнот больше не проставляется сам при заходе в блокнот, поэтому
               «не выбран» — обычное состояние. Без пояснения пользователь видит только
               выключенную кнопку создания и не понимает, чего не хватает. */}

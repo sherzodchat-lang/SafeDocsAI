@@ -4,24 +4,16 @@ import { Lightbulb } from 'lucide-react';
 import { insightsService } from '../services/insightsService';
 import { Button } from '../components/ui/Button';
 import Input from '../components/ui/Input';
+import { useActiveNotebookScope } from '../hooks/useActiveNotebookScope';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
 
 
-const ACTIVE_NOTEBOOK_STORAGE_KEY = 'knowledgeai.activeNotebookId';
-
-
-// В localStorage может лежать что угодно от прошлых версий: Number('abc') даёт
-// NaN, в JSON он превращается в null, и сервер отвечает 422 вместо ответа.
-const resolveNotebookId = (value) => {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-};
-
-
 const InsightsPage = () => {
   const { t } = useLocale();
-  const activeNotebookId = resolveNotebookId(localStorage.getItem(ACTIVE_NOTEBOOK_STORAGE_KEY));
+  // Тот же хук, что у чата и списка источников: он же приносит имя блокнота —
+  // по номеру из localStorage пользователь всё равно не узнаёт, чей это блокнот.
+  const { notebookId: activeNotebookId, notebookName } = useActiveNotebookScope(undefined);
   const [insights, setInsights] = useState([]);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -79,7 +71,13 @@ const InsightsPage = () => {
 
         {/* Строку собирает словарь целиком: порядок слов и знак после метки в ru и tg разный. */}
         <div className="rounded-xl bg-slate-50 p-4 text-sm font-semibold text-slate-700">
-          {t('insightsPage.activeNotebook', { value: activeNotebookId || t('insightsPage.notebookNotSelected') })}
+          {/* Пока имя не пришло, показываем «#id» — тем же способом, что бейдж области
+              чата: это заметно временное значение, а не выдача номера за название. */}
+          {t('insightsPage.activeNotebook', {
+            value: activeNotebookId == null
+              ? t('insightsPage.notebookNotSelected')
+              : notebookName || `#${activeNotebookId}`,
+          })}
           {/* Активный блокнот больше не проставляется сам при заходе в блокнот, поэтому
               «не выбран» — обычное состояние. Без пояснения пользователь видит только
               выключенную кнопку создания и не понимает, чего не хватает. */}

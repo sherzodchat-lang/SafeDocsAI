@@ -524,15 +524,10 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
             <div className={cn('flex h-full flex-col overflow-hidden bg-white', !isNotebookPanel && 'lg:border-l lg:border-slate-200')}>
                 <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
                     {isNotebookPanel ? (
-                        <>
-                            <div>
-                                <h3 className="text-lg font-semibold text-slate-900">{t('chat.notebookChatTitle')}</h3>
-                                <p className="mt-1 text-sm text-slate-500">{t('chat.notebookChatDescription')}</p>
-                            </div>
-                            <Button type="button" variant="outline" size="sm" disabled title={t('chat.sessionsUnavailable')}>
-                                {t('chat.sessions')}
-                            </Button>
-                        </>
+                        <div>
+                            <h3 className="text-lg font-semibold text-slate-900">{t('chat.notebookChatTitle')}</h3>
+                            <p className="mt-1 text-sm text-slate-500">{t('chat.notebookChatDescription')}</p>
+                        </div>
                     ) : (
                         <>
                             <div className="flex flex-wrap items-center gap-2">

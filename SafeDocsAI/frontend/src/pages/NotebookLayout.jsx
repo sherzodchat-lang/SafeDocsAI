@@ -9,6 +9,7 @@ import { useLocale } from '../i18n';
 import { cn } from '../lib/utils';
 import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
+import { resolveDomainProfileLabel } from '../lib/notebooks';
 import { notebooksService } from '../services/notebooksService';
 import { notesService } from '../services/notesService';
 
@@ -262,7 +263,6 @@ const NotebookLayout = () => {
     }
 
     setNotebookHeader({
-      id: notebookId,
       name: notebook.name || t('notebookLayout.defaultName'),
       description: notebook.description || '',
       createdAtText: formatLocaleDate(notebook.created_at, locale, {
@@ -279,7 +279,7 @@ const NotebookLayout = () => {
         hour: '2-digit',
         minute: '2-digit',
       }, '—'),
-      domainProfile: notebook.domain_profile || t('notebookLayout.domainProfileFallback'),
+      domainProfile: resolveDomainProfileLabel(notebook.domain_profile, t) || t('notebookLayout.domainProfileFallback'),
     });
 
     return () => {
@@ -347,13 +347,10 @@ const NotebookLayout = () => {
         ? t('notebookLayout.resetActiveForChat')
         : t('notebookLayout.makeActiveForChat'),
       onEdit: notebook ? handleOpenEdit : undefined,
-      onArchive: undefined,
       onDelete: handleDeleteNotebook,
       editDisabled: !notebook || deleting,
-      archiveDisabled: true,
       deleteDisabled: deleting,
       editTitle: t('notebookLayout.editNotebook'),
-      archiveTitle: t('notebookLayout.archiveUnsupported'),
       deleteTitle: deleting ? t('notebookLayout.deleting') : t('notebookLayout.deleteNotebook'),
     });
 

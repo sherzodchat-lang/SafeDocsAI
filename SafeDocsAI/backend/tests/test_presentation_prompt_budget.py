@@ -40,6 +40,7 @@ chat_model_num_ctx НЕ ЧИТАЕТ. Он передаёт в Ollama своё P
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from app.api.deps import TITLE_MAX_LENGTH
@@ -53,6 +54,7 @@ from app.modules.presentations.constants import (
     SLIDE_RETRIEVAL_TOP_K,
 )
 from app.modules.presentations.llm_schemas import (
+    PLAN_LAYOUT_RUN_MAX,
     PLAN_TITLE_MAX_CHARS,
     SECTION_HEADING_MAX_CHARS,
     SECTION_SEARCH_QUERY_MAX_CHARS,
@@ -71,7 +73,9 @@ from app.modules.presentations.llm_schemas import (
     SLIDE_STEPS_MAX,
     SLIDE_STEP_TEXT_MAX_CHARS,
     SLIDE_STEP_TITLE_MAX_CHARS,
+    LlmResponseError,
     content_section_count,
+    validate_plan,
 )
 from app.modules.presentations.prompts import (
     build_context_block,
@@ -105,7 +109,51 @@ SLIDE_NESTED_SYNTAX_CHARS = 40
 
 # Претензия валидатора, которую получает повторная попытка (build_retry_messages
 # добавляет к ней ещё и обвязку — она входит в измеряемый текст).
-VALIDATOR_COMPLAINT_CHARS = 220
+#
+# Число не назначено, а ИЗМЕРЕНО самым длинным отказом пайплайна — претензией на
+# серию одинаковых раскладок (worst_run_complaint ниже). Оценка «220 знаков»
+# стояла здесь до того, как предел серии стал проверяться схемой, и с новым
+# отказом разошлась бы молча: бюджет считался бы по претензии вдвое короче
+# настоящей. Претензии слайд-вызова (format_validation_error по одному-двум
+# полям) в это число укладываются с запасом.
+def worst_run_complaint() -> str:
+    """Самая длинная претензия, какую может выдать валидатор плана.
+
+    Серии считаются по ПРЕДЕЛЬНОМУ заказу (SLIDE_COUNT_MAX): чем больше секций,
+    тем больше нарушенных серий поместится в один план, а каждая добавляет
+    претензии свою строку. Худшая раскладка секций — сплошные серии длиной
+    PLAN_LAYOUT_RUN_MAX + 1 (короче — не нарушение, длиннее — меньше серий),
+    разделять их нечем и незачем: соседние серии и так разной раскладки. Хвост
+    от деления уходит в первую серию, потому что отдельной серией он был бы
+    короче предела и в претензию не попал бы вовсе.
+
+    Имена раскладок берутся два самых длинных: короткое имя занизило бы худший
+    случай ровно тем способом, против которого написан весь файл.
+    """
+    sections_total = content_section_count(SLIDE_COUNT_MAX)
+    run = PLAN_LAYOUT_RUN_MAX + 1
+    assert sections_total >= run, "предельный заказ не даёт ни одной нарушенной серии"
+    longest = sorted(SLIDE_LAYOUTS, key=len, reverse=True)[:2]
+    lengths = [run] * (sections_total // run)
+    lengths[0] += sections_total % run
+    layouts = [
+        longest[index % 2] for index, length in enumerate(lengths) for _ in range(length)
+    ]
+    payload = {
+        "title": "Т",
+        "sections": [
+            {"heading": f"с{index}", "search_query": f"з{index}", "layout": layout}
+            for index, layout in enumerate(layouts)
+        ],
+    }
+    try:
+        validate_plan(json.dumps(payload, ensure_ascii=False), slide_count=SLIDE_COUNT_MAX)
+    except LlmResponseError as exc:
+        return exc.error_text
+    raise AssertionError("валидатор перестал ловить серии одинаковых раскладок")
+
+
+VALIDATOR_COMPLAINT_CHARS = len(worst_run_complaint())
 
 
 def chunk_text_of_max_size() -> str:

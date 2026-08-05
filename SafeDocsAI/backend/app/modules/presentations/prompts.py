@@ -277,16 +277,32 @@ def build_plan_messages(
         # Обе половины правила обязательны, и вторая — главная. Требование
         # разнообразия без неё превращается в квоту, а квота — в выдуманную
         # вторую сторону сравнения, то есть во враньё про документ.
+        #
+        # Предел серии с этой волны ПРОВЕРЯЕТСЯ схемой
+        # (PresentationPlan._check_layout_runs), и правило здесь не дублирует
+        # валидатор, а работает вместо него: модель, которой сказали заранее,
+        # чаще попадает с первой попытки, а повтор стоит целого вызова. Число в
+        # обоих местах одно — PLAN_LAYOUT_RUN_MAX из схемы.
+        #
+        # Выход «вся колода списками» отсюда убран не из строгости: он прямо
+        # противоречил бы проверке, и модель, поверившая ему, получала бы отказ
+        # за исполнение правила. Вместо него назван quote — единственная форма,
+        # которую можно взять, ничего не выдумав.
         "8) The layout follows the CONTENT, never the turn. Do not cycle through "
         "the layouts and never mark a section "
         f"{LAYOUT_COMPARE}, {LAYOUT_METRIC}, {LAYOUT_STEPS} or {LAYOUT_QUOTE} "
         "unless the material really holds two sides, one central number, a real "
         "order or a wording that matters literally. At the same time do not give "
-        f"the same layout to more than {PLAN_LAYOUT_RUN_MAX} sections in a row: you "
-        "see the whole collection, so a deck of nothing but lists usually means you "
-        "did not look for the comparisons, the numbers and the sequences that are "
-        "in it. If the material honestly holds none of them, mark every section "
-        f"{LAYOUT_BULLETS} — that is a correct plan, not a failure.\n"
+        f"the same layout to more than {PLAN_LAYOUT_RUN_MAX} sections in a row. "
+        "This rule is CHECKED: a longer run is rejected. You see the whole "
+        "collection, so a run of nothing but lists usually means you did not look "
+        "for the comparisons, the numbers and the sequences that are in it. If the "
+        "material honestly holds no second "
+        "side, no central number and no order, break the run with "
+        f"{LAYOUT_QUOTE}: a wording that matters literally is in every document, and "
+        "quoting it invents nothing. Never make up a comparison or a number to fill "
+        f"a layout — {LAYOUT_BULLETS} everywhere else is a correct plan, not a "
+        "failure.\n"
         # Секции пишутся отдельными вызовами и друг друга не видят, поэтому
         # пересечение, заложенное в план, гарантированно доедет до колоды
         # повтором одних и тех же фактов на разных слайдах.

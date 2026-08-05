@@ -3,12 +3,13 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import { X, ChevronLeft, ChevronRight, Loader2, ZoomIn, ZoomOut } from 'lucide-react';
+import { useLocale } from '../i18n';
 import { sourcesService } from '../services/sourcesService';
 
 pdfjs.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@5.4.296/build/pdf.worker.min.mjs';
 
 const DocumentViewer = ({ docId, docName, chunkId, page, onClose }) => {
-  const [fileBlob, setFileBlob] = useState(null);
+  const { t } = useLocale();
   const [fileUrl, setFileUrl] = useState(null);
   const [fileType, setFileType] = useState(null);
   const [textContent, setTextContent] = useState('');
@@ -47,7 +48,6 @@ const DocumentViewer = ({ docId, docName, chunkId, page, onClose }) => {
           const contentType = blobRes.value.headers?.['content-type'] || '';
           if (contentType.includes('pdf') || ext === 'pdf') {
             setFileType('pdf');
-            setFileBlob(blob);
             setFileUrl(URL.createObjectURL(blob));
           } else {
             setFileType('text');
@@ -66,21 +66,21 @@ const DocumentViewer = ({ docId, docName, chunkId, page, onClose }) => {
               detail = errData?.detail || '';
             }
           } catch { /* ignore */ }
-          setError(detail || `Не удалось загрузить файл (${status || 'ошибка сети'})`);
+          setError(detail || t('documentViewer.loadFailed', { reason: status || t('documentViewer.networkError') }));
         }
 
         if (contextRes.status === 'fulfilled' && contextRes.value?.data) {
           setChunkContext(contextRes.value.data);
         }
       } catch {
-        if (!cancelled) setError('Ошибка загрузки');
+        if (!cancelled) setError(t('documentViewer.loadError'));
       } finally {
         if (!cancelled) setLoading(false);
       }
     };
     load();
     return () => { cancelled = true; setFileUrl((u) => { if (u) URL.revokeObjectURL(u); return null; }); };
-  }, [docId, chunkId, ext]);
+  }, [docId, chunkId, ext, t]);
 
   useEffect(() => {
     if (page) setCurrentPage(page);
@@ -125,7 +125,7 @@ const DocumentViewer = ({ docId, docName, chunkId, page, onClose }) => {
               }`}
             >
               <div className="mb-1 text-xs text-slate-400">
-                стр. {chunk.page}{chunk.section ? ` · ${chunk.section}` : ''}
+                {t('documentViewer.pageShort', { page: chunk.page })}{chunk.section ? ` · ${chunk.section}` : ''}
               </div>
               <pre className="whitespace-pre-wrap">{chunk.text}</pre>
             </div>
@@ -151,11 +151,11 @@ const DocumentViewer = ({ docId, docName, chunkId, page, onClose }) => {
     if (!highlightText) return null;
     return (
       <div className="mt-4 rounded-lg border-2 border-amber-400 bg-amber-50 p-4">
-        <div className="mb-1 text-xs font-semibold text-amber-700">Выделенный фрагмент:</div>
+        <div className="mb-1 text-xs font-semibold text-amber-700">{t('documentViewer.highlightedChunk')}</div>
         <p className="text-sm text-slate-800">{highlightText.slice(0, 500)}{highlightText.length > 500 ? '...' : ''}</p>
       </div>
     );
-  }, [highlightText]);
+  }, [highlightText, t]);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
@@ -163,8 +163,8 @@ const DocumentViewer = ({ docId, docName, chunkId, page, onClose }) => {
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-semibold text-slate-800">{docName || 'Документ'}</h3>
-            {page && <span className="text-xs text-slate-400">стр. {page}</span>}
+            <h3 className="truncate text-sm font-semibold text-slate-800">{docName || t('documentViewer.title')}</h3>
+            {page && <span className="text-xs text-slate-400">{t('documentViewer.pageShort', { page })}</span>}
           </div>
           <button
             onClick={onClose}
@@ -208,14 +208,14 @@ const DocumentViewer = ({ docId, docName, chunkId, page, onClose }) => {
             <button
               onClick={() => setScale((s) => Math.max(0.5, s - 0.2))}
               className="rounded p-1 text-slate-500 hover:bg-slate-100"
-              title="Уменьшить"
+              title={t('documentViewer.zoomOut')}
             >
               <ZoomOut className="h-4 w-4" />
             </button>
             <button
               onClick={() => setScale((s) => Math.min(3, s + 0.2))}
               className="rounded p-1 text-slate-500 hover:bg-slate-100"
-              title="Увеличить"
+              title={t('documentViewer.zoomIn')}
             >
               <ZoomIn className="h-4 w-4" />
             </button>

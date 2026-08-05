@@ -220,7 +220,6 @@ const PresentationList = ({
                 <ul className="space-y-3">
                     {items.map((presentation) => {
                         const status = resolvePresentationStatus(presentation.status);
-                        const progress = resolveProgress(presentation.progress);
                         const templateName = resolveTemplateName(templatesByKey[presentation.template_key], presentation.language)
                             || presentation.template_key;
                         const errorMessage = resolvePresentationErrorMessage(presentation, t);
@@ -236,7 +235,6 @@ const PresentationList = ({
                                         <p className="text-sm font-semibold text-slate-900">{templateName}</p>
                                         <p className="mt-1 text-xs text-slate-400">
                                             {t('presentations.cardMeta', {
-                                                id: presentation.id,
                                                 slides: presentation.slide_count,
                                                 language: String(presentation.language || '').toUpperCase(),
                                             })}
@@ -257,19 +255,6 @@ const PresentationList = ({
                                         {renderStatus(presentation)}
                                     </span>
                                 </div>
-
-                                {isGenerating ? (
-                                    <div
-                                        className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100"
-                                        role="progressbar"
-                                        aria-valuenow={progress}
-                                        aria-valuemin={0}
-                                        aria-valuemax={100}
-                                        aria-label={t('presentations.progressLabel')}
-                                    >
-                                        <div className="h-full rounded-full bg-[#1f3a60] transition-[width]" style={{ width: `${progress}%` }} />
-                                    </div>
-                                ) : null}
 
                                 {presentation.description ? (
                                     <p className="mt-3 line-clamp-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-500">
@@ -352,10 +337,6 @@ const PresentationList = ({
                                         </Button>
                                     </div>
                                 </div>
-
-                                {isGenerating ? (
-                                    <p className="mt-2 text-xs text-slate-400">{t('presentations.deleteDisabledGenerating')}</p>
-                                ) : null}
                             </li>
                         );
                     })}

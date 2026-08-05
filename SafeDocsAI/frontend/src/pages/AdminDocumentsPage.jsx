@@ -111,7 +111,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
     // ошибок живут в SourcesProvider — тот же кэш читают панель блокнота и его шапка.
     const {
         items: documents,
-        total: totalCount,
         isTruncated: isListTruncated,
         isLoading,
         error: loadError,
@@ -588,7 +587,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                     </div>
                                                     <div className="min-w-0">
                                                         <p className="max-w-[320px] break-words font-semibold text-slate-800">{doc.name}</p>
-                                                        <p className="text-xs text-slate-400">ID #{doc.id}</p>
                                                     </div>
                                                 </div>
                                             </td>
@@ -674,9 +672,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
                     >
                         <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-500">
                             <span>{t('documents.pagination.range', { from: rangeStart, to: rangeEnd, total: sortedDocuments.length })}</span>
-                            {sortedDocuments.length !== totalCount && (
-                                <span>{t('documents.pagination.totalAll', { count: totalCount })}</span>
-                            )}
                             <span className="flex items-center gap-2">
                                 <label htmlFor="documents-page-size">{t('documents.pagination.pageSize')}</label>
                                 <select
@@ -703,9 +698,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
                             >
                                 <ChevronLeft className="h-4 w-4" />
                             </Button>
-                            <span className="text-xs font-semibold text-slate-600">
-                                {t('documents.pagination.pageOf', { page: currentPage, pages: pageCount })}
-                            </span>
                             <Button
                                 type="button"
                                 variant="outline"
@@ -779,9 +771,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                             <div className="mb-2 flex items-center gap-2">
                                                 <span className="rounded-full bg-[#1f3a60]/10 px-2 py-0.5 text-xs font-semibold text-[#1f3a60]">
                                                     {t('documents.page', { page: chunk.page || '?' })}
-                                                </span>
-                                                <span className="text-xs text-slate-400">
-                                                    {t('documents.id', { id: chunk.id })}
                                                 </span>
                                             </div>
                                             <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">

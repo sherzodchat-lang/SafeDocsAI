@@ -229,14 +229,9 @@ const Layout = () => {
                                 </div>
                             ) : notebookHeader ? (
                                 <div className="flex min-w-0 flex-col gap-1">
-                                    <div className="flex min-w-0 items-center gap-2">
-                                        <span className="rounded-full bg-[#1f3a60]/10 px-2.5 py-0.5 text-[10px] font-bold text-[#1f3a60]">
-                                            {t('layout.actions.notebookPrefix')} #{notebookHeader.id}
-                                        </span>
-                                        <h1 className="truncate text-lg lg:text-2xl font-extrabold text-[#1f3a60]" title={notebookHeader.name}>
-                                            {notebookHeader.name}
-                                        </h1>
-                                    </div>
+                                    <h1 className="truncate text-lg lg:text-2xl font-extrabold text-[#1f3a60]" title={notebookHeader.name}>
+                                        {notebookHeader.name}
+                                    </h1>
                                     {notebookHeader.description ? (
                                         <p className="truncate text-sm text-slate-500" title={notebookHeader.description}>{notebookHeader.description}</p>
                                     ) : null}
@@ -272,11 +267,6 @@ const Layout = () => {
                                             className="h-9 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#1f3a60]/30"
                                         />
                                     </div>
-
-                                <div className="hidden items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500 xl:flex">
-                                    <span className="mr-2 inline-block h-2 w-2 rounded-full bg-green-500"></span>
-                                    {t('layout.actions.systemOk')}
-                                </div>
                                 </>
                             ) : (
                                 <>
@@ -321,16 +311,6 @@ const Layout = () => {
                                                     {t('layout.actions.edit')}
                                                 </Button>
                                             ) : null}
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                className="justify-center"
-                                                disabled={notebookActions.archiveDisabled}
-                                                title={notebookActions.archiveTitle}
-                                                onClick={notebookActions.onArchive}
-                                            >
-                                                {t('layout.actions.archive')}
-                                            </Button>
                                             <Button
                                                 type="button"
                                                 variant="destructive"

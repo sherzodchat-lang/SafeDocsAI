@@ -7,6 +7,7 @@ import { Button } from '../components/ui/Button';
 import Input from '../components/ui/Input';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
+import { resolveDomainProfileLabel } from '../lib/notebooks';
 import { notebooksService } from '../services/notebooksService';
 
 
@@ -126,12 +127,6 @@ const NotebooksPage = () => {
     setNotebooks((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
   };
 
-  const getDomainProfileLabel = (value) => {
-    const key = `notebooksPage.profiles.${value}`;
-    const translated = t(key);
-    return translated === key ? value : translated;
-  };
-
   return (
     <div className="space-y-6">
       <div className="rounded-2xl bg-white p-6 shadow-sm">
@@ -227,7 +222,7 @@ const NotebooksPage = () => {
                 </div>
               </div>
               <div className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
-                {t('notebooksPage.profileLabel', { value: getDomainProfileLabel(notebook.domain_profile) })}
+                {t('notebooksPage.profileLabel', { value: resolveDomainProfileLabel(notebook.domain_profile, t) })}
               </div>
             </div>
           );

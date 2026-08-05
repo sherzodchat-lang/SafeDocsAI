@@ -99,14 +99,6 @@ const AddSourceSplitButton = ({ onUpload, onExisting, isLoading, uploadProgress,
         <div className="absolute left-0 top-full z-50 mt-1.5 w-full overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
           <button
             type="button"
-            onClick={() => { setOpen(false); onUpload(); }}
-            className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-slate-700 transition hover:bg-slate-50"
-          >
-            <Plus className="h-4 w-4 text-slate-400" />
-            {labels.addSource}
-          </button>
-          <button
-            type="button"
             onClick={() => { setOpen(false); onExisting(); }}
             className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-slate-700 transition hover:bg-slate-50"
           >
@@ -637,7 +629,6 @@ const NotebookWorkspace = ({
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <p className="truncate text-sm font-semibold text-slate-900" title={source.name || undefined}>{source.name}</p>
-                          <p className="mt-1 text-xs text-slate-400">ID #{source.id}</p>
                         </div>
                         <span
                           className={cn(
@@ -738,16 +729,11 @@ const NotebookWorkspace = ({
                     >
                       <div className="flex items-start justify-between gap-3">
                         <h3 className="min-w-0 break-words text-sm font-semibold text-slate-900">{note.title}</h3>
-                        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
-                          {isArchived ? (
-                            <span className="rounded-full bg-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
-                              {t('notebook.noteStatusArchived')}
-                            </span>
-                          ) : null}
-                          <span className="rounded-full bg-[#1f3a60]/10 px-2.5 py-1 text-[11px] font-semibold text-[#1f3a60]">
-                            {note.kind || t('notebook.noteKindManual')}
+                        {isArchived ? (
+                          <span className="shrink-0 rounded-full bg-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
+                            {t('notebook.noteStatusArchived')}
                           </span>
-                        </div>
+                        ) : null}
                       </div>
                       <p className="mt-2 line-clamp-4 whitespace-pre-wrap break-words text-sm leading-6 text-slate-500">
                         {note.body || t('notebook.noteTextMissing')}
@@ -1039,10 +1025,7 @@ const NotebookWorkspace = ({
             </div>
 
             {/* Footer */}
-            <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-6 py-4">
-              <span className="rounded-full bg-[#1f3a60]/10 px-3 py-1 text-[11px] font-semibold text-[#1f3a60]">
-                {selectedNote.kind || t('notebook.noteKindManual')}
-              </span>
+            <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
               <div className="flex items-center gap-2">
                 {/* Правку добавляем и сюда: увидев текст целиком, пользователь
                     чаще всего и хочет его поправить, а не искать кнопку в списке. */}
