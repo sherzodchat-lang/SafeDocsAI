@@ -158,6 +158,9 @@ class Wiki:
                 cmtitle=f"Category:{name}",
                 cmlimit=200,
                 cmtype="page|subcat",
+                # Только статьи и категории: без этого в выборку лезут
+                # «Портал:…» и «Шаблон:…», а это не документы.
+                cmnamespace="0|14",
             )
             for member in (payload.get("query") or {}).get("categorymembers", []):
                 title = member.get("title", "")
@@ -171,16 +174,33 @@ class Wiki:
         return pages
 
     def extracts(self, page_ids: list[int]) -> list[dict]:
-        """Тексты статей пачками по двадцать — так велит предел API."""
+        """Тексты статей — ПО ОДНОЙ, и оба слова здесь важны.
+
+        Две ошибки, из-за которых первая версия этого файла не собирала ничего,
+        и обе невидимы: запросы уходили, ответы приходили, записей не
+        появлялось.
+
+        ПЕРВАЯ: `exintro=0`. В API MediaWiki булев параметр истинен уже тем, что
+        передан, — значение не смотрят. То есть «exintro=0» означает «только
+        вступление», а не «не только вступление». Тексты приходили по
+        полторы-две тысячи знаков и все до одного отсеивались порогом
+        MIN_CHARS = 2500.
+
+        ВТОРАЯ: пачки. Полные тексты API отдаёт по одной статье на запрос и
+        честно об этом предупреждает («exlimit was too large for a whole article
+        extracts request, lowered to 1»), но предупреждение лежит в поле,
+        которого никто не читает: в пачке текст получала первая страница, а
+        остальные приходили пустыми.
+
+        Медленнее, чем пачками, — но пачками не работает вовсе.
+        """
         out: list[dict] = []
-        for start in range(0, len(page_ids), 20):
-            batch = page_ids[start : start + 20]
+        for page_id in page_ids:
             payload = self.call(
                 action="query",
-                pageids="|".join(str(p) for p in batch),
+                pageids=str(page_id),
                 prop="extracts|info",
                 explaintext=1,
-                exintro=0,
                 inprop="url",
             )
             for page in (payload.get("query") or {}).get("pages", []):

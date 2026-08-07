@@ -554,7 +554,13 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
                     </div>
                 )}
 
-                <div className={cn('scrollbar-soft flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 sm:px-8', isNotebookPanel ? 'bg-slate-50' : 'space-y-6 bg-[#f6f8fc]')}>
+                {/* Белый, а не серый. Серая подложка была нужна, чтобы белые
+                    пузыри ответа читались как карточки, — но у ответа модели
+                    свой фон (#f2f4f7) и своя рамка, а у вопроса пользователя
+                    тёмно-синий, так что различать их серому фону больше нечего.
+                    Зато он отделял чат от остального экрана лишней границей
+                    там, где её никто не проводил. */}
+                <div className={cn('scrollbar-soft flex-1 overflow-y-auto overflow-x-hidden bg-white px-4 py-6 sm:px-8', !isNotebookPanel && 'space-y-6')}>
                     {isNotebookPanel && !hasConversation ? (
                         /* Пустой чат теперь занимает весь экран, поэтому он не
                            объясняет интерфейс рамкой, а сразу предлагает первый
