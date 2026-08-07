@@ -45,6 +45,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -114,6 +115,32 @@ def document_id(url: str, text: str) -> str:
     return hashlib.sha1(material.encode("utf-8")).hexdigest()[:20]
 
 
+# Разметка формул из Википедии. Она приезжает в текст как «{\displaystyle
+# r=c{\sqrt {n}}}» вперемешку с вертикальными столбиками пробелов, и её нашлось
+# в 57 статьях из 983.
+#
+# Почему это не мелочь: модель собрала из них кластер, чьи характерные слова —
+# «displaystyle, mathbf». То есть тема «математические формулы», куда попали
+# законы о связи. Для читателя это шум, для эмбеддинга — сильный и очень
+# однородный сигнал, ровно такой, какой кластеризация и ловит охотнее всего.
+MATH_MARKUP = re.compile(r"\\[a-zA-Z]+")
+# Фигурные скобки убираются целиком, а не аккуратно по парам: разобрать
+# вложенность формулы регулярным выражением нельзя, а в обычной прозе скобок
+# этих не бывает — остаются только обломки разметки.
+BRACES = re.compile(r"[{}]")
+BLANK_RUNS = re.compile(r"\n{3,}")
+SPACE_RUNS = re.compile(r"[ \t]{3,}")
+
+
+def clean_text(text: str) -> str:
+    """Текст без формульной разметки и без её пробельных развалов."""
+    without = MATH_MARKUP.sub(" ", text)
+    without = BRACES.sub(" ", without)
+    without = SPACE_RUNS.sub(" ", without)
+    without = BLANK_RUNS.sub("\n\n", without)
+    return "\n".join(line.rstrip() for line in without.splitlines()).strip()
+
+
 def read_records(source_dir: Path) -> list[dict]:
     files = sorted(source_dir.glob("*.jsonl"))
     if not files:
@@ -148,7 +175,7 @@ def build(records: list[dict]) -> tuple[list[dict], dict]:
     }
 
     for record in records:
-        text = str(record.get("text") or "").strip()
+        text = clean_text(str(record.get("text") or ""))
         if len(text) < MIN_TEXT_CHARS:
             report["skipped_short"] += 1
             continue

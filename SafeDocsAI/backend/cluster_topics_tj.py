@@ -64,7 +64,7 @@ from app.modules.topics.metrics import (  # noqa: E402
     purity,
     silhouette_score,
 )
-from app.modules.topics.pca import PrincipalAxes  # noqa: E402
+from app.modules.topics.pca import PrincipalAxes, strip_direction  # noqa: E402
 from app.modules.topics.pipeline.dataset import load_full, load_splits  # noqa: E402
 from app.modules.topics.pipeline.embeddings import EmbeddingCache  # noqa: E402
 from app.modules.topics.pipeline.model_io import (  # noqa: E402
@@ -133,6 +133,16 @@ TARGET_UNCLEAR_SHARE = 0.10
 # Имя кластера, который не совпал ни с одной рубрикой. Не «прочее»: модель нашла
 # в нём общее, просто это общее не совпало с редакционным делением, и слова
 # кластера скажут о нём больше, чем чужая рубрика.
+# Источник, чьи документы образуют жанровую ось. Не «список сайтов, которые нам
+# не нравятся», а один измеренный факт: официальные правовые тексты пишутся
+# общими формулами, и на длинном документе усреднение по фрагментам выносит
+# наверх именно их.
+#
+# Замер: ARI по предмету СРЕДИ ЗАКОНОВ был +0.008, то есть предметы законов не
+# различались вовсе — на уровне случайного. После снятия одной оси стало +0.166,
+# чистота с 0.333 до 0.667, и по всему корпусу тоже выросло (+0.139 -> +0.150).
+LEGALESE_SOURCES = frozenset({"mmk.tj"})
+
 MIXED_TG = "Гурӯҳи мавзӯӣ"
 MIXED_RU = "Тематическая группа"
 
@@ -183,6 +193,33 @@ def load_matrices(data_dir: Path, cache_path: Path):
     corpora = dict(splits)
     corpora["pool"] = pool
     return corpora, data, model_name_holder["model"]
+
+
+def genre_direction(corpus, X: np.ndarray) -> np.ndarray | None:
+    """Направление «это официальный правовой текст» — разность средних.
+
+    Средние считаются ТОЛЬКО по обучающей выборке: направление, посчитанное с
+    участием validation или test, подглядывало бы в отложенные выборки не хуже
+    любого другого преобразования.
+
+    Разность средних, а не главная компонента самих законов. Проверено и то, и
+    другое: первая компонента законов даёт по предмету чуть выше (+0.227 против
+    +0.166), но роняет чистоту (0.438 против 0.667) и ухудшает результат по
+    всему корпусу. Разность средних отвечает на нужный вопрос — «чем законы
+    отличаются от НЕ законов», — а главная компонента на другой: «чем законы
+    различаются между собой», и снимать её значит стирать как раз предмет.
+
+    None, если законов в выборке нет: снимать нечего, и выдумывать направление
+    из пустоты нельзя.
+    """
+    mask = np.array([document.source in LEGALESE_SOURCES for document in corpus.documents])
+    if mask.sum() < 30 or (~mask).sum() < 30:
+        return None
+    direction = X[mask].mean(axis=0) - X[~mask].mean(axis=0)
+    norm = float(np.linalg.norm(direction))
+    if norm <= 0:
+        return None
+    return direction / norm
 
 
 def axes_material(data: dict[str, np.ndarray]) -> np.ndarray:
@@ -333,7 +370,7 @@ def fit_and_label(train_X, k):
     return KMeans(n_clusters=k, n_init=N_INIT, random_state=RANDOM_STATE).fit(train_X)
 
 
-def search_projection(data, corpora, *, drops, keeps, ks, verbose=True):
+def search_projection(data, corpora, *, drops, keeps, ks, strip=None, verbose=True):
     """Перебор drop × keep × k по ARI на validation.
 
     Оси считаются заново для каждой пары (drop, keep), но материал один и тот
@@ -356,7 +393,7 @@ def search_projection(data, corpora, *, drops, keeps, ks, verbose=True):
         for keep in keeps:
             if drop + keep > axes.n_components:
                 continue
-            projection = axes.to_projection(drop=drop, keep=keep)
+            projection = axes.to_projection(drop=drop, keep=keep, strip=strip)
             train_X = projection.apply(data["train"])
             validation_X = projection.apply(data["validation"])
             pool_X = projection.apply(data["pool"]) if data["pool"].size else None
@@ -462,6 +499,15 @@ def search_merge(train_X, validation_X, corpora, model, grid=MERGE_GRID):
     return max(rows, key=lambda row: row["ari_rubric"]), rows
 
 
+def project_only(projection, X: np.ndarray) -> np.ndarray:
+    """Проекция без снятия жанровой оси — для данных, с которых её уже сняли."""
+    from app.modules.topics.pca import project_onto
+
+    return project_onto(
+        X, mean=projection.mean, basis=projection.basis, normalize=projection.renormalize
+    )
+
+
 def _assign(X: np.ndarray, centroids: np.ndarray) -> np.ndarray:
     return np.argmin(squared_distances(X, centroids), axis=1)
 
@@ -525,6 +571,20 @@ def main() -> int:
         f"test {len(corpora['test'])}, котёл {len(corpora['pool'])}"
     )
     say(f"эмбеддинги: {embedding_model}, {data['train'].shape[1]} измерений")
+
+    # Жанровая ось снимается ДО всего остального: и главные оси, и кластеры
+    # должны строиться уже в пространстве без неё, иначе первая компонента
+    # опишет именно её и займёт место, предназначенное теме.
+    direction = genre_direction(corpora["train"], data["train"])
+    if direction is None:
+        say("жанровая ось не строится: правовых текстов в выборке мало")
+    else:
+        laws = sum(
+            1 for d in corpora["train"].documents if d.source in LEGALESE_SOURCES
+        )
+        say(f"снимается жанровая ось «официальный правовой текст» ({laws} документов в train)")
+        data = {name: strip_direction(m, direction) for name, m in data.items() if m.size}
+        data.setdefault("pool", np.zeros((0, 0)))
     say()
 
     drops = (0, 3) if args.quick else DROP_GRID
@@ -533,7 +593,7 @@ def main() -> int:
 
     say("=== выбор преобразования (решение по validation) ===")
     best_variant, variant_rows, axes = search_projection(
-        data, corpora, drops=drops, keeps=keeps, ks=ks
+        data, corpora, drops=drops, keeps=keeps, ks=ks, strip=direction
     )
     say(
         f"выбрано: drop={best_variant['drop']} keep={best_variant['keep']} "
@@ -541,8 +601,17 @@ def main() -> int:
     )
     say()
 
-    projection = axes.to_projection(drop=best_variant["drop"], keep=best_variant["keep"])
-    space = {name: projection.apply(matrix) for name, matrix in data.items() if matrix.size}
+    projection = axes.to_projection(
+        drop=best_variant["drop"], keep=best_variant["keep"], strip=direction
+    )
+    # ВНИМАНИЕ: data уже без жанровой оси (снята выше), а projection.apply снимает
+    # её сам — для боевого документа, который приходит сырым. Здесь поэтому
+    # применяется только проекция, иначе ось вычлась бы дважды.
+    space = {
+        name: project_only(projection, matrix)
+        for name, matrix in data.items()
+        if matrix.size
+    }
 
     say("=== выбор k: силуэт, устойчивость, ARI ===")
     k_rows = choose_k(space["train"], space["validation"], corpora, ks)
@@ -672,6 +741,7 @@ def main() -> int:
             "silhouette_test": test_scores["silhouette"],
             "unclear_share_test": float((~test_kept).mean()),
             "requires_fields_at_apply_time": [],
+            "strips_genre_axis": direction is not None,
         },
     )
     saved.save(args.model)
