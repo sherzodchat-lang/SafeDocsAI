@@ -78,6 +78,31 @@ export const resolveTopicLabel = (source, locale) => (
     pickLabel(source, locale, 'topic_label_') || String(source?.topic_label || '').trim()
 );
 
+const UNCLEAR_COUNT_HEADER = 'x-unclear-count';
+
+/**
+ * Сколько документов выборки модель посмотрела и оставила без темы.
+ *
+ * Приходит заголовком: тело ответа — список тем, и число, которое ни к одной
+ * теме не относится, вложить в него некуда. Разбор тот же, что у X-Total-Count
+ * в списке источников, включая обе формы заголовков (Headers и обычный объект):
+ * axios отдаёт объект, fetch — Headers, и полагаться на одну из них значило бы
+ * получить null на другом клиенте.
+ *
+ * null, а не ноль, когда заголовка нет: ноль означал бы «модель никого не
+ * пропустила», а отсутствие — «сервер об этом не сказал», и строку на экране в
+ * этом случае показывать нельзя.
+ */
+export const readUnclearCount = (response) => {
+    const headers = response?.headers;
+    if (!headers) return null;
+    const raw = typeof headers.get === 'function'
+        ? headers.get(UNCLEAR_COUNT_HEADER)
+        : headers[UNCLEAR_COUNT_HEADER];
+    const value = Number(raw);
+    return Number.isFinite(value) && raw != null && raw !== '' ? value : null;
+};
+
 /**
  * Модель посмотрела документ и отказалась называть тему.
  *
@@ -136,3 +161,192 @@ export const resolveTopicShare = (topic, totalDocuments) => {
 export const sortTopics = (topics) => [...(topics || [])].sort((a, b) => (
     Number(b?.document_count || 0) - Number(a?.document_count || 0)
 ));
+
+/* ── Папки ──────────────────────────────────────────────────────────────────
+ *
+ * Тема = папка с документами. Раскладку делает этот файл, а не экраны: раздел
+ * «Темы» и выбор источников для блокнота показывают одни и те же папки, и
+ * разъехавшись, они по-разному ответили бы на вопрос «где лежит документ».
+ */
+
+export const TOPIC_FOLDER_TOPIC = 'topic';
+
+/** Модель посмотрела документ и не смогла назвать тему — см. isTopicUnclear. */
+export const TOPIC_FOLDER_UNCLEAR = 'unclear';
+
+/** Версии модели у документа нет вовсе: его ещё не размечали. */
+export const TOPIC_FOLDER_UNLABELED = 'unlabeled';
+
+/**
+ * Две особые папки нарочно разные, хотя на экране обе выглядят как «темы нет».
+ *
+ * «Без темы» — законченный ответ модели, и делать с ним нечего; «Ещё не
+ * размечены» пройдёт само после переразметки. Сваленные в одну кучу, они
+ * заставили бы ждать того, что уже случилось, — или чинить то, что не ломалось.
+ *
+ * Подписи держим ключами перевода, а не строками: в этом файле нет локали, а
+ * два экрана обязаны называть особую папку одинаково.
+ */
+export const TOPIC_FOLDER_NAME_KEY = {
+    [TOPIC_FOLDER_UNCLEAR]: 'topics.folders.unclear',
+    [TOPIC_FOLDER_UNLABELED]: 'topics.folders.unlabeled',
+};
+
+export const TOPIC_FOLDER_HINT_KEY = {
+    [TOPIC_FOLDER_UNCLEAR]: 'topics.folders.unclearHint',
+    [TOPIC_FOLDER_UNLABELED]: 'topics.folders.unlabeledHint',
+};
+
+/** Название папки: у темы — от модели, у особой — из переводов. */
+export const resolveTopicFolderName = (folder, t) => (
+    folder?.kind === TOPIC_FOLDER_TOPIC
+        ? folder.name
+        : t(TOPIC_FOLDER_NAME_KEY[folder?.kind] || '')
+);
+
+/**
+ * До скольких документов папки открыты сразу.
+ *
+ * Папки нужны там, где список не окинуть взглядом; на десятке документов
+ * закрытые папки — это лишний клик за тем, что и так помещалось на экран.
+ * Порог общий для обоих экранов: одинаковый список не должен вести себя
+ * по-разному в зависимости от того, откуда на него смотрят.
+ */
+export const TOPIC_FOLDER_AUTO_OPEN_LIMIT = 12;
+
+// Тема документа полями отличается от темы в распределении (topic_label_ru
+// против label_ru), а правило выбора подписи одно — переклеиваем поля и зовём
+// ту же resolveTopicName вместо второй копии правила.
+const topicFromSource = (source) => ({
+    cluster_index: toClusterIndex(source?.topic_cluster_index),
+    label: source?.topic_label,
+    label_ru: source?.topic_label_ru,
+    label_tg: source?.topic_label_tg,
+});
+
+/**
+ * Документы, разложенные по папкам.
+ *
+ * topics — распределение с экрана «Темы». Оно задаёт и порядок папок, и их
+ * счётчики: список источников догружается страницами, и считать по нему значило
+ * бы показывать числа, которые меняются на глазах. Там, где распределения нет
+ * (выбор источников для блокнота), папки строятся по самим документам.
+ *
+ * unclearCount — заголовок X-Unclear-Count, ответ сервера по всей выборке.
+ * Берём большее из него и числа найденных документов: заголовок знает про
+ * недогруженные страницы, а список — про то, что показываем прямо сейчас.
+ */
+export const buildTopicFolders = (sources, locale, { topics = null, unclearCount = null } = {}) => {
+    const byCluster = new Map();
+    const unclear = [];
+    const unlabeled = [];
+
+    (sources || []).forEach((source) => {
+        const clusterIndex = toClusterIndex(source?.topic_cluster_index);
+        if (clusterIndex != null) {
+            const bucket = byCluster.get(clusterIndex);
+            if (bucket) bucket.push(source);
+            else byCluster.set(clusterIndex, [source]);
+            return;
+        }
+
+        // Кластера нет — документ идёт в одну из двух особых папок, и признак
+        // тут версия модели: она проставлена ровно у тех, кого модель уже
+        // посмотрела. Документ с подписью темы, но без номера кластера сюда же:
+        // разметку он прошёл, и обещать ему переразметку было бы неправдой.
+        if (isTopicUnclear(source) || source?.topic_model_version != null) {
+            unclear.push(source);
+            return;
+        }
+
+        unlabeled.push(source);
+    });
+
+    const folders = [];
+    const known = new Set();
+
+    sortTopics(topics || []).forEach((topic) => {
+        const clusterIndex = toClusterIndex(topic?.cluster_index);
+        if (clusterIndex == null) return;
+
+        known.add(clusterIndex);
+        folders.push({
+            key: `${TOPIC_FOLDER_TOPIC}:${clusterIndex}`,
+            kind: TOPIC_FOLDER_TOPIC,
+            clusterIndex,
+            topic,
+            name: resolveTopicName(topic, locale),
+            count: Number(topic?.document_count) || 0,
+            sources: byCluster.get(clusterIndex) || [],
+        });
+    });
+
+    // Кластер, которого в распределении не оказалось. Молча выбросить такие
+    // документы нельзя: пользователь считает папки полным ответом на вопрос
+    // «где мои файлы», и пропавший файл он будет искать глазами, а не в API.
+    [...byCluster.entries()]
+        .filter(([clusterIndex]) => !known.has(clusterIndex))
+        .sort((a, b) => b[1].length - a[1].length)
+        .forEach(([clusterIndex, folderSources]) => {
+            folders.push({
+                key: `${TOPIC_FOLDER_TOPIC}:${clusterIndex}`,
+                kind: TOPIC_FOLDER_TOPIC,
+                clusterIndex,
+                topic: null,
+                name: resolveTopicName(topicFromSource(folderSources[0]), locale),
+                count: folderSources.length,
+                sources: folderSources,
+            });
+        });
+
+    // Особые папки — последними: сначала темы, ради которых сюда пришли.
+    if (unclear.length > 0 || Number(unclearCount) > 0) {
+        folders.push({
+            key: TOPIC_FOLDER_UNCLEAR,
+            kind: TOPIC_FOLDER_UNCLEAR,
+            clusterIndex: null,
+            topic: null,
+            name: '',
+            count: Math.max(Number(unclearCount) || 0, unclear.length),
+            sources: unclear,
+        });
+    }
+
+    if (unlabeled.length > 0) {
+        folders.push({
+            key: TOPIC_FOLDER_UNLABELED,
+            kind: TOPIC_FOLDER_UNLABELED,
+            clusterIndex: null,
+            topic: null,
+            name: '',
+            count: unlabeled.length,
+            sources: unlabeled,
+        });
+    }
+
+    return folders;
+};
+
+/**
+ * Поиск идёт по всем папкам сразу — и по их названиям, и по именам документов.
+ *
+ * Папка, найденная по названию, остаётся целой: спросили тему — показываем
+ * тему. Папка, найденная по документу, сжимается до совпавших: остальное её
+ * содержимое к запросу отношения не имеет и только прячет ответ.
+ */
+export const filterTopicFolders = (folders, query, t) => {
+    const needle = String(query || '').trim().toLowerCase();
+    if (!needle) return folders || [];
+
+    return (folders || []).reduce((visible, folder) => {
+        const nameMatches = resolveTopicFolderName(folder, t).toLowerCase().includes(needle);
+        const matched = folder.sources.filter(
+            (source) => String(source?.name || '').toLowerCase().includes(needle),
+        );
+
+        if (nameMatches) visible.push(folder);
+        else if (matched.length > 0) visible.push({ ...folder, count: matched.length, sources: matched });
+
+        return visible;
+    }, []);
+};

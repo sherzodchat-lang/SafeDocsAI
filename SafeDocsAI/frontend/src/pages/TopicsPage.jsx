@@ -1,16 +1,31 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { AlertTriangle, ChevronDown, ChevronRight, Loader2, RefreshCw, Shapes } from 'lucide-react';
+import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, FileText, Loader2, RefreshCw, Shapes } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
+import DocumentViewer from '../components/DocumentViewer';
+import FolderGlyph from '../components/ui/FolderGlyph';
 import NotebookScopeBadge from '../components/notebook/NotebookScopeBadge';
 import { cn } from '../lib/utils';
 import { useActiveNotebookScope } from '../hooks/useActiveNotebookScope';
+import { useFolderDisclosure } from '../hooks/useFolderDisclosure';
 import { useSessionRole } from '../hooks/useSessionRole';
+import { useSources } from '../contexts/SourcesContext';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage, resolveErrorCode } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
-import { buildTopicFilterSearch, isEmptyTopic, resolveTopicName, resolveTopicShare, sortTopics } from '../lib/topics';
+import { SOURCE_STATUS_BADGE_CLASS, formatSize, resolveStatus } from '../lib/sources';
+import {
+    TOPIC_FOLDER_AUTO_OPEN_LIMIT,
+    TOPIC_FOLDER_HINT_KEY,
+    TOPIC_FOLDER_TOPIC,
+    buildTopicFilterSearch,
+    buildTopicFolders,
+    filterTopicFolders,
+    readUnclearCount,
+    resolveTopicFolderName,
+    resolveTopicShare,
+} from '../lib/topics';
 import { topicsService } from '../services/topicsService';
 
 // Модель могли ещё не обучить — для пользователя это состояние системы, а не
@@ -42,11 +57,167 @@ const formatMetric = (value, fallback) => {
     return Number.isFinite(numeric) ? numeric.toFixed(3) : fallback;
 };
 
+/** Документ внутри папки: открывается просмотром, не уводя с экрана. */
+const FolderDocument = ({ source, locale, t, statusLabels, onOpen }) => {
+    const status = resolveStatus(source.status);
+
+    return (
+        <li>
+            <button
+                type="button"
+                onClick={() => onOpen(source)}
+                className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
+                aria-label={t('topics.openDocument', { name: source.name })}
+            >
+                <FileText className="h-4 w-4 shrink-0 text-slate-400" />
+                <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm text-slate-800" title={source.name || undefined}>{source.name}</span>
+                    <span className="mt-0.5 block text-xs text-slate-400">
+                        {formatLocaleDate(source.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—')}
+                        {' · '}
+                        {formatSize(source.size, t)}
+                    </span>
+                </span>
+                {/* Бейдж только у тех, с кем что-то не так: «Готово» на каждой из
+                    сорока строк — это сорок раз повторённая норма, за которой
+                    перестаёт быть виден единственный сбойный документ. */}
+                {status !== 'ready' ? (
+                    <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold', SOURCE_STATUS_BADGE_CLASS[status])}>
+                        {statusLabels[status]}
+                    </span>
+                ) : null}
+            </button>
+        </li>
+    );
+};
+
+/**
+ * Папка темы: заголовок раскрывает содержимое, стрелка справа уводит в список
+ * источников, суженный до этой темы.
+ *
+ * Два действия у одной строки разведены по разным кнопкам нарочно: раскрытие —
+ * то, ради чего сюда пришли, и оно не должно каждый раз менять экран, а переход
+ * к фильтру остался на месте, потому что на него завязан раздел источников.
+ */
+const TopicFolderRow = ({
+    folder,
+    isOpen,
+    onToggle,
+    totalDocuments,
+    locale,
+    t,
+    statusLabels,
+    sourcesLoading,
+    onOpenDocument,
+}) => {
+    const name = resolveTopicFolderName(folder, t);
+    const hintKey = TOPIC_FOLDER_HINT_KEY[folder.kind];
+    // Доля — только у целой папки. Поиск оставляет в папке одни совпадения, и
+    // «1 документ · 43 %» рядом означало бы, что доля посчитана от найденного,
+    // а она посчитана от всей темы.
+    const isWhole = folder.topic && Number(folder.topic.document_count) === folder.count;
+    const percent = folder.kind === TOPIC_FOLDER_TOPIC && isWhole
+        ? Math.round(resolveTopicShare(folder.topic, totalDocuments) * 100)
+        : null;
+    const panelId = `topic-folder-${folder.key}`;
+    // Число из распределения, а список источников догружается страницами: пока
+    // он не дочитан, папка честнее скажет «показаны 3 из 12», чем промолчит.
+    const isPartial = !sourcesLoading && folder.sources.length < folder.count;
+
+    return (
+        <li className="overflow-hidden rounded-xl border border-slate-200 transition hover:border-[#1f3a60]/40">
+            <div className="flex items-stretch">
+                <button
+                    type="button"
+                    onClick={() => onToggle(!isOpen)}
+                    aria-expanded={isOpen}
+                    aria-controls={panelId}
+                    className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#1f3a60]/40"
+                >
+                    <ChevronRight className={cn('h-4 w-4 shrink-0 text-slate-400 transition-transform duration-150', isOpen && 'rotate-90')} />
+                    <FolderGlyph folder={folder} isOpen={isOpen} />
+                    {/* break-words, а не truncate: название темы приходит от
+                        модели и бывает длинным («Паём ва баромадҳои Президент»),
+                        а обрезанное имя папки — это папка без имени. */}
+                    <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-900">{name}</span>
+                    <span className="shrink-0 tabular-nums text-xs text-slate-500" title={t('topics.documentCount', { count: folder.count })}>
+                        {folder.count}
+                    </span>
+                    {percent != null ? (
+                        <span className="hidden shrink-0 text-xs font-semibold text-slate-700 sm:block">{t('topics.share', { value: percent })}</span>
+                    ) : null}
+                </button>
+
+                {folder.clusterIndex != null ? (
+                    <Link
+                        to={`/sources${buildTopicFilterSearch(folder.clusterIndex, name)}`}
+                        title={t('topics.open', { name })}
+                        aria-label={t('topics.open', { name })}
+                        className="flex shrink-0 items-center border-l border-slate-100 px-3 text-slate-400 transition hover:bg-slate-50 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#1f3a60]/40"
+                    >
+                        <ArrowRight className="h-4 w-4" />
+                    </Link>
+                ) : null}
+            </div>
+
+            {/* Полоса вместо графика: доля читается быстрее в сравнении с
+                соседями, а библиотек ради этого в проекте нет. */}
+            {percent != null ? (
+                <div className="mx-3 mb-2.5 h-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                    <div className="h-full rounded-full bg-[#1f3a60]" style={{ width: `${Math.max(percent, 1)}%` }} />
+                </div>
+            ) : null}
+
+            {isOpen ? (
+                /* Отступ слева — не украшение: документы встают под названием
+                   папки, и вложенность видно, не вчитываясь. */
+                <div id={panelId} className="border-t border-slate-100 bg-slate-50/70 py-1.5 pl-7 pr-2">
+                    {hintKey ? (
+                        <p className="px-2.5 py-1.5 text-xs leading-5 text-slate-500">{t(hintKey)}</p>
+                    ) : null}
+
+                    {folder.sources.length > 0 ? (
+                        <ul>
+                            {folder.sources.map((source) => (
+                                <FolderDocument
+                                    key={source.id}
+                                    source={source}
+                                    locale={locale}
+                                    t={t}
+                                    statusLabels={statusLabels}
+                                    onOpen={onOpenDocument}
+                                />
+                            ))}
+                        </ul>
+                    ) : sourcesLoading ? (
+                        <p className="flex items-center gap-2 px-2.5 py-2 text-xs text-slate-500">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            {t('documents.loading')}
+                        </p>
+                    ) : (
+                        /* Причину (сбой загрузки списка) называет баннер над
+                           папками — один раз. Повторять её в каждой раскрытой
+                           папке значит трижды сказать одно и то же красным. */
+                        <p className="px-2.5 py-2 text-xs text-slate-500">{t('topics.folders.empty')}</p>
+                    )}
+
+                    {isPartial && folder.sources.length > 0 ? (
+                        <p className="px-2.5 py-1.5 text-xs text-slate-400">
+                            {t('topics.folders.partial', { shown: folder.sources.length, count: folder.count })}
+                        </p>
+                    ) : null}
+                </div>
+            ) : null}
+        </li>
+    );
+};
+
 const TopicsPage = () => {
     const { locale, t } = useLocale();
     const { isAdmin } = useSessionRole();
     // Поиск в шапке иначе был бы мёртвым контролом: он есть на всех обычных
-    // страницах, поэтому здесь он сужает список тем по подписи.
+    // страницах, поэтому здесь он ищет и по названиям папок, и по именам
+    // документов внутри них.
     const [searchParams] = useSearchParams();
     const searchTerm = searchParams.get('q') || '';
 
@@ -54,7 +225,26 @@ const TopicsPage = () => {
     // распределение внутри активного блокнота, и область видна бейджем.
     const { notebookId, notebookName, canResetScope, resetScope } = useActiveNotebookScope(undefined);
 
+    // Документы берём из общего кэша источников — того же, что у таблицы «Все
+    // источники» и панели блокнота: экран раскладывает по папкам ровно те файлы,
+    // которые пользователь видит в других местах, и своего запроса не шлёт.
+    const {
+        items: sources,
+        isLoading: sourcesLoading,
+        error: sourcesError,
+        reload: reloadSources,
+    } = useSources(notebookId);
+
+    const folderDisclosure = useFolderDisclosure(searchTerm);
+    // Просмотр документа тем же компонентом, что открывает ссылки в чате: файл
+    // читается поверх экрана и папка под ним остаётся раскрытой.
+    const [viewerSource, setViewerSource] = useState(null);
+
     const [topics, setTopics] = useState([]);
+    // Документы, которые модель посмотрела и оставила без темы. null — сервер
+    // об этом не сказал (старый бэкенд), и строку показывать нельзя: ноль в
+    // этом месте соврал бы, что таких документов нет.
+    const [unclearCount, setUnclearCount] = useState(null);
     const [isLoading, setIsLoading] = useState(true);
     const [loadError, setLoadError] = useState('');
     const [isModelTrained, setIsModelTrained] = useState(true);
@@ -88,6 +278,9 @@ const TopicsPage = () => {
                 const modelCode = modelInfo.status === 'rejected' ? resolveErrorCode(modelInfo.reason) : null;
 
                 setTopics(items);
+                setUnclearCount(
+                    distribution.status === 'fulfilled' ? readUnclearCount(distribution.value) : null,
+                );
                 setModel(modelInfo.status === 'fulfilled' ? modelInfo.value.data : null);
 
                 // «Модель не обучена» — состояние всего экрана, но только когда
@@ -158,27 +351,42 @@ const TopicsPage = () => {
         [topics],
     );
 
-    // Список делится надвое: темы с источниками и пустые. Пустых на небольшой
-    // базе большинство (модель различает двадцать тем, документы попадают в
-    // три-четыре), и показанные вперемешку они превращают экран в столбец
-    // нулей.
+    const statusLabels = useMemo(() => ({
+        ready: t('documents.status.ready'),
+        pending: t('documents.status.pending'),
+        indexing: t('documents.status.indexing'),
+        error: t('documents.status.error'),
+    }), [t]);
+
+    const folders = useMemo(
+        () => buildTopicFolders(sources, locale, { topics, unclearCount }),
+        [locale, sources, topics, unclearCount],
+    );
+
+    // Список делится надвое: папки с документами и пустые темы. Пустых на
+    // небольшой базе большинство (модель различает двадцать тем, документы
+    // попадают в три-четыре), и показанные вперемешку они превращают экран в
+    // столбец нулей.
     //
     // При поиске деления нет: пользователь назвал тему сам, и прятать
     // найденное под второе раскрытие значило бы отфильтровать его же запрос
     // ещё раз.
-    const { visibleTopics, filledTopics, emptyTopics } = useMemo(() => {
-        const query = searchTerm.trim().toLowerCase();
-        const matching = query
-            ? topics.filter((topic) => resolveTopicName(topic, locale).toLowerCase().includes(query))
-            : topics;
-        const sorted = sortTopics(matching);
+    const { visibleFolders, filledFolders, emptyFolders, isSearching } = useMemo(() => {
+        const query = searchTerm.trim();
+        const matching = filterTopicFolders(folders, query, t);
 
         return {
-            visibleTopics: sorted,
-            filledTopics: query ? sorted : sorted.filter((topic) => !isEmptyTopic(topic)),
-            emptyTopics: query ? [] : sorted.filter(isEmptyTopic),
+            isSearching: Boolean(query),
+            visibleFolders: matching,
+            filledFolders: query ? matching : matching.filter((folder) => folder.count > 0),
+            emptyFolders: query ? [] : matching.filter((folder) => folder.count === 0),
         };
-    }, [locale, searchTerm, topics]);
+    }, [folders, searchTerm, t]);
+
+    // Папки открыты сразу, пока документов немного или пока идёт поиск: в первом
+    // случае прятать нечего, во втором прятать нельзя — человек уже назвал, что
+    // ищет, и лишний клик по каждой папке был бы платой за собственный запрос.
+    const foldersOpenByDefault = isSearching || sources.length <= TOPIC_FOLDER_AUTO_OPEN_LIMIT;
 
     const modelClusterCount = model?.cluster_count ?? model?.k;
     const metricFallback = t('topics.model.unknown');
@@ -228,60 +436,55 @@ const TopicsPage = () => {
                         <p className="text-sm font-semibold text-slate-700">{t('topics.notTrainedTitle')}</p>
                         <p className="mx-auto mt-1 max-w-md text-sm text-slate-500">{t('topics.notTrainedDescription')}</p>
                     </div>
-                ) : visibleTopics.length === 0 ? (
+                ) : visibleFolders.length === 0 ? (
                     <p className="rounded-xl bg-slate-50 p-8 text-center text-sm text-slate-500">
-                        {searchTerm.trim() ? t('topics.noMatches') : t('topics.empty')}
+                        {isSearching ? t('topics.noMatches') : t('topics.empty')}
                     </p>
                 ) : (
                     <>
-                        {filledTopics.length === 0 ? (
+                        {/* Папки строит распределение, а содержимое — список
+                            источников: его сбой не повод прятать сами папки, но и
+                            молчать о нём нельзя — иначе раскрытая папка выглядит
+                            пустой без всякой причины. */}
+                        {sourcesError ? (
+                            <div role="alert" className="mb-3 flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
+                                <span className="flex items-center gap-2 font-semibold">
+                                    <AlertTriangle className="h-4 w-4" />
+                                    {sourcesError}
+                                </span>
+                                <Button type="button" variant="outline" size="sm" className="self-start" onClick={reloadSources}>
+                                    <RefreshCw className="h-4 w-4" />
+                                    {t('documents.retry')}
+                                </Button>
+                            </div>
+                        ) : null}
+
+                        {filledFolders.length === 0 ? (
                             <p className="rounded-xl bg-slate-50 p-8 text-center text-sm text-slate-500">{t('topics.empty')}</p>
                         ) : (
                             <ul className="space-y-2">
-                                {filledTopics.map((topic) => {
-                                    const share = resolveTopicShare(topic, totalDocuments);
-                                    const percent = Math.round(share * 100);
-                                    // Подпись на языке интерфейса, с откатом к
-                                    // устойчивому имени темы: английских экранов в
-                                    // продукте нет.
-                                    const label = resolveTopicName(topic, locale);
-
-                                    return (
-                                        <li key={topic.cluster_index}>
-                                            {/* Клик по теме ведёт к источникам этой темы. Номер
-                                                кластера уходит в адрес параметром запроса и на
-                                                экране не показывается ни здесь, ни там. */}
-                                            <Link
-                                                to={`/sources${buildTopicFilterSearch(topic.cluster_index, label)}`}
-                                                aria-label={t('topics.open', { name: label })}
-                                                className="block rounded-xl border border-slate-200 px-4 py-3 transition hover:border-[#1f3a60]/40 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
-                                            >
-                                                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                                                    <span className="min-w-0 break-words text-sm font-semibold text-slate-900">{label}</span>
-                                                    <span className="flex shrink-0 items-center gap-3 text-xs text-slate-500">
-                                                        <span>{t('topics.documentCount', { count: topic.document_count })}</span>
-                                                        <span className="font-semibold text-slate-700">{t('topics.share', { value: percent })}</span>
-                                                        <ChevronRight className="h-4 w-4 text-slate-400" />
-                                                    </span>
-                                                </div>
-                                                {/* Полоса вместо графика: доля читается быстрее
-                                                    в сравнении с соседями, а библиотек ради этого
-                                                    в проекте нет и заводить их не из-за чего. */}
-                                                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
-                                                    <div className="h-full rounded-full bg-[#1f3a60]" style={{ width: `${Math.max(percent, 1)}%` }} />
-                                                </div>
-                                            </Link>
-                                        </li>
-                                    );
-                                })}
+                                {filledFolders.map((folder) => (
+                                    <TopicFolderRow
+                                        key={folder.key}
+                                        folder={folder}
+                                        isOpen={folderDisclosure.isOpen(folder.key, foldersOpenByDefault)}
+                                        onToggle={(open) => folderDisclosure.setOpen(folder.key, open)}
+                                        totalDocuments={totalDocuments}
+                                        locale={locale}
+                                        t={t}
+                                        statusLabels={statusLabels}
+                                        sourcesLoading={sourcesLoading}
+                                        onOpenDocument={setViewerSource}
+                                    />
+                                ))}
                             </ul>
                         )}
 
                         {/* Пустые темы — под раскрытием, тем же приёмом, что «О модели»
-                            здесь и «Подробности» в списке источников. Ссылками они НЕ
-                            делаются: переход в список источников по пустой теме ведёт на
-                            пустой экран, и предлагать его незачем. */}
-                        {emptyTopics.length > 0 ? (
+                            здесь и «Подробности» в списке источников. Папками они НЕ
+                            делаются: раскрывать в них нечего, а переход в список
+                            источников по пустой теме ведёт на пустой экран. */}
+                        {emptyFolders.length > 0 ? (
                             <div className="mt-4 border-t border-slate-100 pt-4">
                                 <div className="flex flex-wrap items-center gap-3">
                                     <button
@@ -291,7 +494,7 @@ const TopicsPage = () => {
                                         className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1"
                                     >
                                         <ChevronDown className={cn('h-4 w-4 transition-transform duration-150', emptyOpen && 'rotate-180')} />
-                                        {t('topics.emptyClusters.action', { count: emptyTopics.length })}
+                                        {t('topics.emptyClusters.action', { count: emptyFolders.length })}
                                     </button>
                                     {!emptyOpen ? (
                                         <span className="text-xs text-slate-400">{t('topics.emptyClusters.hint')}</span>
@@ -300,12 +503,12 @@ const TopicsPage = () => {
 
                                 {emptyOpen ? (
                                     <ul className="mt-3 flex flex-wrap gap-2">
-                                        {emptyTopics.map((topic) => (
+                                        {emptyFolders.map((folder) => (
                                             <li
-                                                key={topic.cluster_index}
+                                                key={folder.key}
                                                 className="rounded-lg border border-dashed border-slate-200 px-3 py-1.5 text-xs text-slate-400"
                                             >
-                                                {resolveTopicName(topic, locale)}
+                                                {resolveTopicFolderName(folder, t)}
                                             </li>
                                         ))}
                                     </ul>
@@ -399,6 +602,14 @@ const TopicsPage = () => {
                         )
                     ) : null}
                 </section>
+            ) : null}
+
+            {viewerSource ? (
+                <DocumentViewer
+                    docId={viewerSource.id}
+                    docName={viewerSource.name}
+                    onClose={() => setViewerSource(null)}
+                />
             ) : null}
         </div>
     );

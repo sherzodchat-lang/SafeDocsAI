@@ -24,15 +24,24 @@ import {
 import { Link } from 'react-router-dom';
 
 import { Button } from '../ui/Button';
+import FolderGlyph from '../ui/FolderGlyph';
 import Input from '../ui/Input';
 import { cn } from '../../lib/utils';
+import { useFolderDisclosure } from '../../hooks/useFolderDisclosure';
 import { useModalDialog } from '../../hooks/useModalDialog';
 import { useSources, useSourcesActions } from '../../contexts/SourcesContext';
 import { useLocale } from '../../i18n';
 import { resolveApiErrorMessage } from '../../lib/apiError';
 import { formatLocaleDate } from '../../lib/locale';
 import { SOURCE_STATUS_BADGE_CLASS, formatSize, resolveSourceErrorMessage, resolveStatus } from '../../lib/sources';
-import { resolveTopicLabel } from '../../lib/topics';
+import {
+  TOPIC_FOLDER_AUTO_OPEN_LIMIT,
+  TOPIC_FOLDER_HINT_KEY,
+  buildTopicFolders,
+  filterTopicFolders,
+  resolveTopicFolderName,
+  resolveTopicLabel,
+} from '../../lib/topics';
 import { notesService } from '../../services/notesService';
 import { notebooksService } from '../../services/notebooksService';
 import ChatPage from '../../pages/ChatPage';
@@ -110,6 +119,111 @@ const AddSourceSplitButton = ({ onUpload, onExisting, isLoading, uploadProgress,
           </button>
         </div>
       )}
+    </div>
+  );
+};
+
+/**
+ * Папка в выборе источников для блокнота.
+ *
+ * Галочка у папки берёт её целиком — ради этого папки сюда и добавлены: «взять
+ * всё законодательство» одним нажатием вместо десяти галочек подряд. Раскрытие
+ * и выбор разведены по разным элементам: иначе взять папку целиком можно было бы
+ * только раскрыв её, то есть заглянув внутрь того, что и так берёшь полностью.
+ */
+const AttachableFolder = ({
+  folder,
+  isOpen,
+  onToggle,
+  selectedIds,
+  onSelectFolder,
+  onToggleSource,
+  notebookNameById,
+  statusLabels,
+  t,
+}) => {
+  const name = resolveTopicFolderName(folder, t);
+  const hintKey = TOPIC_FOLDER_HINT_KEY[folder.kind];
+  const panelId = `attachable-folder-${folder.key}`;
+  const selectedCount = folder.sources.reduce((sum, source) => sum + (selectedIds.has(source.id) ? 1 : 0), 0);
+  const allSelected = selectedCount > 0 && selectedCount === folder.sources.length;
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-slate-200">
+      <div className="flex items-stretch bg-slate-50/70">
+        <input
+          type="checkbox"
+          // indeterminate живёт только в свойстве узла, атрибута для него нет.
+          // Без него «выбрана часть папки» выглядело бы как «не выбрано ничего»,
+          // и человек нажал бы галочку второй раз, сняв свой же выбор.
+          ref={(element) => { if (element) element.indeterminate = selectedCount > 0 && !allSelected; }}
+          checked={allSelected}
+          onChange={() => onSelectFolder(folder, !allSelected)}
+          aria-label={allSelected ? t('notebook.folderClear', { name }) : t('notebook.folderSelectAll', { name })}
+          className="my-auto ml-4 h-4 w-4 shrink-0 rounded border-slate-300 text-[#1f3a60] focus:ring-[#1f3a60]"
+        />
+        <button
+          type="button"
+          onClick={() => onToggle(!isOpen)}
+          aria-expanded={isOpen}
+          aria-controls={panelId}
+          className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-2.5 pr-4 text-left transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#1f3a60]/40"
+        >
+          <ChevronRight className={cn('h-4 w-4 shrink-0 text-slate-400 transition-transform duration-150', isOpen && 'rotate-90')} />
+          <FolderGlyph folder={folder} isOpen={isOpen} />
+          {/* break-words, а не truncate: название темы приходит от модели и
+              бывает длинным, а обрезанное имя папки — папка без имени. */}
+          <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-900">{name}</span>
+          <span
+            className="shrink-0 tabular-nums text-xs text-slate-500"
+            title={t('notebook.folderSelected', { selected: selectedCount, count: folder.count })}
+          >
+            {selectedCount > 0 ? `${selectedCount} / ${folder.count}` : folder.count}
+          </span>
+        </button>
+      </div>
+
+      {isOpen ? (
+        /* Отступ слева ставит документы под названием папки: вложенность
+           должно быть видно, не вчитываясь в подписи. */
+        <div id={panelId} className="space-y-1.5 border-t border-slate-200 py-1.5 pl-7 pr-1.5">
+          {hintKey ? (
+            <p className="px-2.5 pt-1 text-xs leading-5 text-slate-500">{t(hintKey)}</p>
+          ) : null}
+
+          {folder.sources.map((source) => {
+            const isSelected = selectedIds.has(source.id);
+
+            return (
+              <label
+                key={source.id}
+                className={cn(
+                  'flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 transition',
+                  isSelected
+                    ? 'border-[#1f3a60] bg-[#1f3a60]/5'
+                    : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50',
+                )}
+              >
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 shrink-0 rounded border-slate-300 text-[#1f3a60] focus:ring-[#1f3a60]"
+                  checked={isSelected}
+                  onChange={() => onToggleSource(source.id)}
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-slate-900" title={source.name || undefined}>{source.name}</p>
+                  <p className="mt-0.5 truncate text-xs text-slate-400">
+                    {getNotebookLabel(source, notebookNameById, t)} · {formatSize(source.size, t)}
+                  </p>
+                </div>
+                <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
+                  {statusLabels[resolveStatus(source.status)]}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -380,6 +494,40 @@ const NotebookWorkspace = ({
     [currentNotebookId, existingSources],
   );
 
+  // Те же папки, что в разделе «Темы»: раскладку делает lib/topics, поэтому
+  // документ лежит в одном и том же месте, откуда на него ни смотри.
+  // Распределения тут нет — папки строятся по самим документам, и счётчик
+  // папки равен числу документов в ней.
+  const attachableFolders = useMemo(
+    () => buildTopicFolders(attachableSources, locale),
+    [attachableSources, locale],
+  );
+
+  // Поиск идёт по всем папкам сразу — и по названиям тем, и по именам файлов.
+  const visibleFolders = useMemo(
+    () => filterTopicFolders(attachableFolders, sourceSearch, t),
+    [attachableFolders, sourceSearch, t],
+  );
+
+  // «Выбрать все» берёт ровно то, что видно: под поиском это найденное, без
+  // поиска — весь список. Брать спрятанное фильтром — то же самое, что
+  // подсунуть человеку документы, которых он не видел.
+  const visibleSourceIds = useMemo(
+    () => visibleFolders.flatMap((folder) => folder.sources.map((source) => source.id)),
+    [visibleFolders],
+  );
+
+  const selectedIds = useMemo(() => new Set(selectedExistingSourceIds), [selectedExistingSourceIds]);
+  const areAllVisibleSelected = visibleSourceIds.length > 0
+    && visibleSourceIds.every((id) => selectedIds.has(id));
+
+  const folderDisclosure = useFolderDisclosure(sourceSearch.trim());
+  // Папки открыты сразу, пока список помещается на экран или пока идёт поиск:
+  // складывать в папки десяток документов — значит прятать то, что и так видно,
+  // а прятать найденное по запросу нельзя вовсе.
+  const foldersOpenByDefault = Boolean(sourceSearch.trim())
+    || attachableSources.length <= TOPIC_FOLDER_AUTO_OPEN_LIMIT;
+
   const closeSourceSheet = useCallback(() => {
     setSourceSheetOpen(false);
     setSourceSheetMode('actions');
@@ -402,13 +550,26 @@ const NotebookWorkspace = ({
     setSourceSheetOpen(true);
   };
 
-  const handleExistingSourceSelection = (sourceId) => {
+  const handleExistingSourceSelection = useCallback((sourceId) => {
     setSelectedExistingSourceIds((prev) => (
       prev.includes(sourceId)
         ? prev.filter((id) => id !== sourceId)
         : [...prev, sourceId]
     ));
-  };
+  }, []);
+
+  // Одно правило на выбор группой: и «выбрать все», и галочка папки. Разные
+  // ветки набора и снятия расходились бы ровно в том, что выбранное вне группы
+  // трогать нельзя.
+  const setSourcesSelection = useCallback((sourceIds, selected) => {
+    setSelectedExistingSourceIds((prev) => (selected
+      ? Array.from(new Set([...prev, ...sourceIds]))
+      : prev.filter((id) => !sourceIds.includes(id))));
+  }, []);
+
+  const handleSelectFolder = useCallback((folder, selected) => {
+    setSourcesSelection(folder.sources.map((source) => source.id), selected);
+  }, [setSourcesSelection]);
 
   const handleSourceUpload = async (event) => {
     const files = Array.from(event.target.files || []);
@@ -913,45 +1074,28 @@ const NotebookWorkspace = ({
 
             {/* Search */}
             <div className="px-6 pb-3">
-              {(() => {
-                const filtered = attachableSources.filter((s) =>
-                  !sourceSearch.trim() ||
-                  s.name?.toLowerCase().includes(sourceSearch.toLowerCase())
-                );
-                const allIds = filtered.map(s => s.id);
-                const areAllSelected = allIds.length > 0 && allIds.every(id => selectedExistingSourceIds.includes(id));
-                
-                return (
-                  <div className="flex items-center gap-3">
-                    <div className="relative flex-1">
-                      <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                      <input
-                        type="text"
-                        placeholder={t('notebook.sourceSearchPlaceholder')}
-                        value={sourceSearch}
-                        onChange={(e) => setSourceSearch(e.target.value)}
-                        className="h-10 w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-800 placeholder-slate-400 transition focus:border-[#1f3a60] focus:outline-none focus:ring-2 focus:ring-[#1f3a60]/20"
-                      />
-                    </div>
-                    {filtered.length > 0 && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => {
-                          if (areAllSelected) {
-                            setSelectedExistingSourceIds(prev => prev.filter(id => !allIds.includes(id)));
-                          } else {
-                            setSelectedExistingSourceIds(prev => Array.from(new Set([...prev, ...allIds])));
-                          }
-                        }}
-                        className="h-10 shrink-0 px-3"
-                      >
-                        {areAllSelected ? t('notebook.resetAll') : t('notebook.selectAll')}
-                      </Button>
-                    )}
-                  </div>
-                );
-              })()}
+              <div className="flex items-center gap-3">
+                <div className="relative flex-1">
+                  <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder={t('notebook.sourceSearchPlaceholder')}
+                    value={sourceSearch}
+                    onChange={(e) => setSourceSearch(e.target.value)}
+                    className="h-10 w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-800 placeholder-slate-400 transition focus:border-[#1f3a60] focus:outline-none focus:ring-2 focus:ring-[#1f3a60]/20"
+                  />
+                </div>
+                {visibleSourceIds.length > 0 ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setSourcesSelection(visibleSourceIds, !areAllVisibleSelected)}
+                    className="h-10 shrink-0 px-3"
+                  >
+                    {areAllVisibleSelected ? t('notebook.resetAll') : t('notebook.selectAll')}
+                  </Button>
+                ) : null}
+              </div>
             </div>
 
             {/* Body */}
@@ -973,54 +1117,29 @@ const NotebookWorkspace = ({
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   {t('notebook.loadingAvailableSources')}
                 </div>
-              ) : existingSourcesError && existingSources.length === 0 ? null : (() => {
-                const filtered = attachableSources.filter((s) =>
-                  !sourceSearch.trim() ||
-                  s.name?.toLowerCase().includes(sourceSearch.toLowerCase())
-                );
-                if (filtered.length === 0) {
-                  return (
-                    <div className="flex h-48 flex-col items-center justify-center gap-2 text-sm text-slate-500">
-                      <FileText className="h-8 w-8 text-slate-300" />
-                      {attachableSources.length === 0 ? t('notebook.noAttachableSources') : t('notebook.nothingFound')}
-                    </div>
-                  );
-                }
-                return (
-                  <div className="space-y-2 py-2">
-                    {filtered.map((source) => {
-                      const isSelected = selectedExistingSourceIds.includes(source.id);
-                      return (
-                        <label
-                          key={source.id}
-                          className={cn(
-                            'flex cursor-pointer items-center gap-3 rounded-xl border px-4 py-3 transition',
-                            isSelected
-                              ? 'border-[#1f3a60] bg-[#1f3a60]/5'
-                              : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50',
-                          )}
-                        >
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 shrink-0 rounded border-slate-300 text-[#1f3a60] focus:ring-[#1f3a60]"
-                            checked={isSelected}
-                            onChange={() => handleExistingSourceSelection(source.id)}
-                          />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-semibold text-slate-900">{source.name}</p>
-                            <p className="mt-0.5 text-xs text-slate-400">
-                              {getNotebookLabel(source, notebookNameById, t)} · {formatSize(source.size, t)}
-                            </p>
-                          </div>
-                          <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
-                            {sourceStatusLabels[resolveStatus(source.status)]}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
+              ) : existingSourcesError && existingSources.length === 0 ? null : visibleFolders.length === 0 ? (
+                <div className="flex h-48 flex-col items-center justify-center gap-2 text-sm text-slate-500">
+                  <FileText className="h-8 w-8 text-slate-300" />
+                  {attachableSources.length === 0 ? t('notebook.noAttachableSources') : t('notebook.nothingFound')}
+                </div>
+              ) : (
+                <div className="space-y-2 py-2">
+                  {visibleFolders.map((folder) => (
+                    <AttachableFolder
+                      key={folder.key}
+                      folder={folder}
+                      isOpen={folderDisclosure.isOpen(folder.key, foldersOpenByDefault)}
+                      onToggle={(open) => folderDisclosure.setOpen(folder.key, open)}
+                      selectedIds={selectedIds}
+                      onSelectFolder={handleSelectFolder}
+                      onToggleSource={handleExistingSourceSelection}
+                      notebookNameById={notebookNameById}
+                      statusLabels={sourceStatusLabels}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
 
             {attachError ? (
