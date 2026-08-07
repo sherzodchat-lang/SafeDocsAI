@@ -19,20 +19,22 @@ OLLAMA_MODEL_EMBEDDING. Своего умолчания здесь нет нам
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import re
 import sys
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np  # noqa: E402
 
 from app.modules.topics.pipeline.dataset import load_full  # noqa: E402
-from app.modules.topics.pipeline.embeddings import (  # noqa: E402
-    embed_corpus,
-    ollama_embed_fn,
-)
+from app.modules.topics.pipeline.embeddings import embed_corpus  # noqa: E402
 
 BACKEND_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = BACKEND_ROOT / "data" / "topics_tj" / "data"
@@ -52,19 +54,47 @@ DEFAULT_CACHE = BACKEND_ROOT / "data" / "topics_tj" / "embeddings.npz"
 # первый прогон встал именно на этом.
 CHUNK_CHARS = 1620
 
-# ПОЧЕМУ ЗДЕСЬ НЕТ ПАРАЛЛЕЛЬНОСТИ — замер, чтобы её не пробовали заново.
+# КАК УСКОРИТЬ ПРОГОН, И ЧТО НЕ РАБОТАЕТ — три замера, чтобы их не повторяли.
 #
-# Прогон идёт около двух часов при 8% загрузки видеокарты, и напрашивается
-# послать запросы одновременно. Проверено: не помогает, потому что Ollama
-# СЕРИАЛИЗУЕТ эмбеддинг сама. Четыре одновременных запроса curl к /api/embed
-# при OLLAMA_NUM_PARALLEL=4 легли в один и тот же слот — в журнале сервера все
-# 101 задача с «id 0». Клиентская параллельность до раннера просто не доходит.
+# Прогон идёт около двух часов при 8% загрузки видеокарты: карта простаивает.
+# Напрашиваются три способа, и работает только третий.
 #
-# OLLAMA_NUM_PARALLEL при этом трогать нельзя: на стенде он равен единице не
-# случайно, а потому что при пяти слотах планировщик резервировал контекст
-# сразу на все и вытеснял загруженную модель посреди генерации презентации
-# (см. scripts/start_ollama.sh). Возвращать эту беду ради ускорения, которого
-# всё равно не будет, незачем.
+# 1. ПОСЛАТЬ ЗАПРОСЫ ОДНОВРЕМЕННО — не помогает. Ollama СЕРИАЛИЗУЕТ эмбеддинг
+#    сама: четыре одновременных запроса curl к /api/embed при
+#    OLLAMA_NUM_PARALLEL=4 легли в один и тот же слот, в журнале сервера все
+#    101 задача с «id 0». Клиентская параллельность до раннера не доходит.
+#
+#    Поднимать OLLAMA_NUM_PARALLEL при этом нельзя и незачем: на стенде он равен
+#    единице потому, что при пяти слотах планировщик резервировал контекст сразу
+#    на все и вытеснял загруженную модель посреди генерации презентации (см.
+#    scripts/start_ollama.sh).
+#
+# 2. СДЕЛАТЬ КОПИИ МОДЕЛИ ПОД ДРУГИМИ ИМЕНАМИ (`ollama cp`) — не помогает.
+#    Ollama различает модели по содержимому, а не по имени: у четырёх копий один
+#    дайджест, и на все четыре имени поднимается ОДИН раннер. Замер: 1.04x, то
+#    есть ничего. Память видеокарты при этом остаётся 12 ГБ — вторая копия не
+#    загружается вовсе.
+#
+# 3. ПОДНЯТЬ НЕСКОЛЬКО ПРОЦЕССОВ OLLAMA НА РАЗНЫХ ПОРТАХ — работает. У каждого
+#    свой раннер и своя копия модели в памяти. Замер на 96 настоящих кусках
+#    корпуса: один сервер 1.89 куска/с, четыре сервера 4.61 куска/с, то есть
+#    **2.44x**. Не вчетверо, потому что на четырёх раннерах карта наконец
+#    упирается в счёт, а не в накладные расходы.
+#
+#    Четыре, а не шесть: модель занимает 12 ГБ, четыре копии — 48 ГБ из 80, и
+#    остатка хватает на gemma4 (20 ГБ). Забив память под завязку, мы уронили бы
+#    чат и презентации на живом стенде ради ещё нескольких процентов.
+#
+# Раздельные серверы поднимаются РУКАМИ на время прогона и гасятся после, а не
+# живут в scripts/start_all.sh: это разовая пакетная работа, а не часть системы.
+#
+#     for p in 11435 11436 11437; do
+#       OLLAMA_FLASH_ATTENTION=1 OLLAMA_NUM_PARALLEL=1 OLLAMA_HOST=127.0.0.1:$p \
+#         setsid ollama serve > /tmp/ollama-$p.log 2>&1 < /dev/null &
+#     done
+#     ./venv/bin/python topics_embed.py --hosts 11434,11435,11436,11437
+DEFAULT_HOSTS = ("127.0.0.1:11434",)
+EMBED_TIMEOUT_SECONDS = 900.0
 
 
 def embedding_model_name(explicit: str | None = None) -> str:
@@ -130,6 +160,71 @@ def split_text(text: str, limit: int = CHUNK_CHARS) -> list[str]:
     return pieces or [text[:limit]]
 
 
+def normalize_hosts(raw: str | None) -> tuple[str, ...]:
+    """«11435,11436» и «127.0.0.1:11435» — обе записи, одна форма на выходе.
+
+    Голый номер порта разворачивается в локальный адрес: команда с четырьмя
+    портами читается глазом, а с четырьмя полными адресами — уже нет.
+    """
+    if not raw:
+        return DEFAULT_HOSTS
+    hosts = []
+    for piece in str(raw).split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        hosts.append(f"127.0.0.1:{piece}" if piece.isdigit() else piece)
+    return tuple(hosts) or DEFAULT_HOSTS
+
+
+def http_embed_fn(model: str, hosts: Sequence[str]):
+    """Векторы через несколько серверов Ollama сразу.
+
+    Свой HTTP вместо ModelManager: тот ходит по одному адресу — тому, на котором
+    живёт продукт, — и это правильно для продукта, но здесь адресов несколько.
+    Запрос простой (POST /api/embed со списком текстов), и заводить ради него
+    второй ModelManager значило бы дублировать разбор настроек.
+
+    Список делится на непрерывные отрезки по числу серверов, каждый считается
+    своим потоком, ответы склеиваются В ИСХОДНОМ ПОРЯДКЕ. Перепутанный порядок
+    означал бы вектор одного документа, приписанный другому, — ошибку, которую
+    не видно ничем: номера кластеров всё равно посчитаются.
+
+    Отказ любого сервера поднимается наружу, а не заменяется нулями: молча
+    подставленный нулевой вектор дал бы документу тему, посчитанную ни по чему.
+    """
+
+    def one(host: str, texts: Sequence[str]) -> list[list[float]]:
+        body = json.dumps({"model": model, "input": list(texts)}).encode("utf-8")
+        request = urllib.request.Request(
+            f"http://{host}/api/embed", data=body, headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(request, timeout=EMBED_TIMEOUT_SECONDS) as response:
+            payload = json.load(response)
+        vectors = payload.get("embeddings")
+        if not isinstance(vectors, list) or len(vectors) != len(texts):
+            raise ValueError(
+                f"{host}: вернул {len(vectors) if isinstance(vectors, list) else '?'} "
+                f"векторов на {len(texts)} текстов"
+            )
+        return vectors
+
+    def embed(texts: Sequence[str]) -> list[list[float]]:
+        items = list(texts)
+        if len(hosts) == 1 or len(items) <= 1:
+            return one(hosts[0], items)
+        size = math.ceil(len(items) / len(hosts))
+        parts = [items[start : start + size] for start in range(0, len(items), size)]
+        with ThreadPoolExecutor(max_workers=len(parts)) as pool:
+            results = list(pool.map(lambda pair: one(*pair), zip(hosts, parts)))
+        merged: list[list[float]] = []
+        for vectors in results:
+            merged.extend(vectors)
+        return merged
+
+    return embed
+
+
 def chunked_embed_fn(base, limit: int = CHUNK_CHARS):
     """Вектор документа как среднее векторов его кусков — как в бою.
 
@@ -166,17 +261,27 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--embedding-model", default=None)
     parser.add_argument("--chunk-chars", type=int, default=CHUNK_CHARS)
+    parser.add_argument(
+        "--hosts",
+        default=None,
+        help="адреса серверов Ollama через запятую; можно только порты: 11434,11435",
+    )
     args = parser.parse_args()
 
     model = embedding_model_name(args.embedding_model)
+    hosts = normalize_hosts(args.hosts)
     corpus = load_full(args.data)
-    print(f"корпус: {len(corpus)} документов, модель {model}", flush=True)
+    print(
+        f"корпус: {len(corpus)} документов, модель {model}, "
+        f"серверов {len(hosts)}: {', '.join(hosts)}",
+        flush=True,
+    )
     Path(args.cache).parent.mkdir(parents=True, exist_ok=True)
     embed_corpus(
         corpus.documents,
         model=model,
         cache_path=args.cache,
-        embed_fn=chunked_embed_fn(ollama_embed_fn(model), args.chunk_chars),
+        embed_fn=chunked_embed_fn(http_embed_fn(model, hosts), args.chunk_chars),
         batch_size=args.batch_size,
     )
     return 0
