@@ -188,6 +188,30 @@ class ArtifactReadingTests(ArtifactTestCase):
         self.assertEqual(metrics["ari_topic"], 0.31)
         self.assertEqual(metrics["purity"], 0.7)
 
+    def test_metrics_of_the_second_wave_are_found_under_their_own_names(self):
+        """Вторая волна меряет согласие с РЕДАКЦИОННЫМИ РУБРИКАМИ, а не с
+        выдуманной таксономией, и называет свои числа ari_rubric_test и
+        purity_rubric_test. Без псевдонима карточка модели показала бы пустые
+        поля — ровно то, что уже случалось с силуэтом: метрика посчитана, а на
+        экране её нет, и никакой ошибки при этом не возникает.
+        """
+        write_artifact(
+            self.path,
+            meta_overrides={
+                "metrics": {},
+                "params": {
+                    "k": 3,
+                    "ari_rubric_test": 0.42,
+                    "purity_rubric_test": 0.61,
+                    "silhouette_test": 0.13,
+                },
+            },
+        )
+        metrics = load_artifact(self.path).metrics
+        self.assertEqual(metrics["ari_topic"], 0.42)
+        self.assertEqual(metrics["purity"], 0.61)
+        self.assertEqual(metrics["silhouette"], 0.13)
+
     def test_the_artifact_path_comes_from_the_environment(self):
         write_language_artifact(self.path)
         with patch.dict(os.environ, {"TOPIC_MODEL_PATH": str(self.path)}):

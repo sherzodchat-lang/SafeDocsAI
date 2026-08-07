@@ -79,6 +79,32 @@ class CharacteristicTermsTests(unittest.TestCase):
         terms = c_tf_idf(groups, top_n=3, min_count=2)
         self.assertNotIn("опечатканиквстречалась", [term.term for term in terms["а"]])
 
+    def test_a_word_common_to_the_whole_corpus_does_not_distinguish_twins(self):
+        """Замер на настоящем корпусе: в подпись попало «Законодательство и
+        право — ҷумҳурии, тоҷикистон». «Таджикистан» стоит в каждом документе,
+        но внутри семьи из двух кластеров он поделён 70 на 30 и оттого выглядит
+        различающим. Лечится тем, что idf берётся по ВСЕМ кластерам, а tf — по
+        семье: это два разных вопроса, и мерить их по одному набору нельзя.
+        """
+        family = {
+            0: [tokenize("тоҷикистон " * 7 + "барқ барқ барқ")] * 3,
+            1: [tokenize("тоҷикистон " * 3 + "пахта пахта пахта")] * 3,
+        }
+        everything = dict(family)
+        everything[2] = [tokenize("тоҷикистон " * 8 + "мактаб мактаб")] * 3
+        everything[3] = [tokenize("тоҷикистон " * 8 + "варзиш варзиш")] * 3
+
+        chosen = [term.term for term in c_tf_idf(family, top_n=2, idf_groups=everything)[0]]
+        self.assertNotIn("тоҷикистон", chosen)
+        self.assertEqual(chosen, ["барқ"])
+
+    def test_a_word_absent_from_the_idf_set_is_skipped_not_infinite(self):
+        """Слово, которого нет в наборе для idf, дало бы деление на ноль, то
+        есть слово-победитель, взявшееся из ниоткуда."""
+        family = {0: [tokenize("барқ барқ нерӯгоҳ нерӯгоҳ")] * 2}
+        elsewhere = {9: [tokenize("мактаб мактаб талаба талаба")] * 2}
+        self.assertEqual(c_tf_idf(family, top_n=3, idf_groups=elsewhere)[0], [])
+
     def test_ties_are_broken_by_the_word_so_two_builds_agree(self):
         groups = {"а": [tokenize("аба аба бвб бвб вгв вгв")]}
         first = [term.term for term in c_tf_idf(groups, top_n=3)["а"]]
@@ -162,16 +188,65 @@ class ComposeLabelsTests(unittest.TestCase):
         """У близнецов, поделивших словарь ровно, отличительных слов МЕЖДУ СОБОЙ
         нет. Но сказать о кластере что-то осмысленное всё равно можно — по его
         словам на фоне всего корпуса. «Экономика #4» не говорит ничего."""
+        # Четыре кластера, а не три: потолок распространённости — половина от их
+        # числа, и на трёх он вырождается в «слово не должно встречаться больше
+        # чем в одном», то есть запрещает вообще всё общее.
         shared = "сомонӣ бонк қарз " * 4
         tokens = {
             0: [tokenize(shared)] * 3,
             1: [tokenize(shared)] * 3,
             2: [tokenize("мактаб мактаб талаба талаба")] * 3,
+            3: [tokenize("варзиш варзиш тим тим")] * 3,
         }
-        labels = compose_labels({0: "R01", 1: "R01", 2: "R05"}, tokens, self.NAMES)
+        labels = compose_labels(
+            {0: "R01", 1: "R01", 2: "R05", 3: "R04"}, tokens, {**self.NAMES, "R04": "Варзиш"}
+        )
         self.assertNotEqual(labels[0], labels[1])
         self.assertNotIn("#", labels[0])
         self.assertIn("сомонӣ", labels[0] + labels[1])
+
+    def test_the_same_word_in_two_forms_does_not_take_the_whole_label(self):
+        """Замер на настоящем корпусе: «Послания и выступления Президента —
+        конфронси, конфронс». Таджикский маркирует изафет суффиксом, приведения
+        к начальной форме у нас нет, и оба варианта одного слова уходили в
+        подпись — половина уточнения не говорила ничего."""
+        tokens = {
+            0: [tokenize("конфронс конфронси конфронс конфронси симпозиум симпозиум")] * 3,
+            1: [tokenize("кишоварзӣ кишоварзӣ пахта пахта")] * 3,
+            2: [tokenize("мактаб мактаб талаба талаба")] * 3,
+            3: [tokenize("варзиш варзиш тим тим")] * 3,
+        }
+        labels = compose_labels(
+            {0: "R01", 1: "R01", 2: "R05", 3: "R04"},
+            tokens,
+            {**self.NAMES, "R04": "Варзиш"},
+            terms_in_label=2,
+        )
+        qualifier = labels[0].split("—", 1)[1]
+        self.assertNotIn("конфронси", qualifier.replace("конфронс,", ""))
+        self.assertIn("симпозиум", qualifier)
+
+    def test_a_cluster_that_barely_matches_its_rubric_is_not_named_by_it(self):
+        """Кластер, где преобладающая рубрика набирает 19%, рубрикой не
+        является: назвать его «Послания Президента» значит соврать четырём
+        пятым его содержимого."""
+        tokens = {
+            0: [tokenize("мебел мебел курсӣ курсӣ")] * 3,
+            1: [tokenize("мактаб мактаб талаба талаба")] * 3,
+            2: [tokenize("варзиш варзиш тим тим")] * 3,
+            3: [tokenize("пахта пахта кишт кишт")] * 3,
+        }
+        labels = compose_labels(
+            {0: "R01", 1: "R05", 2: "R05", 3: "R05"},
+            tokens,
+            self.NAMES,
+            share_of_cluster={0: 0.19, 1: 0.8, 2: 0.8, 3: 0.8},
+            mixed_name="Разное",
+        )
+        self.assertTrue(labels[0].startswith("Разное"), labels[0])
+        self.assertIn("мебел", labels[0])
+        # Сильные кластеры своё имя сохраняют.
+        self.assertTrue(labels[1].startswith("Маориф"), labels[1])
 
     def test_twins_without_any_word_at_all_fall_back_to_numbers(self):
         """Два одинаковых имени хуже некрасивого: по ним нельзя перейти к

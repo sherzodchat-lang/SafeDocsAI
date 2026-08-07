@@ -67,7 +67,11 @@ from app.modules.topics.metrics import (  # noqa: E402
 from app.modules.topics.pca import PrincipalAxes  # noqa: E402
 from app.modules.topics.pipeline.dataset import load_full, load_splits  # noqa: E402
 from app.modules.topics.pipeline.embeddings import EmbeddingCache  # noqa: E402
-from app.modules.topics.pipeline.model_io import TopicModel, dominant_topics  # noqa: E402
+from app.modules.topics.pipeline.model_io import (  # noqa: E402
+    ClusterTopic,
+    TopicModel,
+    dominant_topics,
+)
 from app.modules.topics.pipeline.rubrics import (  # noqa: E402
     RUBRIC_BY_CODE,
     UNLABELLED,
@@ -91,7 +95,18 @@ N_INIT = 10
 # проверки значило бы повторить ровно ту ошибку, из-за которой всё и затевалось.
 DROP_GRID = (0, 1, 2, 3, 4, 5)
 KEEP_GRID = (16, 32, 64, 128)
-K_GRID = (8, 10, 12, 14, 16, 18, 20, 22, 24, 28, 32)
+# Сетка k начинается НЕ с малых значений, и это решение, а не удобство.
+#
+# ARI монотонно падает с ростом k на этих данных: слить две рубрики дешевле, чем
+# разбить одну. Выбор «по максимуму ARI» на полной сетке поэтому всегда берёт
+# самое грубое разбиение — первый прогон выбрал k=8 при одиннадцати рубриках, то
+# есть модель, которая известные темы различить физически не может, и две из
+# восьми тем оказались одинаково подписаны «Законодательство и право».
+#
+# Нижняя граница — число рубрик: столько тем в разметке есть, и меньшим числом
+# кластеров их не представить. Внутри допустимого диапазона решает по-прежнему
+# ARI на validation.
+K_GRID = (12, 14, 16, 18, 20, 22, 24, 28, 32)
 
 # Сколько пар подвыборок берётся для оценки устойчивости. Устойчивость нужна
 # потому, что силуэт на таких данных низок по модулю даже после проекции, и
@@ -109,6 +124,35 @@ MERGE_GRID = (None, 0.90, 0.85, 0.80, 0.75)
 # подбирается так, чтобы отказов было примерно столько: пустое поле честнее
 # уверенной ошибки, но модель, отказывающаяся от половины корпуса, бесполезна.
 TARGET_UNCLEAR_SHARE = 0.10
+
+# Имя кластера, который не совпал ни с одной рубрикой. Не «прочее»: модель нашла
+# в нём общее, просто это общее не совпало с редакционным делением, и слова
+# кластера скажут о нём больше, чем чужая рубрика.
+MIXED_TG = "Гурӯҳи мавзӯӣ"
+MIXED_RU = "Тематическая группа"
+
+# Насколько два варианта должны разойтись по ARI, чтобы считаться разными. Ниже
+# этого — ничья, и решает вторая величина: осталась ли в пространстве ось языка.
+ARI_TIE = 0.015
+LANGUAGE_TIE = 0.01
+
+# Какую долю от лучшего ARI разрешено потерять, выбирая k по силуэту.
+#
+# ЧИСЛО k ВЫБИРАЕТСЯ СИЛУЭТОМ, А НЕ ARI, и вот почему. ARI на этом корпусе
+# монотонно падает с ростом k: рубрики очень неравны (517 документов у самой
+# большой против 59 у самой маленькой), и слить две маленькие всегда дешевле,
+# чем разбить одну большую. Выбор по максимуму ARI поэтому берёт самый левый
+# край сетки — и берёт разбиение, которое известные темы различить не может.
+#
+# Замер, на котором это видно: при k=12 и k=14 паёмы президента попадают в
+# кластер «Экономика», при k=16..20 — в «Послания и выступления Президента»,
+# то есть туда, где им место. Чистота при этом растёт с 0.552 до 0.596, силуэт
+# достигает максимума на k=18, и только ARI падает — с 0.254 до 0.220.
+#
+# Силуэт мерит геометрию, а не согласие с чужой разметкой, и здесь это как раз
+# то, что нужно. ARI остаётся в роли предохранителя: разбиение, потерявшее
+# больше пятой части лучшего значения, к рубрикам уже не имеет отношения.
+ARI_FLOOR_SHARE = 0.8
 
 
 def say(message: str = "") -> None:
@@ -145,6 +189,21 @@ def axes_material(data: dict[str, np.ndarray]) -> np.ndarray:
 
 
 # --- оценка ------------------------------------------------------------------
+
+
+def language_axis_score(labels_by_language, labels) -> float:
+    """Насколько разбиение воспроизводит ЯЗЫК, а не тему.
+
+    Считается на неразмеченном котле, а не на validation, и это существенно.
+    Размеченная часть корпуса целиком таджикская: ось языка внутри неё
+    отсутствует, и ARI против языка там равен нулю у ЛЮБОГО варианта — включая
+    тот, который язык не снимает вовсе. Первый прогон именно так и выбрал
+    «ничего не снимать»: критерий не видел того, ради чего снимают.
+
+    Котёл двуязычный (659 русских текстов среди 1213), и на нём вопрос
+    осмысленный.
+    """
+    return adjusted_rand_index(labels_by_language, labels)
 
 
 def evaluate(labels, corpus, X) -> dict:
@@ -295,11 +354,17 @@ def search_projection(data, corpora, *, drops, keeps, ks, verbose=True):
             projection = axes.to_projection(drop=drop, keep=keep)
             train_X = projection.apply(data["train"])
             validation_X = projection.apply(data["validation"])
+            pool_X = projection.apply(data["pool"]) if data["pool"].size else None
+            pool_languages = corpora["pool"].labels("language") if pool_X is not None else None
             for k in ks:
                 model = fit_and_label(train_X, k)
                 labels = model.predict(validation_X)
                 score = adjusted_rand_index(corpora["validation"].labels("topic_id"), labels)
-                language = adjusted_rand_index(corpora["validation"].labels("language"), labels)
+                language = (
+                    language_axis_score(pool_languages, model.predict(pool_X))
+                    if pool_X is not None
+                    else 0.0
+                )
                 rows.append(
                     {
                         "drop": drop,
@@ -310,7 +375,16 @@ def search_projection(data, corpora, *, drops, keeps, ks, verbose=True):
                         "silhouette": silhouette_score(validation_X, labels),
                     }
                 )
-                if best is None or score > best["ari_rubric"]:
+                # Вариант считается лучше, только если он ЗАМЕТНО лучше по
+                # рубрике. Разница в пределах шума не стоит того, чтобы оставить
+                # в пространстве ось языка: на размеченной части её не видно, а
+                # боевые документы бывают и русскими.
+                if best is None or score > best["ari_rubric"] + ARI_TIE:
+                    best = rows[-1]
+                elif (
+                    abs(score - best["ari_rubric"]) <= ARI_TIE
+                    and abs(language) < abs(best["ari_language"]) - LANGUAGE_TIE
+                ):
                     best = rows[-1]
             if verbose:
                 top = max(
@@ -413,8 +487,16 @@ def build_labels(corpus, labels, centroid_count):
     # Без этой пары имён он получил бы подпись «UNK», то есть строку из
     # внутреннего кода в списке тем на экране.
     names_tg[UNLABELLED], names_ru[UNLABELLED] = rubric_names(UNLABELLED)
-    labels_tg = compose_labels(rubric_of_cluster, tokens_of_cluster, names_tg)
-    labels_ru = compose_labels(rubric_of_cluster, tokens_of_cluster, names_ru)
+    # Доля преобладающей рубрики — она решает, имеет ли кластер право на её имя.
+    shares = {item.cluster: item.share for item in topics}
+    labels_tg = compose_labels(
+        rubric_of_cluster, tokens_of_cluster, names_tg,
+        share_of_cluster=shares, mixed_name=MIXED_TG,
+    )
+    labels_ru = compose_labels(
+        rubric_of_cluster, tokens_of_cluster, names_ru,
+        share_of_cluster=shares, mixed_name=MIXED_RU,
+    )
     return topics, labels_tg, labels_ru
 
 
@@ -459,15 +541,20 @@ def main() -> int:
 
     say("=== выбор k: силуэт, устойчивость, ARI ===")
     k_rows = choose_k(space["train"], space["validation"], corpora, ks)
-    best_k_row = max(k_rows, key=lambda row: row["ari_rubric"])
-    most_stable = max(k_rows, key=lambda row: row["stability"])
-    best_silhouette = max(k_rows, key=lambda row: row["silhouette_validation"])
+    best_ari = max(row["ari_rubric"] for row in k_rows)
+    floor = best_ari * ARI_FLOOR_SHARE
+    allowed = [row for row in k_rows if row["ari_rubric"] >= floor] or k_rows
+    chosen_row = max(allowed, key=lambda row: row["silhouette_validation"])
     say(
-        f"по ARI k={best_k_row['k']}, по устойчивости k={most_stable['k']}, "
-        f"по силуэту k={best_silhouette['k']}"
+        f"по ARI k={max(k_rows, key=lambda r: r['ari_rubric'])['k']}, "
+        f"по устойчивости k={max(k_rows, key=lambda r: r['stability'])['k']}, "
+        f"по силуэту k={max(k_rows, key=lambda r: r['silhouette_validation'])['k']}"
     )
-    chosen_k = best_k_row["k"]
-    say(f"взято k={chosen_k}: решает попадание в рубрики, остальные два — как объяснение")
+    chosen_k = chosen_row["k"]
+    say(
+        f"взято k={chosen_k}: решает силуэт среди тех, у кого ARI не ниже "
+        f"{floor:+.3f} (0.8 от лучшего). Почему не ARI — см. ARI_FLOOR_SHARE"
+    )
     say()
 
     model = fit_and_label(space["train"], chosen_k)
@@ -538,8 +625,11 @@ def main() -> int:
         say("(--no-save: модель и отчёт не записаны)")
         return 0
 
+    # Подпись кластера подменяется на составленную (рубрика плюс уточнение), а
+    # рубрика, доля и размер остаются такими, какими их посчитал
+    # dominant_topics: имя — работа этого файла, числа — не его.
     enriched = tuple(
-        type(item)(
+        ClusterTopic(
             cluster=item.cluster,
             topic_id=item.topic_id,
             topic=labels_tg.get(item.cluster, item.topic),

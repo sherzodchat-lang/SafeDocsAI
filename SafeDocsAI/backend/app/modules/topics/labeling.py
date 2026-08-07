@@ -106,12 +106,54 @@ class Term:
 # перевесом в один документ не объявлялось отличительным.
 DOMINANCE = 0.6
 
+# В скольких кластерах слово может встречаться, чтобы ещё считаться характерным.
+#
+# Одного c-TF-IDF мало, и это видно на настоящем корпусе: «тоҷикистон» стоит во
+# ВСЕХ кластерах, но в кластере законов занимает такую долю слов, что даже
+# приглушённое idf произведение выносит его наверх. Так в подпись и попало
+# «Законодательство и право — ҷумҳурии, тоҷикистон» — два слова, не сказавшие
+# ничего.
+#
+# Мера частоты этого не ловит принципиально: она отвечает на вопрос «часто ли
+# слово встречается», а нужен ответ на «встречается ли оно ГДЕ-ТО ЕЩЁ». Поэтому
+# отдельный потолок: слово, попавшее больше чем в половину кластеров, — это
+# лексика корпуса, а не примета кластера.
+MAX_CLUSTER_SHARE = 0.5
+
+# Сколько первых букв должно совпасть, чтобы два слова считались одним и тем же.
+#
+# Таджикский маркирует изафет суффиксом, и «конфронс» с «конфронси» — одно слово
+# в двух формах. Токенизатор их не сводит (нормализатора форм у нас нет и он был
+# бы отдельной работой), поэтому оба попадали в подпись: «Послания и выступления
+# Президента — конфронси, конфронс». Половина уточнения не сказала ничего.
+#
+# Отсечение по общему началу — грубая замена приведению к начальной форме, и это
+# сказано прямо. Она ловит именно тот случай, который встречается: одно и то же
+# слово с суффиксом и без.
+SAME_STEM_PREFIX = 5
+
+# Ниже какой доли преобладающая рубрика перестаёт быть именем кластера.
+#
+# Кластер, где рубрика большинства набирает столько же, сколько она занимает во
+# всём корпусе, о ней не говорит ничего: такую долю она получила бы и в куче,
+# набранной наугад. На нашем корпусе самая крупная рубрика — 19% (517 документов
+# из 2741), и это и есть уровень случайности.
+#
+# Порог поставлен чуть выше него. Не выше: сначала он стоял на 0.35, и под него
+# попал кластер, куда легли паёмы президента — рубрика там 0.30, то есть
+# в полтора раза больше случайного, — и вместо findable «Послания и выступления
+# Президента» пользователь получил «Тематическая группа». Имя, по которому
+# документ не найти, вредит больше, чем неточная доля: саму долю видно в
+# карточке модели.
+MIN_RUBRIC_SHARE = 0.25
+
 
 def c_tf_idf(
     groups: Mapping[Hashable, Sequence[Sequence[str]]],
     *,
     top_n: int = 5,
     min_count: int = 2,
+    idf_groups: Mapping[Hashable, Sequence[Sequence[str]]] | None = None,
 ) -> dict[Hashable, list[Term]]:
     """Характерные слова каждой группы: {ключ группы -> список Term}.
 
@@ -127,6 +169,16 @@ def c_tf_idf(
     Порядок при равных значениях — по слову. Без этого две сборки модели с
     одинаковой геометрией дали бы разные подписи, а подпись входит в артефакт,
     который приложение опознаёт по sha256.
+
+    idf_groups — по чему считать РАСПРОСТРАНЁННОСТЬ слова, если это не сами
+    groups. Нужно ровно для одного случая, и случай этот важный: уточнение
+    близнецов считается внутри семьи из двух-трёх кластеров, и слово, которое
+    есть во всём корпусе, но поделено между ними 70 на 30, внутри семьи
+    выглядит различающим. Так в подпись и попало «Законодательство и право —
+    ҷумҳурии, тоҷикистон»: «Таджикистан» стоит в каждом документе корпуса.
+    Считая tf по семье, а idf по всем кластерам, мы спрашиваем «чем этот
+    кластер отличается от брата» и «редкое ли это слово вообще» — а это два
+    разных вопроса, и мерить их по одному набору нельзя.
     """
     if top_n < 1:
         raise ValueError("top_n должно быть >= 1")
@@ -138,15 +190,32 @@ def c_tf_idf(
             counter.update(tokens)
         counts[key] = counter
 
+    reference = counts
+    if idf_groups is not None:
+        reference = {}
+        for key, documents in idf_groups.items():
+            counter = Counter()
+            for tokens in documents:
+                counter.update(tokens)
+            reference[key] = counter
+
     total_across: Counter = Counter()
-    for counter in counts.values():
+    for counter in reference.values():
         total_across.update(counter)
     if not total_across:
         return {key: [] for key in groups}
 
-    sizes = [sum(counter.values()) for counter in counts.values()]
+    sizes = [sum(counter.values()) for counter in reference.values()]
     non_empty = [size for size in sizes if size]
     average_size = (sum(non_empty) / len(non_empty)) if non_empty else 0.0
+
+    # Во скольких кластерах слово вообще встречается. Считается по тому же
+    # набору, что и idf: вопрос «есть ли это слово где-то ещё» имеет смысл
+    # только относительно всех кластеров, а не двух братьев.
+    spread = Counter()
+    for counter in reference.values():
+        spread.update(set(counter))
+    ceiling = max(1, int(len(reference) * MAX_CLUSTER_SHARE))
 
     result: dict[Hashable, list[Term]] = {}
     for key, counter in counts.items():
@@ -158,8 +227,20 @@ def c_tf_idf(
         for term, count in counter.items():
             if count < min_count:
                 continue
+            # Слова, которого нет в наборе для idf, быть не может, когда набор
+            # тот же; когда он шире — тем более. Но полагаться на это нельзя:
+            # деление на ноль дало бы бесконечность, то есть слово-победитель,
+            # взявшееся из ниоткуда.
+            seen = total_across.get(term, 0)
+            if seen <= 0:
+                continue
+            # Слово из большинства кластеров — лексика корпуса, а не примета
+            # одного из них. Потолок не применяется, когда кластер всего один:
+            # там сравнивать не с чем, и запрет отобрал бы все слова разом.
+            if len(reference) > 1 and spread[term] > ceiling:
+                continue
             tf = count / size
-            idf = math.log(1.0 + average_size / total_across[term])
+            idf = math.log(1.0 + average_size / seen)
             scored.append(Term(term=term, score=tf * idf))
         scored.sort(key=lambda item: (-item.score, item.term))
         result[key] = scored[:top_n]
@@ -204,6 +285,8 @@ def compose_labels(
     *,
     terms_in_label: int = 2,
     separator: str = " — ",
+    share_of_cluster: Mapping[int, float] | None = None,
+    mixed_name: str = "",
 ) -> dict[int, str]:
     """Подпись каждого кластера: имя рубрики, а при совпадении — с уточнением.
 
@@ -229,7 +312,37 @@ def compose_labels(
     all_tokens = {cluster: tokens_of_cluster.get(cluster, ()) for cluster in rubric_of_cluster}
     corpus_terms = c_tf_idf(all_tokens, top_n=terms_in_label * 4)
 
+    # Кластеры, где преобладающая рубрика слишком слаба, из семей вынимаются:
+    # их имя строится не от рубрики, и делить с ней уточнения им незачем.
+    weak = {
+        cluster
+        for cluster, share in (share_of_cluster or {}).items()
+        if float(share) < MIN_RUBRIC_SHARE
+    }
     labels: dict[int, str] = {}
+    if weak:
+        weak_terms = c_tf_idf(
+            {cluster: tokens_of_cluster.get(cluster, ()) for cluster in sorted(weak)},
+            top_n=terms_in_label * 4,
+            idf_groups=all_tokens,
+        )
+        taken_weak: set[str] = set()
+        for cluster in sorted(weak):
+            chosen = _pick(weak_terms.get(cluster, ()), taken_weak, terms_in_label)
+            taken_weak.update(chosen)
+            base = mixed_name or rubric_names.get(rubric_of_cluster.get(cluster, "")) or ""
+            if chosen and base:
+                labels[cluster] = base + separator + ", ".join(chosen)
+            elif chosen:
+                labels[cluster] = ", ".join(chosen)
+            else:
+                labels[cluster] = f"{base or 'Кластер'} #{cluster}"
+        families = {
+            rubric: [cluster for cluster in clusters if cluster not in weak]
+            for rubric, clusters in families.items()
+        }
+        families = {rubric: clusters for rubric, clusters in families.items() if clusters}
+
     for rubric, clusters in families.items():
         base = rubric_names.get(rubric) or rubric
         if len(clusters) == 1:
@@ -238,7 +351,9 @@ def compose_labels(
         family_tokens = {cluster: tokens_of_cluster.get(cluster, ()) for cluster in clusters}
         # Берём с запасом: часть верхушки отсеет требование преобладания, и без
         # запаса у кластера не осталось бы ни одного слова.
-        family_terms = c_tf_idf(family_tokens, top_n=terms_in_label * 4)
+        family_terms = c_tf_idf(
+            family_tokens, top_n=terms_in_label * 4, idf_groups=all_tokens
+        )
         family_terms = _only_dominant(family_terms, family_tokens)
         # Одно и то же слово не должно оказаться уточнением у двух близнецов:
         # «Иқтисод — сомонӣ» и «Иқтисод — сомонӣ» — это снова два одинаковых
@@ -257,17 +372,28 @@ def compose_labels(
     return labels
 
 
-def _pick(terms: Sequence[Term], taken: set[str], limit: int) -> list[str]:
-    """Первые limit слов, ещё не занятых соседом по рубрике.
+def _same_stem(word: str, other: str) -> bool:
+    """Одно ли это слово в двух формах — по общему началу (см. SAME_STEM_PREFIX)."""
+    shortest = min(len(word), len(other))
+    if shortest < SAME_STEM_PREFIX:
+        return word == other
+    return word[:SAME_STEM_PREFIX] == other[:SAME_STEM_PREFIX]
 
-    Ограничение обязательно: без него в подпись уходили все уцелевшие после
-    отбора слова, и вместо «Иқтисод — барқ, нерӯгоҳ» получалось перечисление в
-    полстроки. Обрезка на выходе, а не при подсчёте меры, потому что часть
-    верхушки отсеивают требование преобладания и занятость соседом.
+
+def _pick(terms: Sequence[Term], taken: set[str], limit: int) -> list[str]:
+    """Первые limit слов, ещё не занятых соседом по рубрике и не повторяющих
+    друг друга формой.
+
+    Ограничение по числу обязательно: без него в подпись уходили все уцелевшие
+    после отбора слова, и вместо «Иқтисод — барқ, нерӯгоҳ» получалось
+    перечисление в полстроки. Обрезка на выходе, а не при подсчёте меры, потому
+    что часть верхушки отсеивают требование преобладания и занятость соседом.
     """
     chosen: list[str] = []
     for term in terms:
-        if term.term in taken or term.term in chosen:
+        if any(_same_stem(term.term, word) for word in taken):
+            continue
+        if any(_same_stem(term.term, word) for word in chosen):
             continue
         chosen.append(term.term)
         if len(chosen) >= limit:
