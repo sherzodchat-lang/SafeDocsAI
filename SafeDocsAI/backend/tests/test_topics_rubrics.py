@@ -19,7 +19,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.modules.topics.pipeline.rubrics import (  # noqa: E402
+    CURATED_TO_RUBRIC,
     RAW_TO_RUBRIC,
+    SUBJECT_TO_RUBRIC,
     RUBRIC_BY_CODE,
     RUBRICS,
     UNLABELLED,
@@ -69,17 +71,36 @@ class ThreeOutcomesTests(unittest.TestCase):
         self.assertIsNone(normalize_section("Совершенно новый раздел"))
 
 
+# Таблиц отображения три, и проверять надо ИХ ВСЕ. Разъехавшись, сторож начнёт
+# ругаться на рубрику, которая на самом деле адресуется из соседней таблицы, —
+# и его отключат первым же коммитом.
+ALL_MAPPINGS = (RAW_TO_RUBRIC, SUBJECT_TO_RUBRIC, CURATED_TO_RUBRIC)
+
+
+def mapped_codes() -> set[str]:
+    return {code for table in ALL_MAPPINGS for code in table.values()}
+
+
 class TableConsistencyTests(unittest.TestCase):
     def test_every_mapped_code_actually_exists(self):
-        unknown = sorted({code for code in RAW_TO_RUBRIC.values()} - set(RUBRIC_BY_CODE))
-        self.assertEqual(unknown, [], f"таблица ссылается на несуществующие рубрики: {unknown}")
+        unknown = sorted(mapped_codes() - set(RUBRIC_BY_CODE))
+        self.assertEqual(unknown, [], f"таблицы ссылаются на несуществующие рубрики: {unknown}")
 
     def test_every_rubric_has_at_least_one_section_pointing_at_it(self):
         """Рубрика без единого раздела — мёртвая строка в списке тем: кластера
         с ней не возникнет никогда, а пользователь увидит её в фильтре."""
-        used = set(RAW_TO_RUBRIC.values())
-        orphans = sorted(rubric.code for rubric in RUBRICS if rubric.code not in used)
+        orphans = sorted(rubric.code for rubric in RUBRICS if rubric.code not in mapped_codes())
         self.assertEqual(orphans, [])
+
+    def test_the_three_tables_do_not_contradict_each_other(self):
+        """Одна метка в двух таблицах с разными кодами — это молчаливая
+        зависимость от порядка проверки в normalize_section."""
+        conflicts = {}
+        for table in ALL_MAPPINGS:
+            for key, code in table.items():
+                if key in conflicts and conflicts[key] != code:
+                    self.fail(f"метка {key!r} отображается и в {conflicts[key]}, и в {code}")
+                conflicts[key] = code
 
     def test_codes_are_unique(self):
         codes = [rubric.code for rubric in RUBRICS]
@@ -117,10 +138,11 @@ class TableConsistencyTests(unittest.TestCase):
     def test_keys_are_already_canonical(self):
         """Ключ таблицы, записанный с заглавной буквы или с гомоглифом, не
         нашёлся бы никогда — и рубрика молча осталась бы пустой."""
-        for key in RAW_TO_RUBRIC:
-            with self.subTest(key=key):
-                self.assertEqual(key, key.lower().strip())
-                self.assertEqual(normalize_section(key), RAW_TO_RUBRIC[key])
+        for table in ALL_MAPPINGS:
+            for key, code in table.items():
+                with self.subTest(key=key):
+                    self.assertEqual(key, key.lower().strip())
+                    self.assertEqual(normalize_section(key), code)
 
 
 class NamesTests(unittest.TestCase):
