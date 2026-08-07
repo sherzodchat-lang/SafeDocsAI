@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { AlertTriangle, ArrowRight, ChevronDown, ChevronRight, FileText, Loader2, RefreshCw, Shapes } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, ArrowRight, ChevronDown, ChevronRight, FileText, Loader2, RefreshCw, Shapes } from 'lucide-react';
 
 import { Button } from '../components/ui/Button';
 import DocumentViewer from '../components/DocumentViewer';
@@ -8,7 +8,6 @@ import FolderGlyph from '../components/ui/FolderGlyph';
 import NotebookScopeBadge from '../components/notebook/NotebookScopeBadge';
 import { cn } from '../lib/utils';
 import { useActiveNotebookScope } from '../hooks/useActiveNotebookScope';
-import { useFolderDisclosure } from '../hooks/useFolderDisclosure';
 import { useSessionRole } from '../hooks/useSessionRole';
 import { useSources } from '../contexts/SourcesContext';
 import { useLocale } from '../i18n';
@@ -16,15 +15,12 @@ import { resolveApiErrorMessage, resolveErrorCode } from '../lib/apiError';
 import { formatLocaleDate } from '../lib/locale';
 import { SOURCE_STATUS_BADGE_CLASS, formatSize, resolveStatus } from '../lib/sources';
 import {
-    TOPIC_FOLDER_AUTO_OPEN_LIMIT,
     TOPIC_FOLDER_HINT_KEY,
-    TOPIC_FOLDER_TOPIC,
     buildTopicFilterSearch,
     buildTopicFolders,
     filterTopicFolders,
     readUnclearCount,
     resolveTopicFolderName,
-    resolveTopicShare,
 } from '../lib/topics';
 import { topicsService } from '../services/topicsService';
 
@@ -43,6 +39,32 @@ const MODEL_DETAILS_STORAGE_KEY = 'knowledgeai.topics.modelDetailsOpen';
 // Список при этом не выброшен: он отвечает на вопрос «что модель вообще
 // умеет», и администратору этот ответ нужен.
 const EMPTY_TOPICS_STORAGE_KEY = 'knowledgeai.topics.emptyOpen';
+
+/**
+ * Открытая папка живёт в адресе, а не в состоянии компонента.
+ *
+ * Папка — это место, а у места обязан быть адрес: обновление страницы должно
+ * оставлять человека там, где он стоял, «Назад» браузера — выводить наружу, а
+ * ссылкой на папку можно поделиться. Состояние в useState отвечало бы «нет» на
+ * все три вопроса сразу.
+ *
+ * Параметр местный, а не из lib/topics.js: его читает и пишет только этот
+ * экран — в отличие от фильтра по теме, которым «Темы» разговаривают со
+ * списком источников.
+ */
+const FOLDER_PARAM = 'folder';
+
+// Соседние параметры переносим как есть: в адресе живёт ещё и поиск из шапки, и
+// потерять его на входе в папку значило бы молча отменить запрос, которым эту
+// папку и нашли.
+const buildFolderSearch = (searchParams, folderKey) => {
+    const params = new URLSearchParams(searchParams);
+    if (folderKey) params.set(FOLDER_PARAM, folderKey);
+    else params.delete(FOLDER_PARAM);
+
+    const query = params.toString();
+    return query ? `?${query}` : '';
+};
 
 const readStoredFlag = (key) => {
     if (typeof window === 'undefined') return false;
@@ -66,7 +88,7 @@ const FolderDocument = ({ source, locale, t, statusLabels, onOpen }) => {
             <button
                 type="button"
                 onClick={() => onOpen(source)}
-                className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
+                className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2.5 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
                 aria-label={t('topics.openDocument', { name: source.name })}
             >
                 <FileText className="h-4 w-4 shrink-0 text-slate-400" />
@@ -92,18 +114,62 @@ const FolderDocument = ({ source, locale, t, statusLabels, onOpen }) => {
 };
 
 /**
- * Папка темы: заголовок раскрывает содержимое, стрелка справа уводит в список
- * источников, суженный до этой темы.
+ * Папка в списке верхнего уровня.
  *
- * Два действия у одной строки разведены по разным кнопкам нарочно: раскрытие —
- * то, ради чего сюда пришли, и оно не должно каждый раз менять экран, а переход
- * к фильтру остался на месте, потому что на него завязан раздел источников.
+ * Ссылка, а не кнопка: щелчок уводит внутрь, то есть меняет адрес, — и всё, чего
+ * от ссылки ждут (открыть в новой вкладке, вернуться «Назад» браузера), обязано
+ * работать само.
+ *
+ * У строки ровно одна цель. Раньше их было две — раскрыть на месте и уйти в
+ * список источников, — и человек перед каждой папкой выбирал между ними. Теперь
+ * переход к источникам живёт внутри папки, где он уже не спорит со входом.
  */
-const TopicFolderRow = ({
+const TopicFolderLink = ({ folder, search, t }) => {
+    const name = resolveTopicFolderName(folder, t);
+
+    return (
+        <li>
+            <Link
+                to={{ search }}
+                aria-label={t('topics.folders.enter', { name, count: folder.count })}
+                className="group flex h-full items-center gap-3 rounded-xl border border-slate-200 px-3.5 py-3 transition hover:border-[#1f3a60]/40 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
+            >
+                <FolderGlyph folder={folder} />
+                {/* break-words, а не truncate: название темы приходит от модели
+                    и бывает длинным («Паём ва баромадҳои Президент»), а
+                    обрезанное имя папки — это папка без имени. */}
+                <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-900">{name}</span>
+                <span className="shrink-0 tabular-nums text-xs text-slate-500" title={t('topics.documentCount', { count: folder.count })}>
+                    {folder.count}
+                </span>
+                {/* Стрелка вправо — обещание, что за ней экран сменится. Она же
+                    отличает папку от строки, которая просто что-то показывает. */}
+                <ChevronRight
+                    className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-[#1f3a60]"
+                    aria-hidden="true"
+                />
+            </Link>
+        </li>
+    );
+};
+
+/**
+ * Экран одной папки: место названия темы, возврат наружу и её документы.
+ *
+ * Заголовок раздела здесь подменяется названием папки нарочно. Вход в папку —
+ * смена места, а не подробность на прежнем экране, и если шапка осталась бы
+ * прежней, единственным признаком перемещения была бы строка адреса.
+ *
+ * folder — папка целиком, sources — то, что показываем: под поиском это лишь
+ * совпавшие документы, но счётчик в шапке обязан остаться от целой папки, иначе
+ * поиск на глазах «уменьшит» тему.
+ */
+const TopicFolderScreen = ({
     folder,
-    isOpen,
-    onToggle,
-    totalDocuments,
+    sources,
+    backSearch,
+    isSearching,
+    hasMatches,
     locale,
     t,
     statusLabels,
@@ -112,103 +178,97 @@ const TopicFolderRow = ({
 }) => {
     const name = resolveTopicFolderName(folder, t);
     const hintKey = TOPIC_FOLDER_HINT_KEY[folder.kind];
-    // Доля — только у целой папки. Поиск оставляет в папке одни совпадения, и
-    // «1 документ · 43 %» рядом означало бы, что доля посчитана от найденного,
-    // а она посчитана от всей темы.
-    const isWhole = folder.topic && Number(folder.topic.document_count) === folder.count;
-    const percent = folder.kind === TOPIC_FOLDER_TOPIC && isWhole
-        ? Math.round(resolveTopicShare(folder.topic, totalDocuments) * 100)
-        : null;
-    const panelId = `topic-folder-${folder.key}`;
-    // Число из распределения, а список источников догружается страницами: пока
-    // он не дочитан, папка честнее скажет «показаны 3 из 12», чем промолчит.
-    const isPartial = !sourcesLoading && folder.sources.length < folder.count;
+    // Счётчик приходит из распределения, а список источников догружается
+    // страницами: пока он не дочитан, папка честнее скажет «показаны 3 из 12»,
+    // чем промолчит. Под поиском молчим: показано столько, сколько нашлось, и
+    // «3 из 12» читалось бы как недогрузка.
+    const isPartial = !sourcesLoading && !isSearching && sources.length < folder.count;
 
     return (
-        <li className="overflow-hidden rounded-xl border border-slate-200 transition hover:border-[#1f3a60]/40">
-            <div className="flex items-stretch">
-                <button
-                    type="button"
-                    onClick={() => onToggle(!isOpen)}
-                    aria-expanded={isOpen}
-                    aria-controls={panelId}
-                    className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#1f3a60]/40"
-                >
-                    <ChevronRight className={cn('h-4 w-4 shrink-0 text-slate-400 transition-transform duration-150', isOpen && 'rotate-90')} />
-                    <FolderGlyph folder={folder} isOpen={isOpen} />
-                    {/* break-words, а не truncate: название темы приходит от
-                        модели и бывает длинным («Паём ва баромадҳои Президент»),
-                        а обрезанное имя папки — это папка без имени. */}
-                    <span className="min-w-0 flex-1 break-words text-sm font-semibold text-slate-900">{name}</span>
-                    <span className="shrink-0 tabular-nums text-xs text-slate-500" title={t('topics.documentCount', { count: folder.count })}>
-                        {folder.count}
-                    </span>
-                    {percent != null ? (
-                        <span className="hidden shrink-0 text-xs font-semibold text-slate-700 sm:block">{t('topics.share', { value: percent })}</span>
-                    ) : null}
-                </button>
+        <div>
+            <Link
+                to={{ search: backSearch }}
+                className="-ml-1.5 inline-flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-semibold text-slate-500 transition hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
+            >
+                <ArrowLeft className="h-4 w-4" />
+                {t('topics.folders.back')}
+            </Link>
 
+            {/* На узком экране заголовок и ссылка стоят друг под другом. В одну
+                строку их ставить нельзя: ссылка своей ширины не отдаёт, и
+                название темы — а они длинные — сжималось бы до колонки в одну
+                букву. */}
+            <div className="mt-2.5 flex flex-col gap-3 md:flex-row md:items-start md:gap-4">
+                <div className="flex min-w-0 items-start gap-3 md:flex-1">
+                    <span className="rounded-xl bg-[#1f3a60]/10 p-2">
+                        <FolderGlyph folder={folder} isOpen className="h-5 w-5" />
+                    </span>
+                    <span className="min-w-0">
+                        <h2 className="break-words text-lg font-semibold leading-tight text-slate-900">{name}</h2>
+                        <p className="mt-0.5 text-sm text-slate-500">{t('topics.documentCount', { count: folder.count })}</p>
+                    </span>
+                </div>
+
+                {/* Переход в список источников остался: там таблица, фильтры и
+                    массовые действия, которых в папке нет и не должно быть.
+                    У особых папок номера кластера нет — фильтровать нечем. */}
                 {folder.clusterIndex != null ? (
                     <Link
                         to={`/sources${buildTopicFilterSearch(folder.clusterIndex, name)}`}
                         title={t('topics.open', { name })}
-                        aria-label={t('topics.open', { name })}
-                        className="flex shrink-0 items-center border-l border-slate-100 px-3 text-slate-400 transition hover:bg-slate-50 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#1f3a60]/40"
+                        className="inline-flex shrink-0 items-center gap-1.5 self-start rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-[#1f3a60]/40 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
                     >
-                        <ArrowRight className="h-4 w-4" />
+                        {t('topics.folders.inSources')}
+                        <ArrowRight className="h-3.5 w-3.5" />
                     </Link>
                 ) : null}
             </div>
 
-            {/* Полоса вместо графика: доля читается быстрее в сравнении с
-                соседями, а библиотек ради этого в проекте нет. */}
-            {percent != null ? (
-                <div className="mx-3 mb-2.5 h-1 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
-                    <div className="h-full rounded-full bg-[#1f3a60]" style={{ width: `${Math.max(percent, 1)}%` }} />
-                </div>
+            {hintKey ? (
+                <p className="mt-3 rounded-xl bg-slate-50 px-3.5 py-2.5 text-xs leading-5 text-slate-500">{t(hintKey)}</p>
             ) : null}
 
-            {isOpen ? (
-                /* Отступ слева — не украшение: документы встают под названием
-                   папки, и вложенность видно, не вчитываясь. */
-                <div id={panelId} className="border-t border-slate-100 bg-slate-50/70 py-1.5 pl-7 pr-2">
-                    {hintKey ? (
-                        <p className="px-2.5 py-1.5 text-xs leading-5 text-slate-500">{t(hintKey)}</p>
-                    ) : null}
+            <ul className="mt-3 border-t border-slate-100 pt-1.5">
+                {sources.map((source) => (
+                    <FolderDocument
+                        key={source.id}
+                        source={source}
+                        locale={locale}
+                        t={t}
+                        statusLabels={statusLabels}
+                        onOpen={onOpenDocument}
+                    />
+                ))}
+            </ul>
 
-                    {folder.sources.length > 0 ? (
-                        <ul>
-                            {folder.sources.map((source) => (
-                                <FolderDocument
-                                    key={source.id}
-                                    source={source}
-                                    locale={locale}
-                                    t={t}
-                                    statusLabels={statusLabels}
-                                    onOpen={onOpenDocument}
-                                />
-                            ))}
-                        </ul>
+            {sources.length === 0 ? (
+                <p className="mt-3 flex items-center justify-center gap-2 rounded-xl bg-slate-50 p-6 text-center text-sm text-slate-500">
+                    {isSearching && !hasMatches ? (
+                        t('topics.noMatches')
                     ) : sourcesLoading ? (
-                        <p className="flex items-center gap-2 px-2.5 py-2 text-xs text-slate-500">
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <>
+                            <Loader2 className="h-4 w-4 animate-spin" />
                             {t('documents.loading')}
-                        </p>
+                        </>
+                    ) : folder.count === 0 ? (
+                        /* Тема, в которую модель не отнесла ни одного документа:
+                           это её ответ, а не потерянный список. */
+                        t('topics.empty')
                     ) : (
-                        /* Причину (сбой загрузки списка) называет баннер над
-                           папками — один раз. Повторять её в каждой раскрытой
-                           папке значит трижды сказать одно и то же красным. */
-                        <p className="px-2.5 py-2 text-xs text-slate-500">{t('topics.folders.empty')}</p>
+                        /* Причину (сбой загрузки списка) называет баннер выше —
+                           один раз. Повторять её здесь красным значит сказать
+                           одно и то же дважды. */
+                        t('topics.folders.empty')
                     )}
-
-                    {isPartial && folder.sources.length > 0 ? (
-                        <p className="px-2.5 py-1.5 text-xs text-slate-400">
-                            {t('topics.folders.partial', { shown: folder.sources.length, count: folder.count })}
-                        </p>
-                    ) : null}
-                </div>
+                </p>
             ) : null}
-        </li>
+
+            {isPartial && sources.length > 0 ? (
+                <p className="px-2.5 py-1.5 text-xs text-slate-400">
+                    {t('topics.folders.partial', { shown: sources.length, count: folder.count })}
+                </p>
+            ) : null}
+        </div>
     );
 };
 
@@ -220,6 +280,9 @@ const TopicsPage = () => {
     // документов внутри них.
     const [searchParams] = useSearchParams();
     const searchTerm = searchParams.get('q') || '';
+    // Внутри папки поиск сужает её содержимое, а не уводит наружу: в проводнике
+    // ищут в той папке, где стоят.
+    const folderKey = searchParams.get(FOLDER_PARAM) || '';
 
     // Та же область, что у списка источников и чата: экран показывает
     // распределение внутри активного блокнота, и область видна бейджем.
@@ -235,9 +298,8 @@ const TopicsPage = () => {
         reload: reloadSources,
     } = useSources(notebookId);
 
-    const folderDisclosure = useFolderDisclosure(searchTerm);
     // Просмотр документа тем же компонентом, что открывает ссылки в чате: файл
-    // читается поверх экрана и папка под ним остаётся раскрытой.
+    // читается поверх экрана, и папка под ним никуда не девается.
     const [viewerSource, setViewerSource] = useState(null);
 
     const [topics, setTopics] = useState([]);
@@ -346,11 +408,6 @@ const TopicsPage = () => {
         }
     }, [t]);
 
-    const totalDocuments = useMemo(
-        () => topics.reduce((sum, topic) => sum + Number(topic?.document_count || 0), 0),
-        [topics],
-    );
-
     const statusLabels = useMemo(() => ({
         ready: t('documents.status.ready'),
         pending: t('documents.status.pending'),
@@ -383,10 +440,22 @@ const TopicsPage = () => {
         };
     }, [folders, searchTerm, t]);
 
-    // Папки открыты сразу, пока документов немного или пока идёт поиск: в первом
-    // случае прятать нечего, во втором прятать нельзя — человек уже назвал, что
-    // ищет, и лишний клик по каждой папке был бы платой за собственный запрос.
-    const foldersOpenByDefault = isSearching || sources.length <= TOPIC_FOLDER_AUTO_OPEN_LIMIT;
+    // Открытую папку ищем среди ВСЕХ папок, а не среди найденных поиском: иначе
+    // запрос, под который в папке ничего не подошло, выглядел бы как исчезнувшая
+    // папка, и человек решил бы, что документы делись куда-то вместе с ней.
+    const openedFolder = useMemo(
+        () => (folderKey ? folders.find((folder) => folder.key === folderKey) || null : null),
+        [folderKey, folders],
+    );
+
+    // Содержимое открытой папки сужаем тем же правилом, что и список папок:
+    // спросили название темы — папка остаётся целой, спросили документ — в ней
+    // остаются совпавшие. Два разных правила на одном экране означали бы, что
+    // поиск работает по-разному до входа в папку и после.
+    const openedMatches = useMemo(
+        () => (openedFolder ? filterTopicFolders([openedFolder], searchTerm, t)[0] || null : null),
+        [openedFolder, searchTerm, t],
+    );
 
     const modelClusterCount = model?.cluster_count ?? model?.k;
     const metricFallback = t('topics.model.unknown');
@@ -404,15 +473,38 @@ const TopicsPage = () => {
             </div>
 
             <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                <div className="mb-4 flex items-center gap-3">
-                    <div className="rounded-xl bg-[#1f3a60]/10 p-2 text-[#1f3a60]">
-                        <Shapes className="h-5 w-5" />
+                {/* Шапка раздела принадлежит верхнему уровню. Войдя в папку,
+                    человек находится не в «распределении по темам», а в
+                    конкретной теме, и назвать место обязана она. */}
+                {!folderKey ? (
+                    <div className="mb-4 flex items-center gap-3">
+                        <div className="rounded-xl bg-[#1f3a60]/10 p-2 text-[#1f3a60]">
+                            <Shapes className="h-5 w-5" />
+                        </div>
+                        <div>
+                            <h2 className="text-lg font-semibold text-slate-900">{t('topics.title')}</h2>
+                            <p className="text-sm text-slate-500">{t('topics.description')}</p>
+                        </div>
                     </div>
-                    <div>
-                        <h2 className="text-lg font-semibold text-slate-900">{t('topics.title')}</h2>
-                        <p className="text-sm text-slate-500">{t('topics.description')}</p>
+                ) : null}
+
+                {/* Папки строит распределение, а их содержимое — список
+                    источников: его сбой не повод прятать сами папки, но и
+                    молчать о нём нельзя — иначе папка выглядит пустой без
+                    всякой причины. Баннер один на оба экрана, потому что причина
+                    одна и внутри папки она видна не меньше, чем снаружи. */}
+                {!isLoading && !loadError && isModelTrained && sourcesError ? (
+                    <div role="alert" className="mb-3 flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
+                        <span className="flex items-center gap-2 font-semibold">
+                            <AlertTriangle className="h-4 w-4" />
+                            {sourcesError}
+                        </span>
+                        <Button type="button" variant="outline" size="sm" className="self-start" onClick={reloadSources}>
+                            <RefreshCw className="h-4 w-4" />
+                            {t('documents.retry')}
+                        </Button>
                     </div>
-                </div>
+                ) : null}
 
                 {isLoading ? (
                     <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500">
@@ -436,45 +528,69 @@ const TopicsPage = () => {
                         <p className="text-sm font-semibold text-slate-700">{t('topics.notTrainedTitle')}</p>
                         <p className="mx-auto mt-1 max-w-md text-sm text-slate-500">{t('topics.notTrainedDescription')}</p>
                     </div>
+                ) : folderKey ? (
+                    /* Мы внутри папки. Ветка стоит выше проверки «нашлось ли
+                       что-нибудь»: под запросом, которому в папке ничего не
+                       соответствует, человека нельзя молча вынести наружу — он
+                       не просил уходить, он просил поискать. */
+                    openedFolder ? (
+                        <TopicFolderScreen
+                            folder={openedFolder}
+                            sources={openedMatches?.sources || []}
+                            backSearch={buildFolderSearch(searchParams, null)}
+                            isSearching={isSearching}
+                            hasMatches={Boolean(openedMatches)}
+                            locale={locale}
+                            t={t}
+                            statusLabels={statusLabels}
+                            sourcesLoading={sourcesLoading}
+                            onOpenDocument={setViewerSource}
+                        />
+                    ) : sourcesLoading ? (
+                        /* Особые папки («Без темы», «Ещё не размечены») собраны
+                           из самих документов, а не из распределения: пока
+                           список источников не пришёл, их ещё нет, и сказать
+                           «такой папки нет» значило бы соврать на полсекунды. */
+                        <div className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500">
+                            <Loader2 className="h-5 w-5 animate-spin" />
+                            {t('documents.loading')}
+                        </div>
+                    ) : (
+                        /* Адрес пережил папку: тему переразметили, сменилась
+                           область блокнота или ссылку прислали чужую. Тупик без
+                           выхода здесь был бы хуже самой пропажи. */
+                        <div className="flex flex-col items-center gap-3 rounded-xl bg-slate-50 p-8 text-center">
+                            <p className="text-sm text-slate-500">{t('topics.folders.missing')}</p>
+                            <Link
+                                to={{ search: buildFolderSearch(searchParams, null) }}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-[#1f3a60]/40 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/40"
+                            >
+                                <ArrowLeft className="h-4 w-4" />
+                                {t('topics.folders.back')}
+                            </Link>
+                        </div>
+                    )
                 ) : visibleFolders.length === 0 ? (
                     <p className="rounded-xl bg-slate-50 p-8 text-center text-sm text-slate-500">
                         {isSearching ? t('topics.noMatches') : t('topics.empty')}
                     </p>
                 ) : (
                     <>
-                        {/* Папки строит распределение, а содержимое — список
-                            источников: его сбой не повод прятать сами папки, но и
-                            молчать о нём нельзя — иначе раскрытая папка выглядит
-                            пустой без всякой причины. */}
-                        {sourcesError ? (
-                            <div role="alert" className="mb-3 flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
-                                <span className="flex items-center gap-2 font-semibold">
-                                    <AlertTriangle className="h-4 w-4" />
-                                    {sourcesError}
-                                </span>
-                                <Button type="button" variant="outline" size="sm" className="self-start" onClick={reloadSources}>
-                                    <RefreshCw className="h-4 w-4" />
-                                    {t('documents.retry')}
-                                </Button>
-                            </div>
-                        ) : null}
-
                         {filledFolders.length === 0 ? (
                             <p className="rounded-xl bg-slate-50 p-8 text-center text-sm text-slate-500">{t('topics.empty')}</p>
                         ) : (
-                            <ul className="space-y-2">
+                            /* Два столбца на широком экране: восемнадцать тем в
+                               одну колонку — это прокрутка ради списка, который
+                               целиком помещается рядом. Ниже колонка одна:
+                               названия тем длинные, и делить под них ширину
+                               значит рвать каждое на три строки. */
+                            <ul className="grid gap-2 lg:grid-cols-2">
                                 {filledFolders.map((folder) => (
-                                    <TopicFolderRow
+                                    <TopicFolderLink
                                         key={folder.key}
                                         folder={folder}
-                                        isOpen={folderDisclosure.isOpen(folder.key, foldersOpenByDefault)}
-                                        onToggle={(open) => folderDisclosure.setOpen(folder.key, open)}
-                                        totalDocuments={totalDocuments}
-                                        locale={locale}
+                                        search={buildFolderSearch(searchParams, folder.key)}
                                         t={t}
-                                        statusLabels={statusLabels}
-                                        sourcesLoading={sourcesLoading}
-                                        onOpenDocument={setViewerSource}
                                     />
                                 ))}
                             </ul>
@@ -520,8 +636,10 @@ const TopicsPage = () => {
             </section>
 
             {/* Карточка модели показывается только когда модель есть: без неё
-                раскрытие обещало бы сведения, которых нет, а сказано о них уже выше. */}
-            {!isLoading && isModelTrained ? (
+                раскрытие обещало бы сведения, которых нет, а сказано о них уже
+                выше. Внутри папки её нет вовсе: там речь о документах одной
+                темы, и сведения обо всей модели — соседний разговор. */}
+            {!isLoading && isModelTrained && !folderKey ? (
                 <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex flex-wrap items-center gap-3">
