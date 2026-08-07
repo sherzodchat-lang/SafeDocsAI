@@ -97,3 +97,10 @@ SafeDocsAI/backend/data/topics_dataset/
 # на вопрос, откуда взялись цифры.
 SafeDocsAI/backend/data/topics_tj/data/
 SafeDocsAI/backend/data/topics_tj/embeddings.npz
+
+# Корпус для проверки системы: настоящие законы Таджикистана (mmk.tj) и статьи
+# Википедии. В репозиторий не кладётся — это чужие документы, а не наш код, и
+# сорок мегабайт PDF в истории git не нужны никому. Воспроизводится скриптами:
+# см. backend/data/test_corpus/*/manifest.json — там у каждого файла адрес,
+# ревизия и лицензия.
+SafeDocsAI/backend/data/test_corpus/
