@@ -24,6 +24,24 @@ import { presentationsService } from '../services/presentationsService';
 const LIST_PAGE_LIMIT = 50;
 
 /**
+ * Потолок числа попыток опроса — свой, а не умолчание useIndexingPoll (~10
+ * минут).
+ *
+ * Умолчание хука посчитано под индексацию источника, а генерация колоды дольше
+ * по построению: замер приёмки — 444 секунды на 15 слайдов, и это ПОСЛЕ
+ * очереди, которая общая на систему и берёт задачи по одной, так что перед
+ * заказом может стоять несколько чужих. С умолчанием опрос умирал посреди
+ * здоровой генерации, карточка застывала на последнем проценте, и возобновить
+ * наблюдение было нечем, кроме перезагрузки страницы.
+ *
+ * 600 попыток по 4 секунды — 40 минут видимой вкладки (скрытая попытки не
+ * тратит): несколько чужих колод в очереди плюс своя с запасом. Роль потолка
+ * та же, что у умолчания, — не дёргать сервер вечно из-за задачи, застрявшей
+ * навсегда, — и совсем снимать его поэтому нельзя.
+ */
+const POLL_MAX_ATTEMPTS = 600;
+
+/**
  * Раздел презентаций блокнота: заказ и история заказов.
  *
  * Роль проверяется маршрутом (RequireContentAccess в App.jsx), поэтому здесь её
@@ -64,6 +82,13 @@ const NotebookPresentationsPage = () => {
      * не попадёт в состояние размонтированного экрана.
      */
     const lastRequestIdRef = useRef(0);
+
+    // Куда прокручивать после принятого заказа — к сообщению «заказ принят».
+    // Нужно это не форме (она и так рядом), а повторному заказу из списка:
+    // кнопка «Заказать заново» может стоять глубоко в истории, и без прокрутки
+    // и подтверждение, и новая карточка «В очереди» появлялись бы за верхней
+    // границей экрана — то есть молча.
+    const createdMessageRef = useRef(null);
 
     const loadTemplates = useCallback(async () => {
         try {
@@ -154,7 +179,7 @@ const NotebookPresentationsPage = () => {
      * в очереди навсегда. При уходе со страницы эффект хука снимает таймер, а
      * ответ уже отправленного запроса отсекается по lastRequestIdRef.
      */
-    useIndexingPoll(hasPresentationsInProgress(items), pollPresentations);
+    useIndexingPoll(hasPresentationsInProgress(items), pollPresentations, { maxAttempts: POLL_MAX_ATTEMPTS });
 
     const handleCreate = useCallback(async (payload) => {
         if (!notebookId || isCreating) return;
@@ -179,6 +204,13 @@ const NotebookPresentationsPage = () => {
             setCreatedMessage(position != null
                 ? t('presentations.createdQueuedPosition', { position })
                 : t('presentations.createdQueued'));
+
+            // Прокрутка после отрисовки сообщения (см. createdMessageRef), и
+            // 'nearest', а не 'start': если сообщение уже на экране, дёргать
+            // страницу незачем.
+            requestAnimationFrame(() => {
+                createdMessageRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            });
         } catch (error) {
             console.error('Failed to create presentation:', error);
             setCreateError(resolveApiErrorMessage(error, t, 'presentations.createFailed'));
@@ -214,7 +246,7 @@ const NotebookPresentationsPage = () => {
             {/* Результат отправки объявляется отдельно от формы: пользователь,
                 работающий с клавиатуры, остаётся на кнопке и иначе не узнаёт,
                 что заказ принят. */}
-            <div role="status" aria-live="polite">
+            <div ref={createdMessageRef} role="status" aria-live="polite">
                 {createdMessage ? (
                     <p className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
                         {createdMessage}
@@ -230,6 +262,10 @@ const NotebookPresentationsPage = () => {
                 error={listError}
                 onRetry={handleRetry}
                 onDeleted={handleDeleted}
+                // Повторный заказ из списка идёт тем же путём, что заказ из
+                // формы: одна точка постановки в очередь, одно место для
+                // ошибок и подтверждения.
+                onReorder={handleCreate}
             />
         </div>
     );

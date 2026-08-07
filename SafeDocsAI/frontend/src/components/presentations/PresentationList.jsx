@@ -2,6 +2,7 @@ import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
     AlertTriangle,
     Download,
+    ExternalLink,
     FileText,
     Loader2,
     Presentation,
@@ -16,6 +17,7 @@ import { useLocale } from '../../i18n';
 import { resolveApiErrorMessage } from '../../lib/apiError';
 import { formatLocaleDate } from '../../lib/locale';
 import {
+    hasPresentationsInProgress,
     resolvePresentationErrorMessage,
     resolvePresentationStatus,
     resolveProgress,
@@ -63,10 +65,12 @@ const resolveDownloadFilename = (response, presentationId) => {
 /**
  * Список заказанных презентаций.
  *
- * Данные и опрос живут выше (NotebookPresentationsPage): здесь только показ,
- * скачивание и удаление. Ошибки этих двух действий держатся отдельно от ошибки
- * загрузки списка и друг от друга — неудачное скачивание не должно прятать
- * список, а неудачное удаление обязано остаться в диалоге, где его ждут.
+ * Данные и опрос живут выше (NotebookPresentationsPage): здесь показ, открытие,
+ * скачивание, удаление и повторный заказ неудавшейся колоды (последний — тоже
+ * через страницу, onReorder: заказ есть заказ, и точка постановки в очередь
+ * обязана остаться одна). Ошибки действий держатся отдельно от ошибки загрузки
+ * списка и друг от друга — неудачное скачивание не должно прятать список, а
+ * неудачное удаление обязано остаться в диалоге, где его ждут.
  */
 const PresentationList = ({
     items,
@@ -76,6 +80,7 @@ const PresentationList = ({
     error,
     onRetry,
     onDeleted,
+    onReorder,
 }) => {
     const { locale, t } = useLocale();
 
@@ -83,7 +88,12 @@ const PresentationList = ({
     const [isDeleting, setIsDeleting] = useState(false);
     const [deleteError, setDeleteError] = useState('');
     const [downloadingId, setDownloadingId] = useState(null);
-    const [downloadError, setDownloadError] = useState('');
+    const [openingId, setOpeningId] = useState(null);
+    const [reorderingId, setReorderingId] = useState(null);
+    // Одна строка на обе неудачи с файлом (скачать и открыть): оба действия
+    // ходят за одним и тем же blob'ом, и два одновременных сообщения об одном
+    // отказе только спорили бы между собой. Текст у каждой попытки свой.
+    const [fileActionError, setFileActionError] = useState('');
 
     const deleteDialogRef = useRef(null);
     const deleteCancelRef = useRef(null);
@@ -103,30 +113,126 @@ const PresentationList = ({
 
     useModalDialog(Boolean(deleteTarget), closeDeleteDialog, deleteDialogRef, deleteCancelRef);
 
+    // Скачивание через blob, а не ссылкой: ручка закрыта сессией, и прямой
+    // переход по адресу ушёл бы мимо axios-клиента — без обновления протухшего
+    // токена и без единой обработки ошибок.
+    const triggerDownload = (objectUrl, filename) => {
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    };
+
+    // Оба файловых действия ждут одно другое: за blob'ом ходят они по одной и
+    // той же ручке, и две параллельные загрузки одного файла — двойная плата
+    // за то же самое.
+    const isFileActionBusy = downloadingId != null || openingId != null;
+
     const handleDownload = async (presentation) => {
-        if (downloadingId != null) return;
+        if (isFileActionBusy) return;
 
         try {
             setDownloadingId(presentation.id);
-            setDownloadError('');
+            setFileActionError('');
             const response = await presentationsService.downloadBlob(presentation.id);
 
-            // Скачивание через blob, а не ссылкой: ручка закрыта сессией, и
-            // прямой переход по адресу ушёл бы мимо axios-клиента — без
-            // обновления протухшего токена и без единой обработки ошибок.
             const objectUrl = URL.createObjectURL(response.data);
-            const link = document.createElement('a');
-            link.href = objectUrl;
-            link.download = resolveDownloadFilename(response, presentation.id);
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
+            triggerDownload(objectUrl, resolveDownloadFilename(response, presentation.id));
             URL.revokeObjectURL(objectUrl);
         } catch (downloadFailure) {
             console.error('Failed to download presentation:', downloadFailure);
-            setDownloadError(resolveApiErrorMessage(downloadFailure, t, 'presentations.downloadFailed'));
+            setFileActionError(resolveApiErrorMessage(downloadFailure, t, 'presentations.downloadFailed'));
         } finally {
             setDownloadingId(null);
+        }
+    };
+
+    /**
+     * «Открыть» — колода во вкладке браузера, без похода в «Загрузки».
+     *
+     * Готовую презентацию сначала смотрят («то ли вышло?») и только потом
+     * скачивают или заказывают заново — а до этой кнопки единственным способом
+     * посмотреть было скачать файл и открыть его руками.
+     *
+     * Вкладка открывается СИНХРОННО, до запроса: право на новое окно браузер
+     * выдаёт только внутри обработчика клика, а после await оно уже потрачено —
+     * window.open вернул бы null у любого блокировщика всплывающих окон.
+     * Пустая вкладка на секунды загрузки — честная цена за то, чтобы открытие
+     * работало, а не «иногда работало».
+     *
+     * Тип файла до запроса неизвестен: API не отдаёт расширение, а на дисках
+     * живут и .pdf нового рендерера, и .pptx прежнего. Поэтому решение
+     * принимается по Content-Type уже полученного blob'а: PDF уходит во
+     * вкладку, всё остальное — обычным скачиванием (показывать .pptx вкладке
+     * нечем, а «ничего не произошло» хуже, чем файл в «Загрузках»).
+     *
+     * Object URL открытой вкладки НЕ освобождается намеренно: revoke сломал бы
+     * ещё открытый просмотр (PDF-просмотрщик дочитывает документ лениво).
+     * Утечка ограничена числом явных нажатий «Открыть» и живёт до перезагрузки
+     * страницы — в отличие от превью галереи, где blob'ы плодились бы каждым
+     * обновлением списка и потому освобождаются обязательно.
+     */
+    const handleOpen = async (presentation) => {
+        if (isFileActionBusy) return;
+
+        const previewWindow = window.open('', '_blank');
+
+        try {
+            setOpeningId(presentation.id);
+            setFileActionError('');
+            const response = await presentationsService.downloadBlob(presentation.id);
+            const objectUrl = URL.createObjectURL(response.data);
+
+            if (previewWindow && String(response.data?.type || '').includes('pdf')) {
+                previewWindow.location.href = objectUrl;
+            } else {
+                previewWindow?.close();
+                triggerDownload(objectUrl, resolveDownloadFilename(response, presentation.id));
+                URL.revokeObjectURL(objectUrl);
+            }
+        } catch (openFailure) {
+            console.error('Failed to open presentation:', openFailure);
+            // Пустую вкладку надо закрыть самим: осиротевший about:blank
+            // выглядит как зависший просмотр, а не как отказ.
+            previewWindow?.close();
+            setFileActionError(resolveApiErrorMessage(openFailure, t, 'presentations.openFailed'));
+        } finally {
+            setOpeningId(null);
+        }
+    };
+
+    /**
+     * Повторный заказ с параметрами неудавшейся презентации.
+     *
+     * Все тексты отказов советуют «закажите снова» — но без этой кнопки совет
+     * означал вспоминать и выставлять четыре параметра руками. Здесь они
+     * берутся из самой карточки; проверять их заново не нужно: сервер всё
+     * равно ответит своим кодом, если, например, шаблон сняли релизом.
+     *
+     * Пока в блокноте есть активный заказ, кнопка выключена с объяснением —
+     * тот же довод, что у выключенного удаления: сервер ответил бы 409
+     * generation_in_progress, а отказ на разрешённую с виду кнопку — сюрприз.
+     */
+    const reorderBlocked = reorderingId != null || hasPresentationsInProgress(items);
+
+    const handleReorder = async (presentation) => {
+        if (!onReorder || reorderBlocked) return;
+
+        try {
+            setReorderingId(presentation.id);
+            // Ошибку заказа показывает форма (createError страницы): исход
+            // повторного заказа — тот же исход заказа, и второго места для
+            // него не нужно.
+            await onReorder({
+                template_key: presentation.template_key,
+                language: presentation.language,
+                slide_count: presentation.slide_count,
+                description: presentation.description || '',
+            });
+        } finally {
+            setReorderingId(null);
         }
     };
 
@@ -163,7 +269,10 @@ const PresentationList = ({
 
         if (status === 'ready') return t('presentations.status.ready');
 
-        return t('presentations.status.error', { reason: resolvePresentationErrorMessage(presentation, t) });
+        // В бейдже — только слово «Ошибка»: причина целиком лежит красным
+        // блоком в карточке, и пилюля с тем же предложением растягивалась на
+        // всю ширину, повторяя текст дважды.
+        return t('presentations.status.error');
     };
 
     return (
@@ -195,9 +304,9 @@ const PresentationList = ({
                 </div>
             ) : null}
 
-            {downloadError ? (
+            {fileActionError ? (
                 <p role="alert" className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
-                    {downloadError}
+                    {fileActionError}
                 </p>
             ) : null}
 
@@ -224,6 +333,7 @@ const PresentationList = ({
                             || presentation.template_key;
                         const errorMessage = resolvePresentationErrorMessage(presentation, t);
                         const isGenerating = status === 'generating';
+                        const isInProgress = isGenerating || status === 'queued';
 
                         return (
                             <li
@@ -262,6 +372,29 @@ const PresentationList = ({
                                     </p>
                                 ) : null}
 
+                                {isGenerating ? (
+                                    /* Полоса — только картинка к проценту: число уже
+                                       объявляет бейдж статуса (role="status"), и второй
+                                       говорящий элемент читал бы то же самое дважды. */
+                                    <div aria-hidden="true" className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                                        <div
+                                            className="h-full rounded-full bg-amber-500 transition-[width] duration-700 ease-out"
+                                            style={{ width: `${resolveProgress(presentation.progress)}%` }}
+                                        />
+                                    </div>
+                                ) : null}
+
+                                {isInProgress ? (
+                                    /* Минуты ожидания надо назвать заранее: без этой
+                                       строки «Генерируется 0%» через полминуты читается
+                                       как «зависло», и активных заказов у блокнота по
+                                       построению не больше одного — подсказка в списке
+                                       не размножается. */
+                                    <p className="mt-2 text-xs leading-5 text-slate-400">
+                                        {t('presentations.inProgressHint')}
+                                    </p>
+                                ) : null}
+
                                 {errorMessage ? (
                                     /* error_text остаётся и подсказкой при наведении:
                                        в тексте он появляется только когда код неизвестен
@@ -277,10 +410,16 @@ const PresentationList = ({
 
                                 <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
                                     <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
-                                        <span className="inline-flex items-center gap-1.5">
-                                            <FileText className="h-3.5 w-3.5" />
-                                            {formatSize(presentation.file_size, t)}
-                                        </span>
+                                        {/* Размер — только когда файл существует. file_size
+                                            до готовности — null, а formatSize превращает
+                                            null в «0 Б»: ноль байт у колоды, которой ещё
+                                            нет, — неправда, а не размер. */}
+                                        {presentation.file_size != null ? (
+                                            <span className="inline-flex items-center gap-1.5">
+                                                <FileText className="h-3.5 w-3.5" />
+                                                {formatSize(presentation.file_size, t)}
+                                            </span>
+                                        ) : null}
                                         <span>
                                             {t('presentations.createdAt', {
                                                 date: formatLocaleDate(presentation.created_at, locale, {
@@ -295,18 +434,48 @@ const PresentationList = ({
                                     </div>
 
                                     <div className="flex flex-wrap items-center gap-2">
-                                        {/* Скачивание только у готовой: у остальных файла
-                                            на диске ещё нет, и кнопка вела бы в 409/404. */}
+                                        {/* Открытие и скачивание только у готовой: у
+                                            остальных файла на диске ещё нет, и кнопки
+                                            вели бы в 409/404. */}
                                         {status === 'ready' ? (
+                                            <>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() => handleOpen(presentation)}
+                                                    isLoading={openingId === presentation.id}
+                                                >
+                                                    <ExternalLink className="h-4 w-4" />
+                                                    {t('presentations.open')}
+                                                </Button>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() => handleDownload(presentation)}
+                                                    isLoading={downloadingId === presentation.id}
+                                                >
+                                                    <Download className="h-4 w-4" />
+                                                    {t('presentations.download')}
+                                                </Button>
+                                            </>
+                                        ) : null}
+
+                                        {status === 'error' && onReorder ? (
                                             <Button
                                                 type="button"
                                                 variant="outline"
                                                 size="sm"
-                                                onClick={() => handleDownload(presentation)}
-                                                isLoading={downloadingId === presentation.id}
+                                                disabled={reorderBlocked}
+                                                title={reorderBlocked && reorderingId !== presentation.id
+                                                    ? t('presentations.orderAgainDisabledInProgress')
+                                                    : undefined}
+                                                isLoading={reorderingId === presentation.id}
+                                                onClick={() => handleReorder(presentation)}
                                             >
-                                                <Download className="h-4 w-4" />
-                                                {t('presentations.download')}
+                                                <RefreshCw className="h-4 w-4" />
+                                                {t('presentations.orderAgain')}
                                             </Button>
                                         ) : null}
 
