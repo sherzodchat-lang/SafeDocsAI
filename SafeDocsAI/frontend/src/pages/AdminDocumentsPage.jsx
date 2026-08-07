@@ -3,7 +3,6 @@ import { useSearchParams } from 'react-router-dom';
 import {
     AlertTriangle,
     CheckCircle2,
-    ChevronDown,
     ChevronLeft,
     ChevronRight,
     Clock,
@@ -46,17 +45,7 @@ const STATUS_ORDER = ['all', 'ready', 'pending', 'indexing', 'error'];
 const PAGE_SIZE_OPTIONS = [10, 25, 50];
 const DEFAULT_PAGE_SIZE = 25;
 
-// Раскрытие плотного слоя запоминаем: тому, кому фильтры и страницы нужны
-// каждый день, иначе пришлось бы открывать их при каждом заходе. Значение по
-// умолчанию — свёрнуто, поэтому отсутствие ключа означает «закрыто».
-const DETAILS_STORAGE_KEY = 'knowledgeai.sources.detailsOpen';
-
-const readDetailsPreference = () => {
-    if (typeof window === 'undefined') return false;
-    return localStorage.getItem(DETAILS_STORAGE_KEY) === 'true';
-};
-
-const AdminDocumentsPage = ({ notebookId }) => {
+const AdminDocumentsPage = () => {
     const { locale, t } = useLocale();
     const [isUploading, setIsUploading] = useState(false);
     const [uploadError, setUploadError] = useState('');
@@ -66,7 +55,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
     const [sortOrder, setSortOrder] = useState('desc');
     const [page, setPage] = useState(1);
     const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-    const [detailsOpen, setDetailsOpen] = useState(readDetailsPreference);
     const [deleteTarget, setDeleteTarget] = useState(null);
     const [isDeleting, setIsDeleting] = useState(false);
     const [deleteError, setDeleteError] = useState('');
@@ -92,32 +80,16 @@ const AdminDocumentsPage = ({ notebookId }) => {
     const deleteDialogRef = useRef(null);
     const deleteCancelRef = useRef(null);
 
-    // Внутри блокнота страница работает панелью: область задана маршрутом, её имя
-    // уже стоит в шапке блокнота, поэтому ни бейджа, ни запроса за именем там нет.
-    const isNotebookPanel = notebookId != null;
-    // Самостоятельная страница берёт область из того же активного блокнота, что и
-    // глобальный чат. Раньше список молча сужался по нему; теперь область видна в
-    // бейдже и снимается одной кнопкой, а сам фильтр сохранён.
+    // Страница берёт область из того же активного блокнота, что и глобальный
+    // чат: сюда же ведёт ссылка из полосы источников в «Обзоре» блокнота, и
+    // сужение обязано быть видимым — бейджем со сбросом, а не молчаливым
+    // фильтром, из-за которого список «неполон без объяснения».
     const {
         notebookId: effectiveNotebookId,
         notebookName,
         canResetScope,
         resetScope,
-    } = useActiveNotebookScope(notebookId, { withNotebookName: !isNotebookPanel });
-
-    // Внутри блокнота плотный слой (фильтры, сортировка, страницы, колонки
-    // «Язык»/«Размер»/«Дата», просмотр фрагментов) уходит под «Подробности» —
-    // одинаково для всех ролей. Отдельная страница «Все источники» остаётся
-    // рабочим местом администратора и открыта целиком.
-    const showDetails = !isNotebookPanel || detailsOpen;
-
-    const toggleDetails = useCallback(() => {
-        setDetailsOpen((prev) => {
-            const next = !prev;
-            localStorage.setItem(DETAILS_STORAGE_KEY, String(next));
-            return next;
-        });
-    }, []);
+    } = useActiveNotebookScope(undefined);
 
     // Заливка приходит из общей таблицы: тот же бейдж рисует панель блокнота.
     const statusMeta = useMemo(() => ({
@@ -364,6 +336,18 @@ const AdminDocumentsPage = ({ notebookId }) => {
         setSearchParams(params, { replace: true });
     }, [searchParams, setSearchParams]);
 
+    // Пустоту, сделанную фильтрами, снимаем одним действием. Сит три — статус,
+    // поиск из шапки и тема, — и заставлять угадывать, которое из них съело
+    // список, значит чинить экран перебором именно тогда, когда он «сломался».
+    const resetListFilters = useCallback(() => {
+        setStatusFilter('all');
+        const params = new URLSearchParams(searchParams);
+        params.delete('q');
+        params.delete(TOPIC_PARAM);
+        params.delete(TOPIC_LABEL_PARAM);
+        setSearchParams(params, { replace: true });
+    }, [searchParams, setSearchParams]);
+
     const sortedDocuments = useMemo(() => {
         const sorted = [...filteredDocuments];
         sorted.sort((a, b) => {
@@ -409,10 +393,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
         ? t('documents.loading')
         : loadError || t('documents.listStatus', { count: sortedDocuments.length });
 
-    // Свёрнутое состояние оставляет имя, статус и действия; язык, дата и размер
-    // уходят под «Подробности» вместе с остальным плотным слоем.
-    const columnCount = showDetails ? 6 : 3;
-
     const openDeleteDialog = (doc) => {
         setDeleteError('');
         setDeleteTarget({ id: doc.id, name: doc.name });
@@ -424,68 +404,71 @@ const AdminDocumentsPage = ({ notebookId }) => {
                 сужает список и одновременно задаёт, куда попадёт новый источник.
                 Рядом — тема, если пришли по ней: обе области сужают один список,
                 и показывать их порознь значило бы прятать одну из них. */}
-            {!isNotebookPanel || topicClusterIndex != null ? (
-                <div className="flex flex-wrap items-center gap-2">
-                    {!isNotebookPanel ? (
-                        <NotebookScopeBadge
-                            notebookId={effectiveNotebookId}
-                            notebookName={notebookName}
-                            canReset={canResetScope}
-                            onReset={resetScope}
-                            resetTitle={t('documents.scopeResetTitle')}
-                        />
-                    ) : null}
+            <div className="flex flex-wrap items-center gap-2">
+                <NotebookScopeBadge
+                    notebookId={effectiveNotebookId}
+                    notebookName={notebookName}
+                    canReset={canResetScope}
+                    onReset={resetScope}
+                    resetTitle={t('documents.scopeResetTitle')}
+                />
 
-                    {topicClusterIndex != null ? (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-[#1f3a60]/10 px-3 py-1 text-xs font-semibold text-[#1f3a60]">
-                            <Tag className="h-3.5 w-3.5" />
-                            {t('documents.topic', { value: topicFilterLabel })}
-                            <button
-                                type="button"
-                                onClick={resetTopicFilter}
-                                title={t('documents.topicFilterReset')}
-                                aria-label={t('documents.topicFilterReset')}
-                                className="rounded-full p-0.5 transition hover:bg-[#1f3a60]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
-                            >
-                                <X className="h-3 w-3" />
-                            </button>
-                        </span>
-                    ) : null}
-                </div>
-            ) : null}
+                {topicClusterIndex != null ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-[#1f3a60]/10 px-3 py-1 text-xs font-semibold text-[#1f3a60]">
+                        <Tag className="h-3.5 w-3.5" />
+                        {t('documents.topic', { value: topicFilterLabel })}
+                        <button
+                            type="button"
+                            onClick={resetTopicFilter}
+                            title={t('documents.topicFilterReset')}
+                            aria-label={t('documents.topicFilterReset')}
+                            className="rounded-full p-0.5 transition hover:bg-[#1f3a60]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                        >
+                            <X className="h-3 w-3" />
+                        </button>
+                    </span>
+                ) : null}
+            </div>
 
-            <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
-                <div
-                    onDragEnter={handleDragEnter}
-                    onDragLeave={handleDragLeave}
-                    onDragOver={handleDragOver}
-                    onDrop={handleDrop}
-                    className={cn(
-                        'rounded-2xl border-2 border-dashed p-6 text-center transition-colors duration-200',
-                        isDragActive
-                            ? 'border-[#1f3a60] bg-[#1f3a60]/5'
-                            : 'border-slate-300 bg-slate-50',
-                    )}
-                >
+            {/* Загрузка — полоса, а не витрина. Сюда приходят смотреть список, а
+                высокий баннер с иконкой и заголовком каждый раз отодвигал его за
+                край экрана. Целью для перетаскивания осталась вся полоса: ширины
+                у неё столько же, потеряна только пустая высота. */}
+            <section
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+                className={cn(
+                    'rounded-2xl border-2 border-dashed px-4 py-3 shadow-sm transition-colors duration-200 sm:px-5',
+                    isDragActive
+                        ? 'border-[#1f3a60] bg-[#1f3a60]/5'
+                        : 'border-slate-300 bg-white',
+                )}
+            >
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
                     <div className={cn(
-                        'mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full transition-colors duration-200',
+                        'flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors duration-200',
                         isDragActive
                             ? 'bg-[#1f3a60] text-white'
                             : 'bg-[#1f3a60]/10 text-[#1f3a60]',
                     )}>
                         {/* Захват файла показываем ростом иконки, а не подскоком:
                             пружина ничего не сообщает и мешает целиться в зону. */}
-                        <CloudUpload className={cn('h-6 w-6 transition-transform duration-200 ease-out', isDragActive && 'scale-110')} />
+                        <CloudUpload className={cn('h-5 w-5 transition-transform duration-200 ease-out', isDragActive && 'scale-110')} />
                     </div>
-                    <h3 className="text-lg font-semibold text-slate-800">
-                        {isDragActive ? t('documents.dropActive') : t('documents.dropIdle')}
-                    </h3>
-                    <p className="mt-1 text-sm text-slate-500">{t('documents.supportedFormats')}</p>
+                    {/* min-w у текста ставит точку переноса: на узком экране вниз
+                        уходит кнопка целиком, а не буквы из подписи по одной. */}
+                    <div className="min-w-[11rem] flex-1">
+                        <p className="text-sm font-semibold text-slate-800">
+                            {isDragActive ? t('documents.dropActive') : t('documents.dropIdle')}
+                        </p>
+                        <p className="mt-0.5 text-xs text-slate-500">{t('documents.supportedFormats')}</p>
+                    </div>
 
                     {/* Одна кнопка на всё действие: выбор файла сразу запускает
                         загрузку, поэтому она же и показывает её ход. */}
-                    <div className="mt-4 flex flex-wrap items-center justify-center gap-3" aria-live="polite">
+                    <div className="shrink-0" aria-live="polite">
                         {/* Кнопка, а не label: скрытый input недоступен с клавиатуры, label не фокусируется. */}
                         <button
                             type="button"
@@ -514,58 +497,16 @@ const AdminDocumentsPage = ({ notebookId }) => {
                             onChange={(event) => applyFileSelection(Array.from(event.target.files || []))}
                         />
                     </div>
-
-                    {uploadError && (
-                        <p role="alert" className="mt-3 text-sm font-semibold text-red-600">{uploadError}</p>
-                    )}
                 </div>
+
+                {uploadError && (
+                    <p role="alert" className="mt-2 text-sm font-semibold text-red-600">{uploadError}</p>
+                )}
             </section>
 
             <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                <div className="border-b border-slate-200 px-5 py-4">
-                    {isNotebookPanel ? (
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                            <button
-                                type="button"
-                                onClick={toggleDetails}
-                                aria-expanded={detailsOpen}
-                                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-300 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-1"
-                            >
-                                <ChevronDown className={cn('h-4 w-4 transition-transform duration-150', detailsOpen && 'rotate-180')} />
-                                {t('documents.details')}
-                            </button>
-
-                            {/* Свёрнутый блок не должен читаться как «сломалось»: рядом
-                                сказано словами, что внутри. Применённый фильтр и неполная
-                                страница вынесены наружу — иначе список молча неполон, а
-                                причины на экране нет. */}
-                            {!detailsOpen ? (
-                                <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
-                                    {statusFilter !== 'all' ? (
-                                        <span className="inline-flex items-center gap-1.5 rounded-full bg-[#1f3a60]/10 px-2.5 py-1 text-[#1f3a60]">
-                                            {t('documents.activeFilter', { value: statusMeta[statusFilter].label })}
-                                            <button
-                                                type="button"
-                                                onClick={() => setStatusFilter('all')}
-                                                title={t('documents.activeFilterReset')}
-                                                aria-label={t('documents.activeFilterReset')}
-                                                className="rounded-full p-0.5 transition hover:bg-[#1f3a60]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
-                                            >
-                                                <X className="h-3 w-3" />
-                                            </button>
-                                        </span>
-                                    ) : null}
-                                    {pageCount > 1 ? (
-                                        <span>{t('documents.pagination.range', { from: rangeStart, to: rangeEnd, total: sortedDocuments.length })}</span>
-                                    ) : null}
-                                    <span className="font-normal text-slate-400">{t('documents.detailsHint')}</span>
-                                </div>
-                            ) : null}
-                        </div>
-                    ) : null}
-
-                    {showDetails ? (
-                    <div className={cn('flex flex-wrap items-center justify-between gap-3', isNotebookPanel && 'mt-4')}>
+                <div className="border-b border-slate-200 px-4 py-4 sm:px-5">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                         <div className="flex flex-wrap gap-2" role="group" aria-label={t('documents.statusFilterLabel')}>
                             {STATUS_ORDER.map((status) => (
                                 <button
@@ -607,7 +548,6 @@ const AdminDocumentsPage = ({ notebookId }) => {
                             </select>
                         </div>
                     </div>
-                    ) : null}
                 </div>
 
                 {/* Единственный источник голосового статуса списка для скринридера. */}
@@ -633,191 +573,231 @@ const AdminDocumentsPage = ({ notebookId }) => {
                     </p>
                 )}
 
-                <div className="overflow-x-auto">
-                    {/* Свёрнутый вид — три колонки, и таблице больше не нужна ширина
-                        под шесть: горизонтальная прокрутка появлялась даже там, где
-                        показывать нечего. */}
-                    <table className={cn('w-full text-left', showDetails ? 'min-w-[820px]' : 'min-w-[420px]')}>
-                        <thead className="bg-slate-50 text-xs uppercase tracking-[0.08em] text-slate-500">
-                            <tr>
-                                <th className="px-5 py-3 font-semibold">{t('documents.table.fileName')}</th>
-                                {showDetails ? (
-                                    <>
-                                        <th className="px-5 py-3 font-semibold">{t('documents.table.language')}</th>
-                                        <th className="px-5 py-3 font-semibold">{t('documents.table.uploadedAt')}</th>
-                                        <th className="px-5 py-3 font-semibold">{t('documents.table.size')}</th>
-                                    </>
-                                ) : null}
-                                <th className="px-5 py-3 font-semibold">{t('documents.table.status')}</th>
-                                <th className="px-5 py-3 text-right font-semibold">{t('documents.table.actions')}</th>
-                            </tr>
-                        </thead>
+                {/* Таблица никогда не прокручивается вбок: на узком экране статус
+                    с удалением раньше жили за правым краем, и до них нужно было
+                    догадаться доскроллить. Вместо прокрутки колонки складываются:
+                    ниже xl язык, дата и размер уходят строкой под имя файла, ниже
+                    sm туда же переезжает статус.
 
-                        <tbody>
-                            {isLoading ? (
-                                <tr>
-                                    <td colSpan={columnCount} className="px-5 py-12 text-center text-slate-500">
-                                        <div className="inline-flex items-center gap-2">
-                                            <Loader2 className="h-5 w-5 animate-spin" />
-                                            {t('documents.loading')}
-                                        </div>
-                                    </td>
-                                </tr>
-                            ) : loadError && documents.length === 0 ? (
-                                <tr>
-                                    <td colSpan={columnCount} className="px-5 py-12">
-                                        {/* Сбой загрузки: явно отличаем от пустой базы и даём повторить. */}
-                                        <div role="alert" className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-xl bg-red-50 p-6 text-center">
-                                            <AlertTriangle className="h-6 w-6 text-red-600" />
-                                            <p className="text-sm font-semibold text-red-700">{loadError}</p>
-                                            <Button type="button" variant="outline" onClick={retryFetchDocuments}>
-                                                <RefreshCw className="h-4 w-4" />
-                                                {t('documents.retry')}
+                    table-fixed обязателен: при авто-раскладке минимальную ширину
+                    колонки диктует самое длинное «слово», а имена файлов — это
+                    одно слово на полэкрана, и break-words в этом расчёте не
+                    участвует — колонка действий выталкивалась за обрез. Узким
+                    колонкам ширина задана явно, всё остальное достаётся имени. */}
+                <table className="w-full table-fixed text-left">
+                    <thead className="bg-slate-50 text-xs uppercase tracking-[0.08em] text-slate-500">
+                        <tr>
+                            <th className="px-4 py-3 font-semibold sm:px-5">{t('documents.table.fileName')}</th>
+                            <th className="hidden w-24 px-5 py-3 font-semibold xl:table-cell">{t('documents.table.language')}</th>
+                            <th className="hidden w-36 px-5 py-3 font-semibold xl:table-cell">{t('documents.table.uploadedAt')}</th>
+                            <th className="hidden w-28 px-5 py-3 font-semibold xl:table-cell">{t('documents.table.size')}</th>
+                            <th className="hidden w-44 px-5 py-3 font-semibold sm:table-cell">{t('documents.table.status')}</th>
+                            <th className="w-28 px-4 py-3 text-right font-semibold sm:px-5">{t('documents.table.actions')}</th>
+                        </tr>
+                    </thead>
+
+                    <tbody>
+                        {isLoading ? (
+                            <tr>
+                                {/* colSpan «с запасом»: скрытые на узкой ширине колонки
+                                    браузер отбрасывает сам, и одно число честнее, чем
+                                    пересчёт колонок по брейкпоинтам. */}
+                                <td colSpan={6} className="px-5 py-12 text-center text-slate-500">
+                                    <div className="inline-flex items-center gap-2">
+                                        <Loader2 className="h-5 w-5 animate-spin" />
+                                        {t('documents.loading')}
+                                    </div>
+                                </td>
+                            </tr>
+                        ) : loadError && documents.length === 0 ? (
+                            <tr>
+                                <td colSpan={6} className="px-5 py-12">
+                                    {/* Сбой загрузки: явно отличаем от пустой базы и даём повторить. */}
+                                    <div role="alert" className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-xl bg-red-50 p-6 text-center">
+                                        <AlertTriangle className="h-6 w-6 text-red-600" />
+                                        <p className="text-sm font-semibold text-red-700">{loadError}</p>
+                                        <Button type="button" variant="outline" onClick={retryFetchDocuments}>
+                                            <RefreshCw className="h-4 w-4" />
+                                            {t('documents.retry')}
+                                        </Button>
+                                    </div>
+                                </td>
+                            </tr>
+                        ) : visibleDocuments.length === 0 ? (
+                            <tr>
+                                <td colSpan={6} className="px-5 py-12 text-center text-slate-500">
+                                    {documents.length > 0 ? (
+                                        /* База не пуста — список съели фильтры. «Не найдены»
+                                           без причины заставляет искать документы, которые
+                                           никуда не девались, поэтому называем виновника и
+                                           даём снять его одной кнопкой. */
+                                        <div className="flex flex-col items-center gap-3">
+                                            <p>{t('documents.emptyFiltered')}</p>
+                                            <Button type="button" variant="outline" size="sm" onClick={resetListFilters}>
+                                                {t('documents.resetFilters')}
                                             </Button>
                                         </div>
-                                    </td>
-                                </tr>
-                            ) : visibleDocuments.length === 0 ? (
-                                <tr>
-                                    <td colSpan={columnCount} className="px-5 py-12 text-center text-slate-500">
-                                        {t('documents.empty')}
-                                    </td>
-                                </tr>
-                            ) : (
-                                visibleDocuments.map((doc) => {
-                                    const statusKey = resolveStatus(doc.status);
-                                    const documentStatusMeta = statusMeta[statusKey];
-                                    const languageTag = showDetails ? formatDocumentLanguage(doc.language) : null;
-                                    // Причина провала индексации: error_code документа переводится
-                                    // той же таблицей, что и коды HTTP-ошибок.
-                                    const documentErrorMessage = resolveSourceErrorMessage(doc, t);
-                                    // Тема — подпись, а не статус: строкой ниже имени и
-                                    // серым. Поля может не быть вовсе (модель не обучена,
-                                    // источник не размечен) — тогда не показываем ничего:
-                                    // прочерк на месте темы сообщал бы о ней больше, чем
-                                    // о самом источнике.
-                                    const topicLabel = resolveTopicLabel(doc, locale);
+                                    ) : (
+                                        t('documents.empty')
+                                    )}
+                                </td>
+                            </tr>
+                        ) : (
+                            visibleDocuments.map((doc) => {
+                                const statusKey = resolveStatus(doc.status);
+                                const documentStatusMeta = statusMeta[statusKey];
+                                const languageTag = formatDocumentLanguage(doc.language);
+                                const uploadedAtText = formatLocaleDate(doc.created_at, locale, {
+                                    month: 'short',
+                                    day: 'numeric',
+                                    year: 'numeric',
+                                });
+                                // Причина провала индексации: error_code документа переводится
+                                // той же таблицей, что и коды HTTP-ошибок.
+                                const documentErrorMessage = resolveSourceErrorMessage(doc, t);
+                                // Тема — подпись, а не статус: строкой ниже имени и
+                                // серым. Поля может не быть вовсе (модель не обучена,
+                                // источник не размечен) — тогда не показываем ничего:
+                                // прочерк на месте темы сообщал бы о ней больше, чем
+                                // о самом источнике.
+                                const topicLabel = resolveTopicLabel(doc, locale);
 
-                                    return (
-                                        <tr key={doc.id} className="border-t border-slate-100 text-sm hover:bg-slate-50/70">
-                                            <td className="px-5 py-3">
-                                                <div className="flex items-center gap-3">
-                                                    {/* Иконка файла нейтральная: красным на этом экране
-                                                        говорит только сбой индексации, и красный значок
-                                                        у исправного документа спорил с бейджем статуса. */}
-                                                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
-                                                        <FileText className="h-4 w-4" />
-                                                    </div>
-                                                    <div className="min-w-0">
-                                                        <p className="max-w-[320px] break-words font-semibold text-slate-800">{doc.name}</p>
-                                                        {topicLabel ? (
-                                                            <p
-                                                                className="mt-0.5 flex max-w-[320px] items-center gap-1 text-xs text-slate-400"
-                                                                title={t('documents.topic', { value: topicLabel })}
-                                                            >
-                                                                <Tag className="h-3 w-3 shrink-0" />
-                                                                <span className="truncate">{topicLabel}</span>
-                                                            </p>
-                                                        ) : isTopicUnclear(doc) ? (
-                                                            // Бледнее обычной подписи и курсивом: это не тема, а
-                                                            // сообщение о её отсутствии, и спутать их нельзя.
-                                                            <p
-                                                                className="mt-0.5 flex max-w-[320px] items-center gap-1 text-xs italic text-slate-300"
-                                                                title={t('documents.topicUnclearHint')}
-                                                            >
-                                                                <Tag className="h-3 w-3 shrink-0" />
-                                                                <span className="truncate">{t('documents.topicUnclear')}</span>
-                                                            </p>
-                                                        ) : null}
-                                                    </div>
+                                // Бейдж статуса и причина сбоя — одним куском: на узком
+                                // экране он переезжает из своей колонки под имя файла, и
+                                // обе точки обязаны показывать ровно одно и то же.
+                                const statusContent = (
+                                    <>
+                                        <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold', documentStatusMeta.badgeClass)}>
+                                            {statusKey === 'indexing' ? (
+                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            ) : statusKey === 'pending' ? (
+                                                <Clock className="h-3.5 w-3.5" />
+                                            ) : statusKey === 'error' ? (
+                                                <AlertTriangle className="h-3.5 w-3.5" />
+                                            ) : (
+                                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                            )}
+                                            {documentStatusMeta.label}
+                                        </span>
+                                        {documentErrorMessage ? (
+                                            /* error_text — техническая строка на одном языке:
+                                               она нужна администратору, но в ячейке таблицы
+                                               ей не место, поэтому уходит в подсказку. */
+                                            <p
+                                                className="mt-1 max-w-[240px] text-xs leading-5 text-red-600"
+                                                title={doc.error_text || undefined}
+                                            >
+                                                {documentErrorMessage}
+                                            </p>
+                                        ) : null}
+                                    </>
+                                );
+
+                                return (
+                                    <tr key={doc.id} className="border-t border-slate-100 text-sm hover:bg-slate-50/70">
+                                        <td className="px-4 py-3 sm:px-5">
+                                            <div className="flex items-start gap-3">
+                                                {/* Иконка файла нейтральная: красным на этом экране
+                                                    говорит только сбой индексации, и красный значок
+                                                    у исправного документа спорил с бейджем статуса.
+                                                    На узком экране её нет вовсе: декорация не стоит
+                                                    трети ширины, отведённой имени. */}
+                                                <div className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500 sm:flex">
+                                                    <FileText className="h-4 w-4" />
                                                 </div>
-                                            </td>
+                                                <div className="min-w-0">
+                                                    {/* anywhere, а не break-words: имя файла — одно длинное
+                                                        «слово», и ломаться оно обязано в любом месте, иначе
+                                                        на узком экране строка шире ячейки. max-w держит
+                                                        длину строки на широком экране, где колонка имени
+                                                        забирает всё свободное место. */}
+                                                    <p className="max-w-[26rem] font-semibold text-slate-800 [overflow-wrap:anywhere]">{doc.name}</p>
+                                                    {topicLabel ? (
+                                                        <p
+                                                            className="mt-0.5 flex max-w-[26rem] items-center gap-1 text-xs text-slate-400"
+                                                            title={t('documents.topic', { value: topicLabel })}
+                                                        >
+                                                            <Tag className="h-3 w-3 shrink-0" />
+                                                            <span className="truncate">{topicLabel}</span>
+                                                        </p>
+                                                    ) : isTopicUnclear(doc) ? (
+                                                        // Бледнее обычной подписи и курсивом: это не тема, а
+                                                        // сообщение о её отсутствии, и спутать их нельзя.
+                                                        <p
+                                                            className="mt-0.5 flex max-w-[26rem] items-center gap-1 text-xs italic text-slate-300"
+                                                            title={t('documents.topicUnclearHint')}
+                                                        >
+                                                            <Tag className="h-3 w-3 shrink-0" />
+                                                            <span className="truncate">{t('documents.topicUnclear')}</span>
+                                                        </p>
+                                                    ) : null}
 
-                                            {showDetails ? (
-                                                <>
-                                                    <td className="px-5 py-3">
-                                                        <span className={cn('rounded px-2 py-0.5 text-xs font-semibold', languageTag.className)}>
+                                                    {/* Колонки, убранные с узкой ширины, не пропадают,
+                                                        а складываются строкой сюда: язык, дата и размер
+                                                        видны без прокрутки вбок. */}
+                                                    <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400 xl:hidden">
+                                                        <span className={cn('rounded px-1.5 py-0.5 font-semibold', languageTag.className)}>
                                                             {languageTag.text}
                                                         </span>
-                                                    </td>
-
-                                                    <td className="px-5 py-3 text-slate-500">
-                                                        {formatLocaleDate(doc.created_at, locale, {
-                                                            month: 'short',
-                                                            day: 'numeric',
-                                                            year: 'numeric',
-                                                        })}
-                                                    </td>
-
-                                                    <td className="px-5 py-3 text-slate-500">
-                                                        {formatSize(doc.size, t)}
-                                                    </td>
-                                                </>
-                                            ) : null}
-
-                                            <td className="px-5 py-3">
-                                                <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold', documentStatusMeta.badgeClass)}>
-                                                    {statusKey === 'indexing' ? (
-                                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                    ) : statusKey === 'pending' ? (
-                                                        <Clock className="h-3.5 w-3.5" />
-                                                    ) : statusKey === 'error' ? (
-                                                        <AlertTriangle className="h-3.5 w-3.5" />
-                                                    ) : (
-                                                        <CheckCircle2 className="h-3.5 w-3.5" />
-                                                    )}
-                                                    {documentStatusMeta.label}
-                                                </span>
-                                                {documentErrorMessage ? (
-                                                    /* error_text — техническая строка на одном языке:
-                                                       она нужна администратору, но в ячейке таблицы
-                                                       ей не место, поэтому уходит в подсказку. */
-                                                    <p
-                                                        className="mt-1 max-w-[240px] text-xs leading-5 text-red-600"
-                                                        title={doc.error_text || undefined}
-                                                    >
-                                                        {documentErrorMessage}
+                                                        <span>{uploadedAtText}</span>
+                                                        <span>{formatSize(doc.size, t)}</span>
                                                     </p>
-                                                ) : null}
-                                            </td>
 
-                                            <td className="px-5 py-3 text-right">
-                                                <div className="inline-flex items-center gap-1">
-                                                    {/* Разбор источника на фрагменты — работа отладочная:
-                                                        она осталась целиком, но под тем же раскрытием. */}
-                                                    {showDetails ? (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => fetchChunks(doc.id, doc.name)}
-                                                            className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
-                                                            title={t('documents.viewChunks')}
-                                                            aria-label={t('documents.viewChunksFor', { name: doc.name })}
-                                                        >
-                                                            <Eye className="h-4 w-4" />
-                                                        </button>
-                                                    ) : null}
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => openDeleteDialog(doc)}
-                                                        className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
-                                                        title={t('documents.delete')}
-                                                        aria-label={t('documents.deleteSource', { name: doc.name })}
-                                                    >
-                                                        <Trash2 className="h-4 w-4" />
-                                                    </button>
+                                                    <div className="mt-1.5 sm:hidden">{statusContent}</div>
                                                 </div>
-                                            </td>
-                                        </tr>
-                                    );
-                                })
-                            )}
-                        </tbody>
-                    </table>
-                </div>
+                                            </div>
+                                        </td>
 
-                {showDetails && !isLoading && sortedDocuments.length > 0 && (
+                                        <td className="hidden px-5 py-3 xl:table-cell">
+                                            <span className={cn('rounded px-2 py-0.5 text-xs font-semibold', languageTag.className)}>
+                                                {languageTag.text}
+                                            </span>
+                                        </td>
+
+                                        <td className="hidden px-5 py-3 text-slate-500 xl:table-cell">
+                                            {uploadedAtText}
+                                        </td>
+
+                                        <td className="hidden px-5 py-3 text-slate-500 xl:table-cell">
+                                            {formatSize(doc.size, t)}
+                                        </td>
+
+                                        <td className="hidden px-5 py-3 sm:table-cell">
+                                            {statusContent}
+                                        </td>
+
+                                        <td className="px-4 py-3 text-right sm:px-5">
+                                            <div className="inline-flex items-center gap-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => fetchChunks(doc.id, doc.name)}
+                                                    className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-[#1f3a60] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                                    title={t('documents.viewChunks')}
+                                                    aria-label={t('documents.viewChunksFor', { name: doc.name })}
+                                                >
+                                                    <Eye className="h-4 w-4" />
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openDeleteDialog(doc)}
+                                                    className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]"
+                                                    title={t('documents.delete')}
+                                                    aria-label={t('documents.deleteSource', { name: doc.name })}
+                                                >
+                                                    <Trash2 className="h-4 w-4" />
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                );
+                            })
+                        )}
+                    </tbody>
+                </table>
+
+                {!isLoading && sortedDocuments.length > 0 && (
                     <nav
-                        className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3"
+                        className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3 sm:px-5"
                         aria-label={t('documents.pagination.label')}
                     >
                         <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-slate-500">

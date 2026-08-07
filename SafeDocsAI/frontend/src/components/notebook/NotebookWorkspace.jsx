@@ -24,6 +24,7 @@ import {
 import { Link } from 'react-router-dom';
 
 import { Button } from '../ui/Button';
+import DocumentViewer from '../DocumentViewer';
 import FolderGlyph from '../ui/FolderGlyph';
 import Input from '../ui/Input';
 import { cn } from '../../lib/utils';
@@ -387,6 +388,8 @@ const NotebookWorkspace = ({
   const noteTitleInputRef = useRef(null);
   const noteDeleteDialogRef = useRef(null);
   const noteDeleteCancelRef = useRef(null);
+  const sourceDeleteDialogRef = useRef(null);
+  const sourceDeleteCancelRef = useRef(null);
   // Одна полоса на источники и заметки: вместо двух состояний сворачивания
   // осталось одно, а вкладка помнит, что человек смотрел последним.
   const [railCollapsed, setRailCollapsed] = useState(false);
@@ -403,6 +406,12 @@ const NotebookWorkspace = ({
   const [attachingExistingSources, setAttachingExistingSources] = useState(false);
   const [notebooks, setNotebooks] = useState([]);
   const [notebooksError, setNotebooksError] = useState('');
+  // Просмотр документа из полосы: после ухода вкладки «Источники» открыть файл
+  // из блокнота больше негде — карточка обязана уметь это сама.
+  const [viewerSource, setViewerSource] = useState(null);
+  const [sourceDeleteTarget, setSourceDeleteTarget] = useState(null);
+  const [deletingSource, setDeletingSource] = useState(false);
+  const [sourceDeleteError, setSourceDeleteError] = useState('');
 
   // Общий слой данных: тот же кэш читают шапка блокнота и таблица «Все источники».
   const {
@@ -421,7 +430,7 @@ const NotebookWorkspace = ({
     reload: reloadExistingSources,
   } = useSources(null, { enabled: isExistingSheetOpen });
 
-  const { uploadSource, attachSources, invalidate } = useSourcesActions();
+  const { uploadSource, attachSources, deleteSource, invalidate } = useSourcesActions();
 
   // Список заметок — общий с шапкой блокнота, поэтому приходит сверху: своего запроса панель не шлёт.
   const [selectedNote, setSelectedNote] = useState(null);
@@ -656,9 +665,43 @@ const NotebookWorkspace = ({
     setNoteDeleteError('');
   }, [deletingNote]);
 
+  const openSourceDeleteDialog = useCallback((source) => {
+    if (!source) return;
+    setSourceDeleteError('');
+    setSourceDeleteTarget(source);
+  }, []);
+
+  const closeSourceDeleteDialog = useCallback(() => {
+    if (deletingSource) return;
+    setSourceDeleteTarget(null);
+    setSourceDeleteError('');
+  }, [deletingSource]);
+
+  // Удаление идёт через общий слой данных: источник исчезает сразу из полосы,
+  // таблицы «Все источники» и даты «Обновлён» в шапке — тексты и подтверждение
+  // те же, что у таблицы, потому что действие одно и то же.
+  const handleDeleteSource = useCallback(async () => {
+    if (!sourceDeleteTarget || deletingSource) return;
+
+    try {
+      setDeletingSource(true);
+      setSourceDeleteError('');
+      await deleteSource(sourceDeleteTarget.id);
+      // Удалённый документ нельзя оставить открытым в просмотре.
+      setViewerSource((prev) => (prev && prev.id === sourceDeleteTarget.id ? null : prev));
+      setSourceDeleteTarget(null);
+    } catch (error) {
+      console.error('Failed to delete source', error);
+      setSourceDeleteError(resolveApiErrorMessage(error, t, 'documents.deleteFailed'));
+    } finally {
+      setDeletingSource(false);
+    }
+  }, [deleteSource, deletingSource, sourceDeleteTarget, t]);
+
   useModalDialog(Boolean(selectedNote), closeNoteViewer, noteViewDialogRef, noteViewCloseRef);
   useModalDialog(noteComposerOpen, closeNoteComposer, noteComposerDialogRef, noteTitleInputRef);
   useModalDialog(Boolean(noteDeleteTarget), closeNoteDeleteDialog, noteDeleteDialogRef, noteDeleteCancelRef);
+  useModalDialog(Boolean(sourceDeleteTarget), closeSourceDeleteDialog, sourceDeleteDialogRef, sourceDeleteCancelRef);
 
   const handleSubmitNote = async (event) => {
     event.preventDefault();
@@ -815,7 +858,17 @@ const NotebookWorkspace = ({
           const sourceTopicLabel = resolveTopicLabel(source, locale);
 
           return (
-            <article key={source.id} className="rounded-xl border border-slate-200 p-3 transition hover:border-slate-300 hover:bg-slate-50">
+            // Карточка, как и у заметок, открывает сам документ: полоса — теперь
+            // единственное место работы с источниками в блокноте, и список,
+            // из которого файл нельзя открыть, — это список чужих имён.
+            <article
+              key={source.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => setViewerSource(source)}
+              onKeyDown={(e) => e.key === 'Enter' && setViewerSource(source)}
+              className="cursor-pointer rounded-xl border border-slate-200 p-3 transition hover:border-[#1f3a60]/40 hover:bg-slate-50"
+            >
               <div className="flex items-start justify-between gap-2">
                 <p className="min-w-0 truncate text-sm font-semibold text-slate-900" title={source.name || undefined}>{source.name}</p>
                 <span
@@ -827,15 +880,28 @@ const NotebookWorkspace = ({
                   {sourceStatusLabels[sourceStatus]}
                 </span>
               </div>
-              <div className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-xs text-slate-500">
-                <span>{t('notebook.createdAt', { date: formatLocaleDate(source.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—') })}</span>
-                <span>{formatSize(source.size, t)}</span>
-                {sourceTopicLabel ? (
-                  <span className="inline-flex min-w-0 items-center gap-1" title={t('documents.topic', { value: sourceTopicLabel })}>
-                    <Tag className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">{sourceTopicLabel}</span>
-                  </span>
-                ) : null}
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-slate-500">
+                  <span>{t('notebook.createdAt', { date: formatLocaleDate(source.created_at, locale, { day: 'numeric', month: 'short', year: 'numeric' }, '—') })}</span>
+                  <span>{formatSize(source.size, t)}</span>
+                  {sourceTopicLabel ? (
+                    <span className="inline-flex min-w-0 items-center gap-1" title={t('documents.topic', { value: sourceTopicLabel })}>
+                      <Tag className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{sourceTopicLabel}</span>
+                    </span>
+                  ) : null}
+                </div>
+                {/* Действие внутри карточки-кнопки: без stopPropagation клик по
+                    корзине заодно открывал бы просмотр удаляемого документа. */}
+                <button
+                  type="button"
+                  onClick={(event) => { event.stopPropagation(); openSourceDeleteDialog(source); }}
+                  title={t('documents.delete')}
+                  aria-label={t('documents.deleteSource', { name: source.name })}
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-red-600"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
               </div>
               {sourceErrorMessage ? (
                 /* error_text — техническая строка на одном языке (путь, имя библиотеки):
@@ -986,7 +1052,11 @@ const NotebookWorkspace = ({
           }}
         />
       ),
-      footerLink: { to: `/notebooks/${notebookId}/sources`, label: t('notebook.openAllSources') },
+      // За тяжёлым — сортировка, фильтры, страницы, фрагменты — полоса ведёт на
+      // общую страницу источников, а не копирует её таблицу в треть ширины:
+      // шесть колонок сюда честно не влезают. Страница сама сужается активным
+      // блокнотом и показывает область бейджем со сбросом.
+      footerLink: { to: '/sources', label: t('notebook.openAllSources') },
     },
     {
       id: RAIL_NOTES,
@@ -1378,6 +1448,68 @@ const NotebookWorkspace = ({
               </Button>
               <Button type="button" variant="destructive" onClick={handleDeleteNote} isLoading={deletingNote}>
                 {deletingNote ? t('notebook.deleting') : t('notebook.delete')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Просмотр документа — тот же вьюер, что открывают цитаты чата и раздел
+          «Темы»: документ обязан выглядеть одинаково, откуда на него ни выйди. */}
+      {viewerSource ? (
+        <DocumentViewer
+          docId={viewerSource.id}
+          docName={viewerSource.name}
+          onClose={() => setViewerSource(null)}
+        />
+      ) : null}
+
+      {/* Source DELETE confirmation — тексты и устройство те же, что у таблицы
+          «Все источники»: действие одно, и подтверждаться оно должно одинаково. */}
+      {sourceDeleteTarget ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50" onClick={closeSourceDeleteDialog} aria-hidden="true" />
+
+          <div
+            ref={sourceDeleteDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="source-delete-dialog-title"
+            aria-describedby="source-delete-dialog-description"
+            className="relative w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-xl"
+          >
+            <div className="flex items-start gap-3 px-6 py-5">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="min-w-0">
+                <h3 id="source-delete-dialog-title" className="text-base font-semibold text-slate-900">
+                  {t('documents.deleteConfirm')}
+                </h3>
+                <p id="source-delete-dialog-description" className="mt-1 break-words text-sm text-slate-500">
+                  {t('documents.deleteDescription', { name: sourceDeleteTarget.name })}
+                </p>
+              </div>
+            </div>
+
+            {sourceDeleteError ? (
+              <p role="alert" className="mx-6 mb-2 rounded-lg bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">
+                {sourceDeleteError}
+              </p>
+            ) : null}
+
+            <div className="flex justify-end gap-2 border-t border-slate-200 px-6 py-4">
+              <Button
+                ref={sourceDeleteCancelRef}
+                type="button"
+                variant="outline"
+                onClick={closeSourceDeleteDialog}
+                disabled={deletingSource}
+              >
+                {t('documents.cancel')}
+              </Button>
+              <Button type="button" variant="destructive" onClick={handleDeleteSource} isLoading={deletingSource}>
+                {deletingSource ? t('documents.deleting') : t('documents.delete')}
               </Button>
             </div>
           </div>

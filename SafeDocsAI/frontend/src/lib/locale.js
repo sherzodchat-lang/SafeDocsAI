@@ -1,8 +1,13 @@
 import { normalizeLocale } from '../i18n';
 
+// Цепочка, а не один код: таджикских данных у браузеров, как правило, нет, и
+// одиночный 'tg-TJ' молча откатывался к языку системы — даты вставали
+// по-английски («Aug 7, 2026») в интерфейсе, где английского нет вовсе.
+// Порядок отката тот же, что у подписей тем в lib/topics.js: таджикскому
+// пользователю русская дата ближе, чем английская.
 const INTL_LOCALES = {
-    ru: 'ru-RU',
-    tg: 'tg-TJ',
+    ru: ['ru-RU'],
+    tg: ['tg-TJ', 'ru-RU'],
 };
 
 export const getIntlLocale = (locale) => INTL_LOCALES[normalizeLocale(locale) || 'tg'];

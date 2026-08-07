@@ -29,11 +29,6 @@ const NotebookChatRoute = () => {
   return <ChatPage notebookId={Number(notebookId)} />;
 };
 
-const NotebookSourcesRoute = () => {
-  const { notebookId } = useParams();
-  return <AdminSourcesPage notebookId={Number(notebookId)} />;
-};
-
 function App() {
   return (
     // Граница стоит над роутером: ошибка рендера любой страницы должна давать
@@ -51,7 +46,11 @@ function App() {
               {/* Без явного notebookId глобальный чат берёт активный блокнот из
                   localStorage — тот же, что выбирается на странице «Блокноты». */}
               <Route path="chat" element={<ChatPage />} />
-              <Route path="sources" element={<AdminSourcesPage notebookId={null} />} />
+              {/* Без явного notebookId список источников сужается тем же активным
+                  блокнотом, что и глобальный чат: сюда же ведёт ссылка из полосы
+                  «Обзора», и область видна бейджем со сбросом, а не молчаливым
+                  фильтром. */}
+              <Route path="sources" element={<AdminSourcesPage />} />
               {/* Темы — надстройка над теми же источниками: экран открыт всем,
                   правами ограничена только переразметка внутри него. */}
               <Route path="topics" element={<TopicsPage />} />
@@ -62,11 +61,12 @@ function App() {
               <Route path="notebooks/:notebookId" element={<NotebookLayout />}>
                 <Route index element={<NotebookOverviewPage />} />
                 <Route path="chat" element={<NotebookChatRoute />} />
-                <Route path="sources" element={<NotebookSourcesRoute />} />
-                {/* Заметки блокнота живут в «Обзоре» — там они умеют правку,
-                    архивацию и удаление. Старый адрес не оставляем мёртвым:
-                    ссылка из закладок или письма ведёт туда, где работа с
-                    заметками теперь и идёт, а не в пустой экран. */}
+                {/* Источники и заметки блокнота живут в «Обзоре»: вкладку
+                    «Источники» убрали по той же причине, что раньше «Заметки», —
+                    вторая точка работы с теми же данными. Старые адреса не
+                    оставляем мёртвыми: ссылка из закладок или письма ведёт туда,
+                    где работа теперь и идёт, а не в пустой экран. */}
+                <Route path="sources" element={<Navigate to=".." relative="path" replace />} />
                 <Route path="notes" element={<Navigate to=".." relative="path" replace />} />
                 {/* Презентации бэкенд отдаёт контент-менеджеру и админу
                     (presentation.role_not_allowed остальным). Гард здесь
@@ -77,8 +77,10 @@ function App() {
                   <Route path="presentations" element={<NotebookPresentationsPage />} />
                 </Route>
               </Route>
-              <Route path="admin/sources" element={<AdminSourcesPage />} />
-              <Route path="admin/documents" element={<Navigate to="/admin/sources" replace />} />
+              {/* Прежние адреса того же списка: страница одна, и жить она должна
+                  по одному адресу — закладки просто переводим на него. */}
+              <Route path="admin/sources" element={<Navigate to="/sources" replace />} />
+              <Route path="admin/documents" element={<Navigate to="/sources" replace />} />
               {/* Журнал и настройки бэкенд отдаёт только админу
                   (deps.get_current_active_superuser). Проверка здесь ничего не
                   разрешает — она лишь заменяет заведомо неработающую страницу
