@@ -262,6 +262,10 @@ class TopicModel:
             # лежат в пространстве, которого больше нечем построить.
             arrays["projection_mean"] = np.asarray(self.projection.mean, dtype=np.float64)
             arrays["projection_basis"] = np.asarray(self.projection.basis, dtype=np.float64)
+            if self.projection.strip is not None:
+                arrays["projection_strip"] = np.asarray(
+                    self.projection.strip, dtype=np.float64
+                )
         temporary = file.with_suffix(file.suffix + ".tmp")
         with open(temporary, "wb") as handle:
             np.savez_compressed(handle, **arrays)
@@ -290,6 +294,11 @@ class TopicModel:
             projection_basis = (
                 np.asarray(archive["projection_basis"], dtype=np.float64)
                 if "projection_basis" in archive
+                else None
+            )
+            projection_strip = (
+                np.asarray(archive["projection_strip"], dtype=np.float64)
+                if "projection_strip" in archive
                 else None
             )
 
@@ -324,7 +333,9 @@ class TopicModel:
             # пространства, не вызвав ни одной ошибки.
             raise ValueError("в файле описана проекция, но нет её среднего или базиса")
         projection = (
-            Projection.from_saved(projection_meta, projection_mean, projection_basis)
+            Projection.from_saved(
+                projection_meta, projection_mean, projection_basis, projection_strip
+            )
             if projection_meta is not None
             else None
         )

@@ -575,6 +575,79 @@ class DocumentModuleService:
         return documents
 
     @staticmethod
+    async def detach_documents_from_notebook(
+        session: AsyncSession,
+        notebook_id: int,
+        source_ids: list[int],
+        owner_id: int | None = None,
+    ) -> tuple[list[Document], int]:
+        """Снять документы с блокнота: notebook_id → NULL, и ничего больше.
+
+        Зеркало attach_documents_to_notebook — та же проверка блокнота, тот же
+        отбор документов, те же отказы. Файл, чанки, векторы в ChromaDB и
+        назначенная тема не трогаются сознательно: они принадлежат документу,
+        а не блокноту, и «убрать из блокнота» — не «стереть». До этой операции
+        единственным способом убрать источник из блокнота было удаление
+        документа целиком — подмена одного намерения другим.
+
+        notebook_id здесь — не лишний: он говорит, ИЗ ЧЕГО пользователь
+        убирает. Обнулять без него значило бы позволить вкладке со вчерашним
+        списком блокнота X снять документ с блокнота Y, куда его тем временем
+        перенесли. Поэтому документ не в этом блокноте просто пропускается:
+        цель запроса — «документа нет в X» — и так достигнута, а отказ
+        превратил бы повторное нажатие и гонку двух вкладок в ошибку на
+        исправном состоянии. Сколько строк изменилось на самом деле, говорит
+        второй элемент результата.
+        """
+        notebook = await session.get(Notebook, notebook_id)
+        if not notebook:
+            raise ApiError(404, SourceErrors.NOTEBOOK_NOT_FOUND, "Notebook not found")
+
+        normalized_source_ids = list(dict.fromkeys(source_ids))
+        if not normalized_source_ids:
+            raise ApiError(
+                400, SourceErrors.NO_IDS_PROVIDED, "No source ids provided"
+            )
+
+        statement = select(Document).where(Document.id.in_(normalized_source_ids))
+        # Чужой документ не находится запросом и попадает в missing_ids —
+        # снаружи он неотличим от несуществующего.
+        if owner_id is not None:
+            statement = statement.where(Document.owner_id == owner_id)
+        result = await session.exec(statement)
+        documents = result.all()
+
+        if len(documents) != len(normalized_source_ids):
+            found_ids = {
+                document.id for document in documents if document.id is not None
+            }
+            missing_ids = [
+                source_id
+                for source_id in normalized_source_ids
+                if source_id not in found_ids
+            ]
+            raise ApiError(
+                404,
+                SourceErrors.NOT_FOUND,
+                f"Documents not found: {', '.join(str(source_id) for source_id in missing_ids)}",
+            )
+
+        updated_count = 0
+        for document in documents:
+            if document.notebook_id != notebook_id:
+                continue
+            document.notebook_id = None
+            session.add(document)
+            updated_count += 1
+
+        await session.commit()
+
+        for document in documents:
+            await session.refresh(document)
+
+        return list(documents), updated_count
+
+    @staticmethod
     async def get_document_chunks(session: AsyncSession, document_id: int):
         doc = await session.get(Document, document_id)
         if not doc:

@@ -136,6 +136,20 @@ class AttachSourcesResponse(BaseModel):
     documents: list[DocumentRead]
 
 
+# Пара к AttachSourcesPayload/-Response, поля намеренно те же: привязка и
+# отвязка — две стороны одного действия, и клиент не должен учить вторую
+# форму запроса. notebook_id у отвязки не лишний — он фиксирует, ИЗ ЧЕГО
+# пользователь убирает документ (см. detach_documents_from_notebook).
+class DetachSourcesPayload(BaseModel):
+    notebook_id: int = Field(ge=1, le=deps.MAX_ID)
+    source_ids: list[Annotated[int, Field(ge=1, le=deps.MAX_ID)]]
+
+
+class DetachSourcesResponse(BaseModel):
+    updated_count: int
+    documents: list[DocumentRead]
+
+
 def _owner_filter(user: User) -> int | None:
     """id владельца для фильтрации выборок; None — админ, фильтр не нужен."""
     return None if user.role == "admin" else user.id
@@ -292,6 +306,46 @@ async def attach_documents(
         owner_id=_owner_filter(current_user),
     )
     return AttachSourcesResponse(updated_count=len(documents), documents=documents)
+
+
+@router.post("/detach", response_model=DetachSourcesResponse)
+async def detach_documents(
+    payload: DetachSourcesPayload,
+    current_user: User = Depends(deps.get_current_user),
+    session: AsyncSession = Depends(deps.get_session),
+) -> Any:
+    """Снять документы с блокнота, не трогая сами документы.
+
+    Обнуляется только notebook_id; файл, чанки, векторы и тема остаются —
+    документ переходит в то же состояние «вне блокнота», в котором оказывается
+    при загрузке без notebook_id (см. detach_documents_from_notebook).
+    """
+    if not payload.source_ids:
+        raise ApiError(400, SourceErrors.NO_IDS_PROVIDED, "No source ids provided")
+
+    # lock=True — по родственной с attach причине, но гонка тут другая:
+    # удаление блокнота сносит его документы, и без блокировки оно успевает
+    # пройти между проверкой владения и UPDATE — commit отвязки находит ноль
+    # строк и падает StaleDataError (500 на штатной гонке). FOR SHARE
+    # несовместим с FOR UPDATE удаления: либо отвязка успевает первой и
+    # документы переживают удаление блокнота, либо ждёт его и получает
+    # честный 404.
+    await deps.assert_owns_notebook(
+        payload.notebook_id, session, current_user, lock=True
+    )
+    documents, updated_count = (
+        await DocumentModuleService.detach_documents_from_notebook(
+            session=session,
+            notebook_id=payload.notebook_id,
+            source_ids=payload.source_ids,
+            owner_id=_owner_filter(current_user),
+        )
+    )
+    # updated_count здесь — сколько строк изменилось на самом деле, а не длина
+    # пачки: документ, которого в блокноте уже нет, — успех без правки
+    # (повторное нажатие, вторая вкладка), и клиенту незачем считать его
+    # изменённым.
+    return DetachSourcesResponse(updated_count=updated_count, documents=documents)
 
 
 @router.get("/{id}/chunks", response_model=List[Chunk])

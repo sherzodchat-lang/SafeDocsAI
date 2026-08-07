@@ -504,7 +504,7 @@ def _parse_projection(raw: Any, arrays: dict[str, np.ndarray]) -> TopicTransform
             "projection_mean и projection_basis: применить центроиды не к чему"
         )
     try:
-        projection = Projection.from_saved(raw, mean, basis)
+        projection = Projection.from_saved(raw, mean, basis, arrays.get("projection_strip"))
     except ValueError as exc:
         raise TopicModelUnusable(f"проекция в артефакте несогласована: {exc}") from exc
     return TopicTransform(

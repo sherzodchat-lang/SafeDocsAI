@@ -196,7 +196,12 @@ class PrincipalAxes:
         return self.components[:, drop : drop + keep]
 
     def to_projection(
-        self, *, drop: int = 0, keep: int | None = None, renormalize: bool = True
+        self,
+        *,
+        drop: int = 0,
+        keep: int | None = None,
+        renormalize: bool = True,
+        strip: np.ndarray | None = None,
     ) -> "Projection":
         """Готовое к сохранению преобразование: среднее и один базис.
 
@@ -211,6 +216,7 @@ class PrincipalAxes:
             basis=self.basis(drop=drop, keep=keep),
             dropped=int(drop),
             renormalize=bool(renormalize),
+            strip=None if strip is None else np.asarray(strip, dtype=np.float64),
         )
 
     def project(
@@ -257,6 +263,23 @@ class Projection:
     basis: np.ndarray
     dropped: int = 0
     renormalize: bool = True
+    # Направление, которое снимается с вектора ПЕРЕД проекцией, или None.
+    #
+    # Зачем оно понадобилось. В корпусе есть большой блок официальных правовых
+    # текстов, и у них общий канцелярит: тридцатистраничный закон на девять
+    # десятых состоит из «в соответствии со статьёй» и «установленный
+    # Правительством». Усреднение по фрагментам выносит наверх эти формулы, а не
+    # предмет, и законы собираются в кластер ПО ЖАНРУ.
+    #
+    # Замер: ARI по предмету среди законов был +0.008 — то есть предметы законов
+    # не различались вовсе, на уровне случайного. Снятие одного направления
+    # подняло его до +0.166, а чистоту с 0.333 до 0.667. Заодно выросло и по
+    # всему корпусу: +0.139 -> +0.150.
+    #
+    # Направление фиксированное и вычитается из ЛЮБОГО вектора, поэтому знать
+    # жанр документа в бою не нужно — тем и отличается от прежнего центрирования
+    # по группе, ради ухода от которого писался весь этот модуль.
+    strip: np.ndarray | None = None
 
     @property
     def dim(self) -> int:
@@ -269,7 +292,10 @@ class Projection:
         return int(self.basis.shape[1])
 
     def apply(self, X: np.ndarray) -> np.ndarray:
-        return project_onto(X, mean=self.mean, basis=self.basis, normalize=self.renormalize)
+        data = np.asarray(X, dtype=np.float64)
+        if self.strip is not None:
+            data = strip_direction(data, self.strip)
+        return project_onto(data, mean=self.mean, basis=self.basis, normalize=self.renormalize)
 
     def meta(self) -> dict:
         return {
@@ -278,10 +304,17 @@ class Projection:
             "components": self.out_dim,
             "dropped": int(self.dropped),
             "renormalize": bool(self.renormalize),
+            "strips_direction": self.strip is not None,
         }
 
     @classmethod
-    def from_saved(cls, meta: dict, mean: np.ndarray, basis: np.ndarray) -> "Projection":
+    def from_saved(
+        cls,
+        meta: dict,
+        mean: np.ndarray,
+        basis: np.ndarray,
+        strip: np.ndarray | None = None,
+    ) -> "Projection":
         """Восстановление из артефакта с проверкой согласованности.
 
         Проверки не формальность: несовпадение размеров здесь — единственное
@@ -306,12 +339,47 @@ class Projection:
                 f"в метаданных проекция {declared_dim}x{declared_components}, "
                 f"а базис {basis.shape[0]}x{basis.shape[1]}"
             )
+        # Метаданные обещают снятое направление, а массива нет: применить модель
+        # без него нельзя, а сделать вид, что его не было, значит выдать метки из
+        # другого пространства — та же беда, что с забытым преобразованием.
+        if bool(meta.get("strips_direction")) and strip is None:
+            raise ValueError("в метаданных объявлено снятое направление, а вектора нет")
+        if strip is not None:
+            strip = np.asarray(strip, dtype=np.float64)
+            if strip.ndim != 1 or strip.shape[0] != basis.shape[0]:
+                raise ValueError(
+                    f"снятое направление {strip.shape} не из того же пространства, "
+                    f"что базис ({basis.shape[0]})"
+                )
         return cls(
             mean=mean,
             basis=basis,
             dropped=int(meta.get("dropped") or 0),
             renormalize=bool(meta.get("renormalize", True)),
+            strip=strip,
         )
+
+
+def strip_direction(X: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    """Убрать из векторов составляющую вдоль заданного направления.
+
+    После вычитания длина восстанавливается: дальше вектор попадает в проекцию,
+    где среднее считалось на нормированных, и вектор другой длины сдвинулся бы
+    относительно него не так, как при обучении.
+    """
+    data = np.asarray(X, dtype=np.float64)
+    single = data.ndim == 1
+    if single:
+        data = data.reshape(1, -1)
+    direction = np.asarray(direction, dtype=np.float64)
+    if direction.ndim != 1 or direction.shape[0] != data.shape[1]:
+        raise ValueError(
+            f"направление {direction.shape} и векторы {data.shape} из разных пространств"
+        )
+    unit = direction / max(float(np.linalg.norm(direction)), 1e-12)
+    without = data - np.outer(data @ unit, unit)
+    without = l2_normalize(without)
+    return without[0] if single else without
 
 
 def project_onto(
