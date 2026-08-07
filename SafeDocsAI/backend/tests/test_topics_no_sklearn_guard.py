@@ -39,11 +39,20 @@ DYNAMIC_IMPORT_CALLS = ("__import__", "import_module")
 
 
 def topics_source_files():
-    return sorted(
-        os.path.join(TOPICS_DIR, name)
-        for name in os.listdir(TOPICS_DIR)
-        if name.endswith(".py")
-    )
+    """Все исходники пакета, включая вложенные каталоги.
+
+    Обход рекурсивный, а не по одному каталогу: обучающая половина работы живёт
+    в app/modules/topics/pipeline/ (подготовка корпуса, эмбеддинги, сравнение
+    вариантов, запись модели), и плоский listdir её не видел вовсе. То есть
+    подмена алгоритма ровно в том месте, где он и применяется к настоящим
+    данным, проходила бы мимо сторожа.
+    """
+    found = []
+    for directory, _, names in os.walk(TOPICS_DIR):
+        if os.path.basename(directory) == "__pycache__":
+            continue
+        found += [os.path.join(directory, name) for name in names if name.endswith(".py")]
+    return sorted(found)
 
 
 def is_banned(dotted_name: str) -> bool:
@@ -110,7 +119,10 @@ class TopicsSourceIsFreeOfLibraryClusteringTests(unittest.TestCase):
         files = topics_source_files()
         self.assertTrue(files, f"не найдено ни одного исходника в {TOPICS_DIR}")
         names = {os.path.basename(path) for path in files}
-        self.assertLessEqual({"__init__.py", "kmeans.py", "metrics.py"}, names)
+        self.assertLessEqual({"__init__.py", "kmeans.py", "metrics.py", "pca.py"}, names)
+        # Вложенный каталог назван отдельно: без него обход можно случайно
+        # вернуть к плоскому, и проверка выше осталась бы зелёной.
+        self.assertLessEqual({"variants.py", "transforms.py"}, names)
 
     def test_no_banned_imports_in_any_topics_file(self):
         for path in topics_source_files():

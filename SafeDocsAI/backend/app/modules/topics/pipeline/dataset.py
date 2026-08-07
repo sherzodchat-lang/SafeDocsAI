@@ -67,6 +67,18 @@ class Document:
     dataset_origin: str
     split: str
     word_count: int
+    # Откуда документ взялся: домен сайта у собранного корпуса, пустая строка у
+    # размеченного набора, где источник один. Поле нужно как ЕЩЁ ОДНА
+    # КОНКУРИРУЮЩАЯ ОСЬ: у корпуса из четырёх сайтов кластеры могут лечь на
+    # издание, а не на тему — у khovar свой канцелярский оборот, у ozodi свой, —
+    # и без этой колонки такое совпадение выглядело бы как удачная
+    # кластеризация. Точно так же в размеченном наборе ловилась ось
+    # dataset_origin.
+    #
+    # Со значением по умолчанию, потому что у файлов прежнего корпуса колонки
+    # нет, а падать на них ради оси, которой там всё равно не существует,
+    # незачем.
+    source: str = ""
 
     @property
     def is_synthetic(self) -> bool:
@@ -213,6 +225,7 @@ def _document_from_record(record: dict) -> Document:
         dataset_origin=str(record["dataset_origin"]),
         split=str(record["split"]),
         word_count=int(record.get("word_count") or 0),
+        source=str(record.get("source") or ""),
     )
 
 

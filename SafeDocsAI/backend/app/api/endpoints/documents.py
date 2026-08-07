@@ -106,6 +106,18 @@ class DocumentRead(BaseModel):
     topic_label_ru: str | None = None
     topic_label_tg: str | None = None
     topic_cluster_index: int | None = None
+    # Версия модели, которая этот документ смотрела. Нужна клиенту, чтобы
+    # РАЗЛИЧИТЬ два разных отсутствия темы, выглядящих одинаково:
+    #
+    #   version = null                        — документ ещё не размечали;
+    #   version есть, cluster_index = null    — модель посмотрела и отказалась
+    #                                           называть тему: документ стоит
+    #                                           почти ровно между двумя, и любая
+    #                                           из них была бы монеткой.
+    #
+    # Без этого поля второй случай молча выглядел бы как первый, и пользователь
+    # ждал бы разметки, которая уже произошла.
+    topic_model_version: int | None = None
 
     @field_serializer("created_at")
     def _serialize_created_at(self, value: datetime) -> str:

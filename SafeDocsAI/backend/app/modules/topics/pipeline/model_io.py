@@ -36,6 +36,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from app.modules.topics.kmeans import KMeans
+from app.modules.topics.pca import Projection
 from app.modules.topics.pipeline.transforms import (
     ClusterRouting,
     GroupCentering,
@@ -43,11 +44,14 @@ from app.modules.topics.pipeline.transforms import (
     group_keys,
 )
 
-MODEL_FORMAT_VERSION = 2
+MODEL_FORMAT_VERSION = 3
 
 # Какие версии формата этот код умеет читать. Версия 1 отличается только
-# отсутствием преобразования, и её содержимое от этого не теряется.
-READABLE_MODEL_VERSIONS = (1, 2)
+# отсутствием преобразования, и её содержимое от этого не теряется. Версия 2
+# знает центрирование по группе, версия 3 добавила проекцию на главные оси.
+# Читаются все три: артефакт лежит на диске отдельно от выкладки кода, и уже
+# обученная модель не должна погаснуть от обновления обучающей стороны.
+READABLE_MODEL_VERSIONS = (1, 2, 3)
 
 
 @dataclass(frozen=True)
@@ -103,8 +107,28 @@ class TopicModel:
     params: dict[str, Any] = field(default_factory=dict)
     transform: GroupCentering | None = None
     routing: ClusterRouting | None = None
+    # Проекция на главные оси — преобразование, которое НЕ требует знать о
+    # документе ничего. Живёт рядом с transform, а не вместо: файлы, обученные
+    # центрированием по группе, продолжают читаться и применяться.
+    #
+    # Одновременно с transform не бывает: центрирование по группе и проекция
+    # решают одну задачу двумя способами, и их сложение означало бы, что
+    # средние считались до проекции, а применяются после (или наоборот) —
+    # разницы никто бы не заметил, а пространство было бы другое.
+    projection: Projection | None = None
 
     def __post_init__(self) -> None:
+        if self.projection is not None and (self.transform is not None or self.routing is not None):
+            raise ValueError(
+                "проекция на главные оси и центрирование по группе — два способа "
+                "убрать одну и ту же ось; вместе они дают пространство, "
+                "которого не было при обучении"
+            )
+        if self.projection is not None and self.projection.out_dim != self.centroids.shape[1]:
+            raise ValueError(
+                f"проекция даёт {self.projection.out_dim} измерений, "
+                f"а центроиды лежат в {self.centroids.shape[1]}"
+            )
         if (
             self.transform is not None
             and self.routing is not None
@@ -188,6 +212,8 @@ class TopicModel:
             raise ValueError("групп передано не столько же, сколько строк матрицы")
 
         data = np.asarray(X, dtype=np.float64)
+        if self.projection is not None:
+            data = self.projection.apply(data)
         if self.transform is not None:
             data = self.transform.apply_to_keys(list(groups or []), data)
         allowed = self.routing.mask(list(groups or [])) if self.routing is not None else None
@@ -214,6 +240,7 @@ class TopicModel:
                 "cluster_topics": [item.as_dict() for item in self.cluster_topics],
                 "params": self.params,
                 "transform": self.transform.meta() if self.transform is not None else None,
+                "projection": self.projection.meta() if self.projection is not None else None,
                 "routing": self.routing.meta() if self.routing is not None else None,
                 "required_fields": list(self.required_fields),
             },
@@ -230,6 +257,11 @@ class TopicModel:
             arrays["transform_fallback"] = np.asarray(
                 self.transform.fallback_mean, dtype=np.float64
             )
+        if self.projection is not None:
+            # То же самое и по той же причине: без среднего и базиса центроиды
+            # лежат в пространстве, которого больше нечем построить.
+            arrays["projection_mean"] = np.asarray(self.projection.mean, dtype=np.float64)
+            arrays["projection_basis"] = np.asarray(self.projection.basis, dtype=np.float64)
         temporary = file.with_suffix(file.suffix + ".tmp")
         with open(temporary, "wb") as handle:
             np.savez_compressed(handle, **arrays)
@@ -248,6 +280,16 @@ class TopicModel:
             transform_fallback = (
                 np.asarray(archive["transform_fallback"], dtype=np.float64)
                 if "transform_fallback" in archive
+                else None
+            )
+            projection_mean = (
+                np.asarray(archive["projection_mean"], dtype=np.float64)
+                if "projection_mean" in archive
+                else None
+            )
+            projection_basis = (
+                np.asarray(archive["projection_basis"], dtype=np.float64)
+                if "projection_basis" in archive
                 else None
             )
 
@@ -275,6 +317,18 @@ class TopicModel:
             if transform_meta is not None
             else None
         )
+        projection_meta = meta.get("projection")
+        if projection_meta is not None and (projection_mean is None or projection_basis is None):
+            # Ровно та же беда, что с обещанным преобразованием без средних:
+            # сделать вид, что проекции не было, значит выдать метки из другого
+            # пространства, не вызвав ни одной ошибки.
+            raise ValueError("в файле описана проекция, но нет её среднего или базиса")
+        projection = (
+            Projection.from_saved(projection_meta, projection_mean, projection_basis)
+            if projection_meta is not None
+            else None
+        )
+
         routing_meta = meta.get("routing")
         routing = ClusterRouting.from_saved(routing_meta) if routing_meta is not None else None
         if routing is not None and len(routing.cluster_groups) != centroids.shape[0]:
@@ -298,6 +352,7 @@ class TopicModel:
             ),
             params=dict(meta.get("params", {})),
             transform=transform,
+            projection=projection,
             routing=routing,
         )
 

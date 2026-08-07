@@ -27,7 +27,7 @@ import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
 import { formatDocumentLanguage, formatLocaleDate, parseTimestamp } from '../lib/locale';
 import { SOURCE_STATUS_BADGE_CLASS, formatSize, resolveSourceErrorMessage, resolveStatus } from '../lib/sources';
-import { TOPIC_LABEL_PARAM, TOPIC_PARAM, matchesTopicFilter, readTopicFilter, resolveTopicLabel } from '../lib/topics';
+import { TOPIC_LABEL_PARAM, TOPIC_PARAM, isTopicUnclear, matchesTopicFilter, readTopicFilter, resolveTopicLabel } from '../lib/topics';
 
 const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
 const ALLOWED_MIME_TYPES = new Set([
@@ -717,6 +717,16 @@ const AdminDocumentsPage = ({ notebookId }) => {
                                                             >
                                                                 <Tag className="h-3 w-3 shrink-0" />
                                                                 <span className="truncate">{topicLabel}</span>
+                                                            </p>
+                                                        ) : isTopicUnclear(doc) ? (
+                                                            // Бледнее обычной подписи и курсивом: это не тема, а
+                                                            // сообщение о её отсутствии, и спутать их нельзя.
+                                                            <p
+                                                                className="mt-0.5 flex max-w-[320px] items-center gap-1 text-xs italic text-slate-300"
+                                                                title={t('documents.topicUnclearHint')}
+                                                            >
+                                                                <Tag className="h-3 w-3 shrink-0" />
+                                                                <span className="truncate">{t('documents.topicUnclear')}</span>
                                                             </p>
                                                         ) : null}
                                                     </div>

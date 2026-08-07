@@ -531,5 +531,126 @@ class ReassignmentWorkerTests(TopicAssignmentTestCase):
         self.assertFalse(await self.worker.claim_and_process())
 
 
+class UnclearDocumentsTests(TopicAssignmentTestCase):
+    """Документ, который модель отказалась относить к теме.
+
+    Отказ — законченный ответ, а не сбой, и путать его с пропуском нельзя:
+    пропуск лечится переиндексацией, отказ лечить нечем. Поэтому он и считается
+    отдельным числом, и в базе выглядит иначе — версия модели проставлена, а
+    номера кластера нет.
+    """
+
+    async def register_model_with_threshold(self, threshold: float = 0.30):
+        write_language_artifact(self.artifact)
+        # Порог дописывается в уже собранный артефакт, чтобы остальные фикстуры
+        # остались нетронутыми: их читают полтора десятка других проверок.
+        with np.load(self.artifact, allow_pickle=False) as archive:
+            payload = {name: archive[name] for name in archive.files}
+        meta = json.loads(str(payload["meta"]))
+        meta["params"] = {**meta.get("params", {}), "margin_threshold": threshold}
+        payload["meta"] = np.array(json.dumps(meta, ensure_ascii=False))
+        np.savez_compressed(self.artifact, **payload)
+        forget_cached_artifacts()
+        async with self.session_factory() as session:
+            return await TopicsService.sync_active_model(session)
+
+    async def make_document_between_two_topics(self, language: str = "ru") -> Document:
+        """Документ ровно посередине между двумя центрами тем.
+
+        Середина, а не «где-то рядом»: только там запас заведомо близок к нулю,
+        и проверка не зависит от того, как далеко разошлись центроиды фикстуры.
+        """
+        document = await self.seed(
+            Document(
+                name="посередине.txt",
+                path=self.make_file("посередине.txt"),
+                size=10,
+                language=language,
+                status="indexed",
+                owner_id=self.owner.id,
+                notebook_id=self.notebook.id,
+            )
+        )
+        first = np.asarray(document_vector_for(language, 0))
+        second = np.asarray(document_vector_for(language, 1))
+        chunks = await self.seed(
+            Chunk(text="раз", page=1, chunk_index=0, doc_id=document.id),
+            Chunk(text="два", page=1, chunk_index=1, doc_id=document.id),
+        )
+        # Среднее двух фрагментов — это середина между темами: вектор документа
+        # считается именно усреднением (document_vector).
+        for chunk, vector in zip(chunks, (first, second)):
+            self.vectors[str(chunk.id)] = list(vector)
+        return document
+
+    async def test_the_document_in_the_middle_gets_no_topic_but_gets_the_version(self):
+        model = await self.register_model_with_threshold()
+        document = await self.make_document_between_two_topics()
+        async with self.session_factory() as session:
+            outcome = await TopicsService.assign_documents(session, model, [document.id])
+        self.assertEqual(outcome.unclear, 1)
+        self.assertEqual(outcome.assigned, 0)
+        self.assertEqual(outcome.skipped, 0)
+
+        async with self.session_factory() as session:
+            stored = await session.get(Document, document.id)
+            # Версия есть, номера нет — это и есть «модель посмотрела и не
+            # решилась», в отличие от «ещё не размечен» (версии тоже нет).
+            self.assertEqual(stored.topic_model_version, model.version)
+            self.assertIsNone(stored.topic_cluster_index)
+            self.assertIsNone(stored.topic_label)
+            self.assertIsNone(stored.topic_label_ru)
+            self.assertIsNone(stored.topic_label_tg)
+
+    async def test_a_confident_document_is_still_assigned(self):
+        """Порог не должен отказывать всем подряд: документ у центра темы
+        получает её как раньше. Без этой проверки предыдущая была бы зелёной и
+        при пороге, отвергающем весь корпус."""
+        model = await self.register_model_with_threshold()
+        document = await self.make_indexed_document(cluster=1)
+        async with self.session_factory() as session:
+            outcome = await TopicsService.assign_documents(session, model, [document.id])
+        self.assertEqual((outcome.assigned, outcome.unclear), (1, 0))
+        async with self.session_factory() as session:
+            stored = await session.get(Document, document.id)
+        self.assertEqual(stored.topic_cluster_index, 1)
+        self.assertEqual(stored.topic_label, LABELS[1])
+
+    async def test_without_a_threshold_the_same_document_gets_a_topic(self):
+        """Краснота предыдущей проверки: без порога середина между темами
+        по-прежнему получает тему — то есть отказ вызывает именно порог, а не
+        что-то ещё в этом документе."""
+        model = await self.register_model()
+        document = await self.make_document_between_two_topics()
+        async with self.session_factory() as session:
+            outcome = await TopicsService.assign_documents(session, model, [document.id])
+        self.assertEqual((outcome.assigned, outcome.unclear), (1, 0))
+        async with self.session_factory() as session:
+            stored = await session.get(Document, document.id)
+        self.assertIsNotNone(stored.topic_cluster_index)
+
+    async def test_an_unclear_document_falls_out_of_the_distribution(self):
+        """Распределение считает только строки с номером кластера, поэтому
+        отказавшийся документ честно не попадает ни в одну тему — и сумма по
+        темам не сходится с числом документов. Так и должно быть."""
+        model = await self.register_model_with_threshold()
+        middle = await self.make_document_between_two_topics()
+        clear = await self.make_indexed_document(cluster=2, name="ясный.txt")
+        async with self.session_factory() as session:
+            await TopicsService.assign_documents(session, model, [middle.id, clear.id])
+            rows = await TopicsService.distribution(session, model)
+        self.assertEqual(sum(row.document_count for row in rows), 1)
+
+    async def test_the_counts_of_unclear_and_skipped_do_not_mix(self):
+        """Пропуск чинится переиндексацией, отказ чинить нечем. Одно число на
+        двоих отправило бы администратора искать поломку там, где её нет."""
+        model = await self.register_model_with_threshold()
+        middle = await self.make_document_between_two_topics()
+        without = await self.make_indexed_document(name="без-векторов.txt", with_vectors=False)
+        async with self.session_factory() as session:
+            outcome = await TopicsService.assign_documents(session, model, [middle.id, without.id])
+        self.assertEqual((outcome.assigned, outcome.skipped, outcome.unclear), (0, 1, 1))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

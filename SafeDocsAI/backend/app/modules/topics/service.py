@@ -73,7 +73,8 @@ from app.core.database import (
     session_context,
 )
 from app.core.exceptions import TopicErrors
-from app.modules.topics.kmeans import KMeans, l2_normalize
+from app.modules.topics.kmeans import KMeans, l2_normalize, squared_distances
+from app.modules.topics.pca import PROJECTION_KIND, Projection
 from app.shared.models import Chunk, Document, TopicModelVersion, utcnow
 
 logger = logging.getLogger(__name__)
@@ -142,12 +143,24 @@ TRANSFORM_GROUP_MEAN_SHIFT = "group_mean_shift"
 # СПИСКОМ полей, ключи составные («en|real»), и после вычитания вектор
 # нормируется заново.
 TRANSFORM_GROUP_CENTERING = "group_centering"
+# Проекция на главные оси корпуса: вычесть общее среднее и спроецировать на
+# базис, из которого выброшены первые несколько компонент. Те же оси языка и
+# регистра, что снимало центрирование по группе, — но БЕЗ единственного
+# требования, которое делало прежнюю модель хрупкой: документ не спрашивают ни о
+# языке, ни о жанре, потому что оси заданы геометрией корпуса, а не разметкой.
+#
+# Само преобразование живёт в app.modules.topics.pca.Projection и применяется
+# ТЕМ ЖЕ кодом, что при обучении. Своя копия «вычесть и умножить» здесь
+# разошлась бы с обучающей на первой же правке, а расхождение проявилось бы
+# номерами кластеров, которые вроде бы посчитались.
+TRANSFORM_PCA_PROJECTION = PROJECTION_KIND
 
 KNOWN_TRANSFORMS = (
     TRANSFORM_NONE,
     TRANSFORM_MEAN_SHIFT,
     TRANSFORM_GROUP_MEAN_SHIFT,
     TRANSFORM_GROUP_CENTERING,
+    TRANSFORM_PCA_PROJECTION,
 )
 
 # Единственный признак, по которому слой назначения умеет выбрать группу
@@ -264,10 +277,18 @@ class TopicTransform:
     # Хранятся ради описания: пользователь и журнал должны видеть, что модель
     # группировала не только по языку.
     fixed_fields: tuple[tuple[str, str], ...] = ()
+    # Проекция на главные оси. Тот же объект, что записала обучающая сторона, и
+    # применяется он своим же методом: см. TRANSFORM_PCA_PROJECTION выше.
+    projection: Projection | None = None
 
     @property
     def description(self) -> str:
         """Строка для API и для журнала: что именно делает преобразование."""
+        if self.kind == TRANSFORM_PCA_PROJECTION and self.projection is not None:
+            return (
+                f"{self.kind}(снято осей: {self.projection.dropped}, "
+                f"измерений: {self.projection.out_dim})"
+            )
         if self.kind in (TRANSFORM_GROUP_MEAN_SHIFT, TRANSFORM_GROUP_CENTERING):
             # Зафиксированные поля названы прямо в подписи: «по языку» и «по
             # языку, при dataset_origin=real» — это разные преобразования, и
@@ -284,6 +305,16 @@ class TopicTransform:
             prepared = unit_vector(prepared)
         if self.kind == TRANSFORM_NONE:
             return prepared
+        if self.kind == TRANSFORM_PCA_PROJECTION:
+            if self.projection is None:
+                # Сюда попасть нельзя: разбор отказывается собрать такой вид без
+                # массивов. Проверка стоит на случай, если когда-нибудь появится
+                # второй путь создания — молча вернуть сырой вектор значило бы
+                # сравнить 4096 чисел с 32 центроидами и упасть уже не здесь.
+                raise TopicModelUnusable(
+                    "преобразование pca_projection объявлено без среднего и базиса"
+                )
+            return self.projection.apply(prepared)
         if self.kind == TRANSFORM_MEAN_SHIFT:
             shift = self.mean
         else:
@@ -445,6 +476,37 @@ def _parse_group_centering(
     )
 
 
+def _parse_projection(raw: Any, arrays: dict[str, np.ndarray]) -> TopicTransform:
+    """Проекция на главные оси: среднее и базис лежат отдельными массивами.
+
+    В JSON их не кладут и класть нельзя: базис 4096×32 — это сто тридцать тысяч
+    чисел, то есть мегабайты текста с потерей точности на каждом.
+
+    unit_input здесь ИСТИНА, и это не деталь. Обучение считало проекцию на
+    векторах единичной длины (обучающий кэш их нормирует), а вектор боевого
+    документа — среднее векторов его фрагментов, и длина у него тем меньше, чем
+    документ разнороднее. Вычесть среднее единичных векторов из вектора длины
+    0.8 значит сдвинуть его дальше, чем сдвигало обучение, и получить другое
+    направление, то есть другую тему. Ошибка молчаливая: номер посчитается.
+    """
+    if not isinstance(raw, dict):
+        raise TopicModelUnusable(f"описание проекции не разобрано: {raw!r}")
+    mean = arrays.get("projection_mean")
+    basis = arrays.get("projection_basis")
+    if mean is None or basis is None:
+        raise TopicModelUnusable(
+            "в артефакте объявлена проекция на главные оси, но в архиве нет "
+            "projection_mean и projection_basis: применить центроиды не к чему"
+        )
+    try:
+        projection = Projection.from_saved(raw, mean, basis)
+    except ValueError as exc:
+        raise TopicModelUnusable(f"проекция в артефакте несогласована: {exc}") from exc
+    return TopicTransform(
+        kind=TRANSFORM_PCA_PROJECTION, projection=projection, unit_input=True
+    )
+
+
 def parse_transform(meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> TopicTransform:
     """Собрать преобразование из метаданных артефакта.
 
@@ -460,6 +522,19 @@ def parse_transform(meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> Topi
     raw = meta.get("transform")
     if raw is None:
         raw = (meta.get("params") or {}).get("transform")
+
+    projection_raw = meta.get("projection")
+    if projection_raw is not None:
+        if raw is not None:
+            # Два преобразования сразу — это не «одно поверх другого», а
+            # пространство, которого при обучении не было: проекция считалась
+            # до центрирования или после, и по файлу этого не узнать.
+            raise TopicModelUnusable(
+                "в артефакте объявлены и проекция, и центрирование по группе: "
+                "какое из них применялось при обучении, из файла не следует"
+            )
+        return _parse_projection(projection_raw, arrays)
+
     if raw is None:
         # Ключа нет вовсе — артефакт обучен без преобразования. Это честное
         # прочтение, а не догадка: вид преобразования называется явно, и
@@ -554,6 +629,10 @@ class TopicArtifact:
     trained_at: datetime
     digest: str
     path: str
+    # Ниже этого запаса модель отказывается называть тему. None — порога нет:
+    # так читаются все артефакты, обученные до его появления, и так они
+    # продолжают работать ровно как раньше.
+    margin_threshold: float | None = None
 
     @property
     def cluster_count(self) -> int:
@@ -584,12 +663,50 @@ class TopicArtifact:
         проявилось бы только в продакшене — метками, которые вроде бы
         посчитались.
         """
+        return self.assign_with_margin(vector, group=group)[0]
+
+    def assign_with_margin(
+        self, vector: np.ndarray, *, group: str | None
+    ) -> tuple[int, float]:
+        """Кластер и запас уверенности: 1 - d1/d2.
+
+        d1 — расстояние до ближайшего центроида, d2 — до второго. Ноль означает
+        «документ ровно посередине между двумя темами». Отношение, а не
+        разность: абсолютные расстояния зависят от размерности пространства, и
+        порог, подобранный при обучении одной модели, ничего не значил бы для
+        другой.
+        """
         prepared = self.transform.apply(
             np.asarray(vector, dtype=np.float64), group=group
         )
         model = KMeans(n_clusters=self.cluster_count, normalize=self.normalize)
         model.centroids_ = self.centroids
-        return int(model.predict(prepared.reshape(1, -1))[0])
+        row = prepared.reshape(1, -1)
+        cluster = int(model.predict(row)[0])
+        if self.cluster_count < 2:
+            return cluster, 1.0
+        # Расстояния считаются от того же вектора, что и predict: если
+        # normalize включён, KMeans нормирует вход у себя, и запас, посчитанный
+        # по ненормированному вектору, относился бы к другой точке.
+        point = l2_normalize(row) if self.normalize else row
+        distances = np.sqrt(np.maximum(squared_distances(point, self.centroids), 0.0))[0]
+        nearest = np.partition(distances, 1)[:2]
+        first, second = float(nearest[0]), float(nearest[1])
+        if second <= 0.0:
+            return cluster, 1.0
+        return cluster, float(1.0 - first / second)
+
+    def is_confident(self, margin: float) -> bool:
+        """Достаточен ли запас, чтобы называть тему.
+
+        Порога нет — уверены всегда: артефакты, обученные до появления порога,
+        обязаны работать как прежде, а не начать молча отказывать. Порог, если
+        он есть, подобран при обучении по отложенной выборке и лежит в модели —
+        число, взятое здесь из головы, относилось бы к другой геометрии.
+        """
+        if self.margin_threshold is None:
+            return True
+        return float(margin) >= self.margin_threshold
 
 
 def default_label(cluster: int) -> str:
@@ -740,6 +857,30 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _extract_margin_threshold(params: dict[str, Any]) -> float | None:
+    """Порог уверенности из параметров обучения, если он там есть.
+
+    Отсутствие — не ноль. Ноль означал бы «порог есть и он нулевой», то есть
+    отказ ровно тем документам, что стоят точно посередине между двумя темами;
+    отсутствие означает «порога не подбирали», и модель обязана вести себя как
+    раньше. Значение вне [0, 1) не порог, а описка: отношение расстояний по
+    построению лежит именно там, и молча принять 5.0 значило бы отказать всему
+    корпусу.
+    """
+    raw = params.get("margin_threshold")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("порог уверенности в артефакте не число: %r — считаем, что его нет", raw)
+        return None
+    if not 0.0 <= value < 1.0:
+        logger.warning("порог уверенности %r вне [0, 1) — считаем, что его нет", value)
+        return None
+    return value
+
+
 def load_artifact(path: Path | None = None) -> TopicArtifact:
     """Прочитать артефакт с диска.
 
@@ -816,6 +957,7 @@ def load_artifact(path: Path | None = None) -> TopicArtifact:
         trained_at=_extract_trained_at(meta, file),
         digest=file_digest(file),
         path=str(file),
+        margin_threshold=_extract_margin_threshold(params),
     )
 
 
@@ -940,19 +1082,31 @@ def document_vector(vectors: Iterable[np.ndarray]) -> np.ndarray | None:
 class AssignmentOutcome:
     """Сколько документов пачки получили тему и сколько остались без неё.
 
-    Два числа, а не одно: «размечено 800» без «пропущено 200» невозможно
+    Три числа, а не одно: «размечено 800» без «пропущено 200» невозможно
     объяснить, а именно объяснение и нужно администратору, который смотрит на
-    результат переразметки. Причина пропуска у всех одна и та же
-    (topic.embedding_unavailable) — векторов документа в активной коллекции
-    не нашлось.
+    результат переразметки.
+
+    И две причины остаться без темы — разные, поэтому и считаются порознь:
+
+      * skipped — векторов документа в активной коллекции не нашлось
+        (topic.embedding_unavailable). Беда технической природы: документ либо
+        индексировали под другую embedding-модель, либо векторы потеряны, и
+        лечится это переиндексацией.
+      * unclear — векторы есть, модель их посмотрела и ОТКАЗАЛАСЬ называть
+        тему: документ стоит почти ровно между двумя центрами. Лечить нечего,
+        это правильный ответ. Слить его со skipped значило бы отправить
+        администратора чинить то, что работает как задумано.
     """
 
     assigned: int = 0
     skipped: int = 0
+    unclear: int = 0
 
     def __add__(self, other: "AssignmentOutcome") -> "AssignmentOutcome":
         return AssignmentOutcome(
-            assigned=self.assigned + other.assigned, skipped=self.skipped + other.skipped
+            assigned=self.assigned + other.assigned,
+            skipped=self.skipped + other.skipped,
+            unclear=self.unclear + other.unclear,
         )
 
 
@@ -1304,6 +1458,7 @@ class TopicsService:
 
         assigned = 0
         skipped = 0
+        unclear = 0
         for document in documents:
             own = [vectors[cid] for cid in by_document.get(int(document.id), []) if cid in vectors]
             try:
@@ -1327,7 +1482,29 @@ class TopicsService:
                 )
                 skipped += 1
                 continue
-            cluster = artifact.assign(centre, group=document.language)
+            cluster, margin = artifact.assign_with_margin(centre, group=document.language)
+            if not artifact.is_confident(margin):
+                # Документ есть, вектор есть, а темы нет: он стоит почти ровно
+                # между двумя центрами, и любая из них была бы монеткой.
+                # Записываем версию модели без номера кластера — это отличает
+                # «модель посмотрела и не решилась» от «ещё не размечен»
+                # (topic_model_version = NULL). Распределение считает только
+                # строки с topic_cluster_index IS NOT NULL, поэтому такой
+                # документ честно не попадает ни в одну тему.
+                logger.info(
+                    "Документ %s: запас уверенности %.4f ниже порога %.4f, тема не назначена",
+                    document.id,
+                    margin,
+                    artifact.margin_threshold,
+                )
+                document.topic_cluster_index = None
+                document.topic_label = None
+                document.topic_label_ru = None
+                document.topic_label_tg = None
+                document.topic_model_version = model.version
+                session.add(document)
+                unclear += 1
+                continue
             document.topic_cluster_index = cluster
             document.topic_label = artifact.label_of(cluster)
             # Переводы ХРАНЯТСЯ рядом с основной подписью и по тому же правилу:
@@ -1348,7 +1525,7 @@ class TopicsService:
             session.add(document)
             assigned += 1
         await session.commit()
-        return AssignmentOutcome(assigned=assigned, skipped=skipped)
+        return AssignmentOutcome(assigned=assigned, skipped=skipped, unclear=unclear)
 
     @staticmethod
     def _assert_same_space(model: TopicModelVersion, artifact: TopicArtifact) -> None:
@@ -1500,6 +1677,11 @@ async def run_reassign(job_id: int) -> dict[str, Any]:
         "documents": total,
         "assigned": outcome.assigned,
         "skipped": outcome.skipped,
+        # Отдельным числом, а не внутри skipped: пропуск чинится
+        # переиндексацией, а отказ по неуверенности чинить нечем — это
+        # правильный ответ модели. Слить их значило бы отправить администратора
+        # искать поломку там, где всё работает как задумано.
+        "unclear": outcome.unclear,
         "stale": stale,
     }
     if outcome.skipped:
