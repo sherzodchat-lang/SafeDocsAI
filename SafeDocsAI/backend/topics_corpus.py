@@ -65,10 +65,18 @@ BACKEND_ROOT = Path(__file__).resolve().parent
 DEFAULT_SOURCE_DIR = BACKEND_ROOT / "data" / "topics_dataset"
 DEFAULT_OUT_DIR = BACKEND_ROOT / "data" / "topics_tj"
 
-# Сайты, чьи разделы годятся как разметка. Список закрытый и явный: источник, у
-# которого рубрики окажутся мусорными, должен добавляться сюда осознанно, а не
-# просто потому, что кто-то положил рядом файл.
-LABELLED_SOURCES = frozenset({"khovar.tj", "jumhuriyat.tj", "ozodi.org", "tg.wikipedia.org"})
+# Сайты с РЕДАКЦИОННЫМИ рубриками — теми, что поставил человек-редактор.
+# Список закрытый и явный: источник, у которого рубрики окажутся мусорными,
+# должен добавляться сюда осознанно, а не просто потому, что кто-то положил
+# рядом файл.
+#
+# У остальных источников рубрику тоже ищем — часть их разделов осмысленна и
+# сведена вручную (CURATED_TO_RUBRIC в rubrics.py). Разница между ними в другом:
+# неизвестный раздел РЕДАКЦИОННОГО источника требует решения человека и
+# называется в отчёте поимённо, а неизвестная страница-подборка у sputnik — это
+# «Прогноз погоды» и «Курсы валют», и требовать по ним решения значит завалить
+# отчёт шумом.
+EDITORIAL_SOURCES = frozenset({"khovar.tj", "jumhuriyat.tj", "ozodi.org", "tg.wikipedia.org"})
 
 # Ниже этого числа документов рубрика в измерении не участвует: ARI по классу
 # из десятка документов — это шум, выданный за результат. Документы при этом
@@ -153,16 +161,14 @@ def build(records: list[dict]) -> tuple[list[dict], dict]:
 
         source = str(record.get("source") or "")
         raw_section = str(record.get("section") or "")
-        if source in LABELLED_SOURCES:
-            code = normalize_section(raw_section)
-            if code is None:
-                # Раздел есть, а решения по нему нет. Документ остаётся в
-                # корпусе как неразмеченный, но раздел назван в отчёте: молча
-                # ссыпать его в корзину значило бы потерять тему, которую
-                # стоило бы завести.
+        code = normalize_section(raw_section)
+        if code is None:
+            # Раздел есть, а решения по нему нет. Документ остаётся в корпусе
+            # как неразмеченный. У редакционного источника раздел вдобавок
+            # называется в отчёте: молча ссыпать его в корзину значило бы
+            # потерять тему, которую стоило бы завести.
+            if source in EDITORIAL_SOURCES:
                 report["unknown_sections"][raw_section] += 1
-                code = UNLABELLED
-        else:
             code = UNLABELLED
 
         language = str(record.get("lang") or "tg")
@@ -283,7 +289,7 @@ def print_report(documents: list[dict], report: dict, demoted: list[str], writte
     say("")
     say("по источникам:")
     for source, count in report["by_source"].most_common():
-        mark = "размечен" if source in LABELLED_SOURCES else "только для осей"
+        mark = "рубрики редакции" if source in EDITORIAL_SOURCES else "подборки, сведены вручную"
         say(f"  {count:5d}  {source:22s} {mark}")
     say("")
     say("по языкам: " + ", ".join(f"{k} {v}" for k, v in sorted(report["by_language"].items())))
