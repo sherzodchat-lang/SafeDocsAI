@@ -1383,6 +1383,43 @@ class TopicsService:
         rows.sort(key=lambda row: (-row.document_count, row.cluster_index))
         return rows
 
+    @staticmethod
+    async def unclear_count(
+        session: AsyncSession,
+        model: TopicModelVersion,
+        *,
+        notebook_id: int | None = None,
+        owner_id: int | None = None,
+    ) -> int:
+        """Сколько документов АКТИВНАЯ модель посмотрела и не отнесла ни к одной теме.
+
+        Ровно дополнение к distribution: те же условия выборки, но номер
+        кластера пуст при проставленной версии. Пара «версия есть, номера нет»
+        и означает отказ по неуверенности — документ, которого ещё не касались,
+        не имеет и версии.
+
+        Число нужно экрану: сумма по темам у него меньше числа источников, и без
+        объяснения эта разница выглядит как потерянные документы. Отдаётся тем
+        же способом и с той же областью видимости, что распределение, — иначе
+        пользователь увидел бы в счётчике чужие документы.
+        """
+        conditions = [
+            "topic_model_version = :version",
+            "topic_cluster_index IS NULL",
+        ]
+        params: dict[str, Any] = {"version": model.version}
+        if notebook_id is not None:
+            conditions.append("notebook_id = :notebook_id")
+            params["notebook_id"] = notebook_id
+        if owner_id is not None:
+            conditions.append("owner_id = :owner_id")
+            params["owner_id"] = owner_id
+        result = await session.execute(
+            text(f"SELECT COUNT(*) FROM document WHERE {' AND '.join(conditions)}"),
+            params,
+        )
+        return int(result.scalar_one())
+
     # -- назначение ------------------------------------------------------
     @staticmethod
     async def assign_after_indexing(session: AsyncSession, doc_id: int) -> bool:

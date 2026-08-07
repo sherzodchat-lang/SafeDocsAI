@@ -29,7 +29,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from pydantic import BaseModel, field_serializer
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
@@ -59,6 +59,11 @@ MODEL_MISSING_DETAIL = (
 REASSIGN_IN_PROGRESS_DETAIL = (
     "Topic reassignment is already queued or running; wait for it to finish"
 )
+
+# Сколько документов выборки модель оставила без темы, посмотрев их. Тем же
+# способом, что X-Total-Count у источников: тело остаётся голым списком тем,
+# а число, которое ни к одной теме не относится, едет рядом.
+UNCLEAR_COUNT_HEADER = "X-Unclear-Count"
 
 
 class TopicRead(BaseModel):
@@ -135,8 +140,28 @@ class ReassignAccepted(BaseModel):
     model_version: int
 
 
-@router.get("/topics", response_model=list[TopicRead])
+@router.get(
+    "/topics",
+    response_model=list[TopicRead],
+    responses={
+        200: {
+            "headers": {
+                UNCLEAR_COUNT_HEADER: {
+                    "description": (
+                        "Сколько документов в той же выборке активная модель "
+                        "посмотрела и не отнесла ни к одной теме (запас "
+                        "уверенности ниже порога). Заголовком, а не полем тела: "
+                        "тело — список тем, и вкладывать в него число, которое "
+                        "ни к одной теме не относится, некуда."
+                    ),
+                    "schema": {"type": "integer"},
+                }
+            }
+        }
+    },
+)
 async def read_topics(
+    response: Response,
     notebook_id: int | None = Query(default=None, ge=1, le=deps.MAX_ID),
     session: AsyncSession = Depends(deps.get_session),
     current_user: User = Depends(deps.get_current_user),
@@ -166,12 +191,21 @@ async def read_topics(
         await deps.assert_owns_notebook(notebook_id, session, current_user)
     model = await TopicsService.active_model(session)
     if model is None:
+        # Заголовок ставится и здесь: клиент не должен отличать «модели нет» от
+        # «заголовок забыли» — во втором случае он показал бы прошлое число.
+        response.headers[UNCLEAR_COUNT_HEADER] = "0"
         return []
+    owner_id = _owner_filter(current_user)
     rows = await TopicsService.distribution(
         session,
         model,
         notebook_id=notebook_id,
-        owner_id=_owner_filter(current_user),
+        owner_id=owner_id,
+    )
+    response.headers[UNCLEAR_COUNT_HEADER] = str(
+        await TopicsService.unclear_count(
+            session, model, notebook_id=notebook_id, owner_id=owner_id
+        )
     )
     return [
         TopicRead(

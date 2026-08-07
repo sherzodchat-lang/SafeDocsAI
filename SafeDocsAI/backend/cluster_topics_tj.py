@@ -71,6 +71,7 @@ from app.modules.topics.pipeline.model_io import TopicModel, dominant_topics  # 
 from app.modules.topics.pipeline.rubrics import (  # noqa: E402
     RUBRIC_BY_CODE,
     UNLABELLED,
+    rubric_names,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parent
@@ -408,6 +409,10 @@ def build_labels(corpus, labels, centroid_count):
     rubric_of_cluster = {item.cluster: (item.topic_id or UNLABELLED) for item in topics}
     names_tg = {code: rubric.tg for code, rubric in RUBRIC_BY_CODE.items()}
     names_ru = {code: rubric.ru for code, rubric in RUBRIC_BY_CODE.items()}
+    # Пустому кластеру рубрику дать неоткуда — в нём нет ни одного документа.
+    # Без этой пары имён он получил бы подпись «UNK», то есть строку из
+    # внутреннего кода в списке тем на экране.
+    names_tg[UNLABELLED], names_ru[UNLABELLED] = rubric_names(UNLABELLED)
     labels_tg = compose_labels(rubric_of_cluster, tokens_of_cluster, names_tg)
     labels_ru = compose_labels(rubric_of_cluster, tokens_of_cluster, names_ru)
     return topics, labels_tg, labels_ru

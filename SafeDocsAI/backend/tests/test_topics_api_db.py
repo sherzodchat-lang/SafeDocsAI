@@ -46,6 +46,9 @@ from topicfixtures import (  # noqa: E402
     write_language_artifact,
 )
 
+# Имя заголовка берётся из обработчика, а не переписывается строкой:
+# разъехавшись, тест проверял бы заголовок, которого сервер не ставит.
+from app.api.endpoints.topics import UNCLEAR_COUNT_HEADER  # noqa: E402
 from app.core.database import (  # noqa: E402
     TOPIC_REASSIGN_ACTIVE_INDEX,
     TOPIC_REASSIGN_JOB_TYPE,
@@ -498,6 +501,88 @@ class ReassignmentTests(TopicsApiTestCase):
             session.add(Job(job_type="index_document", status="queued"))
             await session.commit()
         self.assertEqual(len(await self.all_rows(Job)), 2)
+
+
+class UnclearCountHeaderTests(TopicsApiTestCase):
+    """Сколько документов выборки модель посмотрела и оставила без темы.
+
+    Число едет заголовком, а не в теле: тело — список тем, и вкладывать в него
+    величину, которая ни к одной теме не относится, некуда.
+
+    Нужно оно ради одной строки на экране. Сумма document_count по темам меньше
+    числа источников ровно на это число, и без объяснения разница выглядит как
+    потерянные документы.
+    """
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.model = await self.register_model()
+        self.mine = await self.make_notebook(self.owner, "Мой")
+        self.other_book = await self.make_notebook(self.owner, "Второй")
+        self.foreign = await self.make_notebook(self.other, "Чужой")
+
+    def header(self, response) -> str | None:
+        return response.headers.get(UNCLEAR_COUNT_HEADER)
+
+    async def test_a_document_the_model_refused_is_counted(self):
+        await self.make_document(self.owner, self.mine, cluster=0, version=self.model.version)
+        await self.make_document(
+            self.owner, self.mine, cluster=None, version=self.model.version, name="спорный.txt"
+        )
+        response = await self.client.get(TOPICS_URL)
+        self.assertEqual(self.header(response), "1")
+        # И он же не попал ни в одну тему — иначе счётчик был бы просто вторым
+        # именем для того, что уже есть в теле.
+        self.assertEqual(sum(row["document_count"] for row in response.json()), 1)
+
+    async def test_a_document_nobody_has_looked_at_yet_is_not_counted(self):
+        """Версии нет — документ ещё не размечали. Считать его отказом значило
+        бы обещать пользователю, что модель уже решила, а она не решала."""
+        await self.make_document(
+            self.owner, self.mine, cluster=None, version=None, name="новый.txt"
+        )
+        self.assertEqual(self.header(await self.client.get(TOPICS_URL)), "0")
+
+    async def test_a_refusal_by_an_older_model_is_not_counted(self):
+        """После переобучения номер 3 у старой модели означает уже другую тему,
+        и её отказы к нынешнему распределению отношения не имеют — ровно по той
+        же причине, по которой не считаются её назначения."""
+        await self.make_document(
+            self.owner, self.mine, cluster=None, version=self.model.version - 1, name="старый.txt"
+        )
+        self.assertEqual(self.header(await self.client.get(TOPICS_URL)), "0")
+
+    async def test_the_count_respects_the_notebook_scope(self):
+        await self.make_document(
+            self.owner, self.mine, cluster=None, version=self.model.version, name="в-моём.txt"
+        )
+        await self.make_document(
+            self.owner, self.other_book, cluster=None, version=self.model.version, name="во-втором.txt"
+        )
+        both = await self.client.get(TOPICS_URL)
+        one = await self.client.get(f"{TOPICS_URL}?notebook_id={self.mine.id}")
+        self.assertEqual(self.header(both), "2")
+        self.assertEqual(self.header(one), "1")
+
+    async def test_the_count_does_not_leak_documents_of_another_user(self):
+        """Область видимости у счётчика та же, что у распределения. Иначе по
+        нему можно было бы узнать, сколько документов у соседа."""
+        await self.make_document(
+            self.other, self.foreign, cluster=None, version=self.model.version, name="чужой.txt"
+        )
+        self.assertEqual(self.header(await self.client.get(TOPICS_URL)), "0")
+        self.as_user(self.admin)
+        self.assertEqual(self.header(await self.client.get(TOPICS_URL)), "1")
+
+    async def test_the_header_is_present_even_without_a_trained_model(self):
+        """Клиент не должен отличать «модели нет» от «заголовок забыли»: во
+        втором случае он показал бы прошлое число."""
+        async with self.session_factory() as session:
+            await session.execute(text("UPDATE topicmodelversion SET is_active = false"))
+            await session.commit()
+        response = await self.client.get(TOPICS_URL)
+        self.assertEqual(response.json(), [])
+        self.assertEqual(self.header(response), "0")
 
 
 if __name__ == "__main__":  # pragma: no cover
