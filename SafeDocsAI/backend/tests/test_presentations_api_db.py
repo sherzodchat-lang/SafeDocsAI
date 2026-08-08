@@ -989,9 +989,14 @@ class DeleteTests(PresentationsApiTestCase):
         real_remove = os.remove
 
         def spy(path, *args, **kwargs):
-            # В момент вызова файл ещё на месте: удаление строки его не
-            # трогало, этим занята только эта строчка обработчика.
-            seen.append(os.path.exists(path))
+            # Наблюдаем ТОЛЬКО файл колоды. Обработчик убирает ещё и кэш превью
+            # карточки (он лежит рядом и обычно не существует вовсе), и его
+            # удаление попадает под ту же подмену os.remove — но к проверяемому
+            # порядку «commit, потом диск» отношения не имеет.
+            if path == row.file_path:
+                # В момент вызова файл ещё на месте: удаление строки его не
+                # трогало, этим занята только эта строчка обработчика.
+                seen.append(os.path.exists(path))
             real_remove(path)
 
         with patch(f"{ENDPOINT_LOGGER}.os.remove", side_effect=spy):

@@ -83,12 +83,20 @@ class PresentationWorker:
         logger.info("Presentation worker stopped")
 
     async def recover(self) -> None:
-        """Вернуть в очередь то, что осталось от убитого процесса.
+        """Согласовать раздел с диском: вернуть прерванное в очередь и
+        восстановить заголовки колод, у которых их нет.
 
         Генерация не имеет промежуточного состояния на диске: файл появляется
         целиком и в самом конце. Поэтому 'generating', переживший перезапуск, —
         это не работа, которую можно продолжить, а работа, которую надо начать
         заново.
+
+        Заголовки — вторая половина того же согласования, и стоит она здесь по
+        той же причине, по какой здесь стоит первая: обе приводят строки БД в
+        соответствие с тем, что реально лежит на диске, и обе обязаны случиться
+        ДО того, как раздел начнёт отвечать пользователю. Колонка title
+        появилась позже самой таблицы, и у колод, собранных раньше, значение
+        лежит только в файле (см. PresentationsService.backfill_titles).
 
         Отсутствие БД на старте не должно валить приложение: следующая итерация
         цикла всё равно ничего не захватит, а согласование повторится при
@@ -97,12 +105,17 @@ class PresentationWorker:
         try:
             async with session_context() as session:
                 requeued = await PresentationsService.requeue_stuck(session)
+                restored = await PresentationsService.backfill_titles(session)
         except Exception as exc:
             logger.warning("Presentation reconciliation skipped: %s", exc)
             return
         if requeued:
             logger.info(
                 "Presentations returned to the queue after restart: %s", requeued
+            )
+        if restored:
+            logger.info(
+                "Restored titles of %s presentations from their PDF files", restored
             )
 
     # -- цикл ------------------------------------------------------------

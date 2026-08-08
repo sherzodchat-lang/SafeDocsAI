@@ -394,10 +394,19 @@ class SuccessfulGenerationTests(PresentationPipelineTestCase):
         observed: list[bool] = []
         original = presentation_service.PresentationsService.mark_ready
 
-        async def spy(session, presentation_id, *, file_path, file_size):
+        # Остальные именованные аргументы пропускаются как есть (**rest): здесь
+        # проверяется ПОРЯДОК шагов, а не состав записи о готовности, и список
+        # полей у неё пополняется (последним приехал title). Перечисленный
+        # вручную, он превратил бы этот тест в дубликат сигнатуры, падающий на
+        # каждой правке соседнего свойства.
+        async def spy(session, presentation_id, *, file_path, file_size, **rest):
             observed.append(os.path.exists(file_path))
             return await original(
-                session, presentation_id, file_path=file_path, file_size=file_size
+                session,
+                presentation_id,
+                file_path=file_path,
+                file_size=file_size,
+                **rest,
             )
 
         with patch.object(

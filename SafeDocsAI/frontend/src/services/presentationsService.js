@@ -13,9 +13,14 @@ const buildListQuery = ({ skip, limit } = {}) => {
 };
 
 /**
- * Превью шаблона запрашивается по адресу ИЗ ОТВЕТА (поле preview_url), а не по
+ * Превью запрашивается по адресу ИЗ ОТВЕТА (поле preview_url), а не по
  * склеенному здесь пути: как именно сервер раздаёт картинки — его дело, и
  * повторять эту схему на клиенте значит ломаться от любой её правки.
+ *
+ * Функция ОДНА на оба вида превью — шаблона оформления и самой колоды, — потому
+ * что различаются они только адресом, который в обоих случаях приходит с
+ * сервера. Вторая копия этих же трёх строк отличалась бы от первой ровно тем,
+ * что однажды забыли бы поправить.
  *
  * Отсюда и разбор адреса: абсолютный (http…) или начинающийся со слэша
  * preview_url — это уже полный путь, и baseURL клиента к нему приписывать
@@ -31,7 +36,7 @@ const isAbsoluteUrl = (url) => /^https?:\/\//i.test(url) || String(url).startsWi
 
 export const presentationsService = {
   getTemplates: () => api.get('/presentations/templates'),
-  getTemplatePreviewBlob: (previewUrl) => api.get(previewUrl, {
+  getPreviewBlob: (previewUrl) => api.get(previewUrl, {
     responseType: 'blob',
     ...(isAbsoluteUrl(previewUrl) ? { baseURL: '' } : {}),
   }),

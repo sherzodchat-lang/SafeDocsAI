@@ -1,83 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Check, ImageOff, Loader2 } from 'lucide-react';
+import React, { useRef } from 'react';
+import { Check, Loader2 } from 'lucide-react';
 
+import PreviewImage from './PreviewImage';
 import { cn } from '../../lib/utils';
 import { useLocale } from '../../i18n';
 import { resolveTemplateName } from '../../lib/presentations';
-import { presentationsService } from '../../services/presentationsService';
-
-/**
- * Превью шаблона.
- *
- * Картинка тянется отдельным запросом по preview_url из ответа (см.
- * presentationsService.getTemplatePreviewBlob) и живёт как object URL, который
- * обязательно освобождается: галерея перерисовывается при каждом обновлении
- * списка шаблонов, и незакрытые blob'ы копились бы до перезагрузки страницы.
- *
- * Сбой картинки не прячет шаблон: выбирают его по имени, а превью — подсказка.
- * Поэтому вместо карточки показывается заглушка, а не пустое место.
- */
-const TemplatePreview = ({ previewUrl, alt }) => {
-    const { t } = useLocale();
-    // Результат помнится ВМЕСТЕ с адресом, за которым ходили. Так состояние
-    // сбрасывается само при смене шаблона — без гашения его прямо в теле
-    // эффекта, то есть без лишнего каскада перерисовок.
-    const [result, setResult] = useState({ url: '', source: '', failed: false });
-
-    useEffect(() => {
-        if (!previewUrl) return undefined;
-
-        let active = true;
-        let objectUrl = '';
-
-        presentationsService.getTemplatePreviewBlob(previewUrl)
-            .then((response) => {
-                if (!active) return;
-                objectUrl = URL.createObjectURL(response.data);
-                setResult({ url: previewUrl, source: objectUrl, failed: false });
-            })
-            .catch((error) => {
-                console.error('Failed to fetch presentation template preview:', error);
-                if (active) setResult({ url: previewUrl, source: '', failed: true });
-            });
-
-        return () => {
-            active = false;
-            if (objectUrl) URL.revokeObjectURL(objectUrl);
-        };
-    }, [previewUrl]);
-
-    const isCurrent = Boolean(previewUrl) && result.url === previewUrl;
-    // Шаблон без preview_url — это не сбой запроса, а отсутствие картинки;
-    // показывается та же заглушка.
-    const failed = !previewUrl || (isCurrent && result.failed);
-    const source = isCurrent ? result.source : '';
-
-    if (failed) {
-        return (
-            <div className="flex h-32 w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-200 bg-slate-50 text-slate-400">
-                <ImageOff className="h-5 w-5" />
-                <span className="px-3 text-center text-[11px] leading-4">{t('presentations.previewUnavailable')}</span>
-            </div>
-        );
-    }
-
-    if (!source) {
-        return (
-            <div className="flex h-32 w-full items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-slate-400">
-                <Loader2 className="h-5 w-5 animate-spin" />
-            </div>
-        );
-    }
-
-    return (
-        <img
-            src={source}
-            alt={alt}
-            className="h-32 w-full rounded-xl border border-slate-200 bg-white object-contain"
-        />
-    );
-};
 
 /**
  * Галерея шаблонов — НАСТОЯЩАЯ радиогруппа, а не набор кликабельных карточек.
@@ -148,8 +75,8 @@ const PresentationTemplateGallery = ({
         );
     }
 
-    // Пустой список и сбой загрузки объявляет форма, над раскрытием: причина,
-    // по которой заказ невозможен, не должна прятаться вместе с панелью.
+    // Пустой список и сбой загрузки объявляет окно заказа, над галереей: причина,
+    // по которой заказывать нечего, обязана стоять рядом с выключенным «Далее».
     if (templates.length === 0) return null;
 
     // Точка входа фокуса: выбранная карточка, а до выбора — первая. Без этого
@@ -161,7 +88,7 @@ const PresentationTemplateGallery = ({
             role="radiogroup"
             aria-labelledby={labelId}
             aria-required="true"
-            className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3"
+            className="grid grid-cols-1 gap-3 sm:grid-cols-2"
         >
             {templates.map((template, index) => {
                 const isSelected = template.key === selectedKey;
@@ -185,9 +112,11 @@ const PresentationTemplateGallery = ({
                                 : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50',
                         )}
                     >
-                        <TemplatePreview
+                        <PreviewImage
                             previewUrl={template.preview_url}
                             alt={t('presentations.previewAlt', { name })}
+                            className="h-32 w-full rounded-xl border border-slate-200"
+                            imageClassName="object-contain"
                         />
                         <span className="flex items-center justify-between gap-2">
                             <span className="min-w-0 break-words text-sm font-semibold text-slate-900">{name}</span>

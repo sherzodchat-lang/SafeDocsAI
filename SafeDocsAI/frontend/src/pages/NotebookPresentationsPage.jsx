@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import { Plus } from 'lucide-react';
 
 import PresentationForm from '../components/presentations/PresentationForm';
 import PresentationList from '../components/presentations/PresentationList';
+import { Button } from '../components/ui/Button';
 import { useIndexingPoll } from '../hooks/useIndexingPoll';
 import { useLocale } from '../i18n';
 import { resolveApiErrorMessage } from '../lib/apiError';
@@ -69,6 +71,13 @@ const NotebookPresentationsPage = () => {
     const [createdMessage, setCreatedMessage] = useState('');
 
     /**
+     * Окно заказа. Раньше его содержимое стояло на странице постоянно и
+     * занимало пол-экрана над списком колод; теперь наверху одна кнопка, а всё
+     * остальное открывается по требованию (см. PresentationForm).
+     */
+    const [isDialogOpen, setIsDialogOpen] = useState(false);
+
+    /**
      * Побеждает последний ЗАПРОШЕННЫЙ, а не последний ответивший.
      *
      * Тот же приём, что в SourcesContext: у каждого запроса свой номер, и ответ
@@ -84,8 +93,9 @@ const NotebookPresentationsPage = () => {
     const lastRequestIdRef = useRef(0);
 
     // Куда прокручивать после принятого заказа — к сообщению «заказ принят».
-    // Нужно это не форме (она и так рядом), а повторному заказу из списка:
-    // кнопка «Заказать заново» может стоять глубоко в истории, и без прокрутки
+    // Нужно это и заказу из окна (оно закрывается, и подтверждение остаётся
+    // единственным следом сделанного), и повторному заказу из сетки: карточка
+    // «Заказать заново» может стоять глубоко в истории, и без прокрутки
     // и подтверждение, и новая карточка «В очереди» появлялись бы за верхней
     // границей экрана — то есть молча.
     const createdMessageRef = useRef(null);
@@ -162,6 +172,9 @@ const NotebookPresentationsPage = () => {
         setTotal(null);
         setCreatedMessage('');
         setCreateError('');
+        // Окно заказа принадлежит блокноту, из которого его открыли: оставить
+        // его над другим блокнотом значит предложить заказать колоду не там.
+        setIsDialogOpen(false);
     }, [notebookId]);
 
     const pollPresentations = useCallback(async () => {
@@ -200,6 +213,12 @@ const NotebookPresentationsPage = () => {
                 setTotal((previous) => (previous == null ? null : previous + 1));
             }
 
+            // Заказ принят — окну больше нечего показывать, и закрывает его
+            // именно УСПЕХ: при отказе окно остаётся открытым вместе с
+            // набранными параметрами, иначе описание пришлось бы вводить заново
+            // из-за одной неудачной отправки.
+            setIsDialogOpen(false);
+
             const position = resolveQueuePosition(created);
             setCreatedMessage(position != null
                 ? t('presentations.createdQueuedPosition', { position })
@@ -228,24 +247,59 @@ const NotebookPresentationsPage = () => {
         setTotal((previous) => (previous == null ? null : Math.max(0, previous - 1)));
     }, []);
 
+    const openDialog = useCallback(() => {
+        // Прошлое подтверждение при открытии окна убирается: «заказ принят»
+        // относилось к предыдущей колоде, а рядом с новым заказом оно читается
+        // как ответ на него.
+        setCreatedMessage('');
+        setCreateError('');
+        setIsDialogOpen(true);
+    }, []);
+
+    const closeDialog = useCallback(() => setIsDialogOpen(false), []);
+
+    /**
+     * Пока в блокноте есть незавершённый заказ, новый ставить некуда: сервер
+     * отвечает 409 presentation.generation_in_progress (одна активная колода на
+     * блокнот — инвариант базы, а не только проверка обработчика). Поэтому
+     * кнопка выключена ЗАРАНЕЕ и объясняет причину: провести пользователя через
+     * два шага окна ради отказа на «Сгенерировать» — худшее из возможных
+     * поведений.
+     */
+    const createBlocked = hasPresentationsInProgress(items);
+
     return (
         // Раздел прокручивается сам, внутри отведённой блокнотом высоты: полосу
         // вкладок над содержимым уводить из виду при длинной истории заказов
         // незачем.
-        <div className="scrollbar-soft h-full min-h-0 space-y-6 overflow-y-auto pr-1">
-            <PresentationForm
-                templates={templates}
-                templatesLoading={templatesLoading}
-                templatesError={templatesError}
-                onReloadTemplates={loadTemplates}
-                onSubmit={handleCreate}
-                isSubmitting={isCreating}
-                submitError={createError}
-            />
+        <div className="scrollbar-soft h-full min-h-0 space-y-5 overflow-y-auto pr-1">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                    <h2 className="text-lg font-semibold text-slate-900">{t('presentations.listTitle')}</h2>
+                    {items.length > 0 ? (
+                        <p className="mt-0.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">
+                            {t('presentations.listCount', { count: items.length, total: total ?? items.length })}
+                        </p>
+                    ) : null}
+                </div>
 
-            {/* Результат отправки объявляется отдельно от формы: пользователь,
-                работающий с клавиатуры, остаётся на кнопке и иначе не узнаёт,
-                что заказ принят. */}
+                {/* Одна заметная кнопка вместо прежней формы на пол-экрана.
+                    Всё, что нужно заказу, живёт в окне (PresentationForm). */}
+                <Button
+                    type="button"
+                    size="lg"
+                    onClick={openDialog}
+                    disabled={createBlocked}
+                    title={createBlocked ? t('presentations.createDisabledInProgress') : undefined}
+                >
+                    <Plus className="h-4 w-4" />
+                    {t('presentations.create')}
+                </Button>
+            </div>
+
+            {/* Результат отправки объявляется отдельно от окна — окно к этому
+                моменту уже закрыто, — и живой областью: пользователь,
+                работающий с клавиатуры, иначе не узнает, что заказ принят. */}
             <div ref={createdMessageRef} role="status" aria-live="polite">
                 {createdMessage ? (
                     <p className="rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
@@ -254,18 +308,39 @@ const NotebookPresentationsPage = () => {
                 ) : null}
             </div>
 
+            {/* Отказ заказа показывает окно, пока оно открыто. Здесь он нужен
+                для второго пути постановки в очередь — «Заказать заново» с
+                карточки: окна при нём нет, и сообщению больше негде появиться. */}
+            {createError && !isDialogOpen ? (
+                <p role="alert" className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                    {createError}
+                </p>
+            ) : null}
+
             <PresentationList
                 items={items}
-                total={total}
                 templates={templates}
                 isLoading={isListLoading}
                 error={listError}
                 onRetry={handleRetry}
                 onDeleted={handleDeleted}
-                // Повторный заказ из списка идёт тем же путём, что заказ из
-                // формы: одна точка постановки в очередь, одно место для
+                // Повторный заказ из сетки идёт тем же путём, что заказ из
+                // окна: одна точка постановки в очередь, одно место для
                 // ошибок и подтверждения.
                 onReorder={handleCreate}
+                onCreate={openDialog}
+            />
+
+            <PresentationForm
+                isOpen={isDialogOpen}
+                onClose={closeDialog}
+                templates={templates}
+                templatesLoading={templatesLoading}
+                templatesError={templatesError}
+                onReloadTemplates={loadTemplates}
+                onSubmit={handleCreate}
+                isSubmitting={isCreating}
+                submitError={createError}
             />
         </div>
     );

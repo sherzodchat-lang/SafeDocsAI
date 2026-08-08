@@ -72,6 +72,7 @@ from app.modules.presentations.constants import (
     normalize_language,
 )
 from app.modules.presentations.llm_schemas import (
+    PLAN_TITLE_MAX_CHARS,
     RENDERER_ADDED_SLIDES,
     LlmResponseError,
     PresentationPlan,
@@ -79,6 +80,7 @@ from app.modules.presentations.llm_schemas import (
     validate_plan,
     validate_slide,
 )
+from app.modules.presentations.preview import read_stored_title
 from app.modules.presentations.prompts import (
     build_context_block,
     build_plan_messages,
@@ -255,8 +257,24 @@ class PresentationsService:
 
     @staticmethod
     async def mark_ready(
-        session: AsyncSession, presentation_id: int, *, file_path: str, file_size: int
+        session: AsyncSession,
+        presentation_id: int,
+        *,
+        file_path: str,
+        file_size: int,
+        title: str | None = None,
     ) -> None:
+        """Готовая колода: файл, размер и заголовок одной записью.
+
+        Заголовок кладётся ЗДЕСЬ, а не отдельным UPDATE'ом после: он часть того
+        же результата, что файл и размер, и раздельная запись оставляла бы окно,
+        в котором строка уже 'ready', а подписи у карточки ещё нет.
+
+        Обрезка по PLAN_TITLE_MAX_CHARS — страховка, а не проверка: схема плана
+        держит ту же границу, но заголовок доезжает сюда через несколько слоёв,
+        и колонка обязана остаться в своих пределах независимо от того, что с
+        ним сделали по дороге.
+        """
         await session.execute(
             text(
                 """
@@ -267,6 +285,7 @@ class PresentationsService:
                     error_text = NULL,
                     file_path = :file_path,
                     file_size = :file_size,
+                    title = :title,
                     updated_at = timezone('utc', now())
                 WHERE id = :id
                 """
@@ -276,9 +295,70 @@ class PresentationsService:
                 "ready": STATUS_READY,
                 "file_path": file_path,
                 "file_size": file_size,
+                "title": (title or "").strip()[:PLAN_TITLE_MAX_CHARS] or None,
             },
         )
         await session.commit()
+
+    @staticmethod
+    async def backfill_titles(session: AsyncSession) -> int:
+        """Заголовки колод, собранных до появления колонки title.
+
+        Проход РАЗОВЫЙ по существу, хотя вызывается при каждом старте: он берёт
+        только строки с title IS NULL, а успешно заполненная строка в выборку
+        больше не попадает. На чистой системе это один SELECT, не нашедший
+        ничего.
+
+        Почему проход на старте, а не ленивое заполнение при первом показе
+        списка. Заголовок — это ПОДПИСЬ карточки, и она нужна в первом же
+        ответе списка: ленивое заполнение либо заставило бы обработчик списка
+        лезть в файлы за N колод прямо в запросе, либо показало бы запасную
+        подпись до следующей перезагрузки страницы. Превью, наоборот, тянется
+        отдельным запросом на картинку — его задержку видно только как
+        крутящийся индикатор в рамке, поэтому оно и сделано ленивым.
+
+        Строка, у которой файл не читается (потерян, .pptx прежнего рендерера),
+        остаётся с NULL и будет опрошена снова при следующем старте. Это
+        дёшево — одна неудачная попытка открыть файл — и честно: появись файл
+        обратно, заголовок восстановится сам.
+
+        Чтение файлов уходит в поток: fitz блокирует, а на старте это тот же
+        event loop, в котором поднимается всё остальное приложение.
+        """
+        rows = await session.execute(
+            text(
+                """
+                SELECT id, file_path FROM presentation
+                WHERE title IS NULL
+                  AND status = :ready
+                  AND file_path IS NOT NULL
+                ORDER BY id
+                """
+            ),
+            {"ready": STATUS_READY},
+        )
+        pending = [(int(row[0]), str(row[1])) for row in rows.all()]
+        if not pending:
+            return 0
+
+        titles = await run_in_threadpool(
+            lambda: [
+                (presentation_id, read_stored_title(path))
+                for presentation_id, path in pending
+            ]
+        )
+        filled = 0
+        for presentation_id, title in titles:
+            if not title:
+                continue
+            await session.execute(
+                text("UPDATE presentation SET title = :title WHERE id = :id"),
+                {"id": presentation_id, "title": title},
+            )
+            filled += 1
+        if filled:
+            await session.commit()
+        return filled
 
     @staticmethod
     async def mark_error(
@@ -1215,7 +1295,14 @@ async def generate_presentation(
             timings=timings,
         )
         await PresentationsService.mark_ready(
-            session, presentation_id, file_path=file_path, file_size=file_size
+            session,
+            presentation_id,
+            file_path=file_path,
+            file_size=file_size,
+            # Тот же заголовок, что напечатан на титульном слайде и уехал в
+            # <title> страницы: подпись карточки обязана совпадать с тем, что
+            # пользователь увидит, открыв колоду.
+            title=plan.title,
         )
         logger.info(
             "Presentation %s is ready: %s slides, %s bytes, %.1fs",

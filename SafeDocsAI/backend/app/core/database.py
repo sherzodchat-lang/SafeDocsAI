@@ -683,6 +683,25 @@ async def init_db():
                 )
             )
 
+            # Заголовок колоды — то, О ЧЁМ она (см. Presentation.title). Колонка
+            # заведена позже самой таблицы, поэтому create_all её не добавит.
+            #
+            # UPDATE-бэкфилла рядом с ALTER нет намеренно, в отличие от note и
+            # insight выше: значение для старых строк лежит не в соседней
+            # колонке, а В ФАЙЛЕ на диске (/Title напечатанного PDF), и достать
+            # его SQL'ем нечем. Заполняет их согласование раздела на старте —
+            # PresentationsService.backfill_titles, вызываемое из
+            # PresentationWorker.recover(). NULL здесь означает ровно то, что
+            # означает: заголовка у этой строки ещё нет.
+            await conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS presentation
+                    ADD COLUMN IF NOT EXISTS title VARCHAR
+                    """
+                )
+            )
+
         logger.info("Database tables created successfully")
     except Exception as e:
         logger.error(f"Failed to create database tables: {e}")

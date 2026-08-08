@@ -232,6 +232,18 @@ class PresentationBase(SQLModel):
     # (см. RENDERER_ADDED_SLIDES в modules/presentations/llm_schemas.py).
     slide_count: int
     description: Optional[str] = None
+    # Заголовок КОЛОДЫ — то, о чём она, а не как оформлена. Формулирует его
+    # модель по найденному материалу (PresentationPlan.title в
+    # app/modules/presentations/llm_schemas.py), поэтому от description он
+    # отличается по существу: description пишет пользователь ДО генерации как
+    # пожелание, title рождается ПОСЛЕ неё из содержимого.
+    #
+    # Nullable, и это не «забыли заполнить», а три честных состояния: заказ ещё
+    # в очереди (заголовка не существует), генерация упала (его не будет
+    # никогда) и колода, собранная до появления колонки. Последним заголовок
+    # восстанавливается из /Title напечатанного PDF — туда его положил Chrome
+    # из того же plan.title (см. modules/presentations/preview.py).
+    title: Optional[str] = None
     # queued -> generating -> ready | error. Индекс по колонке нужен не сам по
     # себе (выборку очереди покрывает составной ix_presentation_queue из
     # init_db), а для «сколько презентаций в работе» без сканирования таблицы.

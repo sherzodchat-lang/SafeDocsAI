@@ -2,14 +2,14 @@ import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
     AlertTriangle,
     Download,
-    ExternalLink,
-    FileText,
     Loader2,
+    Plus,
     Presentation,
     RefreshCw,
     Trash2,
 } from 'lucide-react';
 
+import PreviewImage from './PreviewImage';
 import { Button } from '../ui/Button';
 import { cn } from '../../lib/utils';
 import { useModalDialog } from '../../hooks/useModalDialog';
@@ -20,18 +20,18 @@ import {
     hasPresentationsInProgress,
     resolvePresentationErrorMessage,
     resolvePresentationStatus,
+    resolvePresentationTitle,
     resolveProgress,
     resolveQueuePosition,
     resolveTemplateName,
 } from '../../lib/presentations';
-import { formatSize } from '../../lib/sources';
 import { presentationsService } from '../../services/presentationsService';
 
 const STATUS_BADGE_CLASSES = {
-    queued: 'bg-slate-100 text-slate-600',
-    generating: 'bg-amber-100 text-amber-700',
-    ready: 'bg-green-100 text-green-700',
-    error: 'bg-red-100 text-red-700',
+    queued: 'bg-white/90 text-slate-600 ring-1 ring-slate-200',
+    generating: 'bg-amber-500 text-white',
+    ready: 'bg-white/90 text-green-700 ring-1 ring-green-200',
+    error: 'bg-red-600 text-white',
 };
 
 // Имя файла из Content-Disposition, если сервер его прислал. Своё имя клиент
@@ -63,7 +63,38 @@ const resolveDownloadFilename = (response, presentationId) => {
 };
 
 /**
- * Список заказанных презентаций.
+ * Сетка заказанных презентаций.
+ *
+ * **Карточка — опознавательный знак, а не витрина.** Задача пользователя здесь
+ * одна: УЗНАТЬ свою колоду среди других, а рассматривать её он будет, открыв.
+ * Отсюда плотность: до шести карточек в ряд на широком экране (ориентир —
+ * Gamma), и всё, что не помогает узнаванию, из карточки убрано. Осталось
+ * ровно три опознавательных признака, и каждый различает колоды по-своему:
+ * картинка первой страницы (видно оформление и титул), заголовок темы (о чём
+ * колода) и дата заказа (какая из двух похожих). Размер файла и подробное
+ * описание оттуда ушли: ни то, ни другое не помогает выбрать нужную из шести.
+ *
+ * Уменьшение карточки не должно превращаться в уменьшение того, чем
+ * пользуются. Поэтому подпись осталась читаемого кегля и в две строки (одной
+ * строки заголовку темы не хватает — обрезка съедала бы как раз различающую
+ * часть), а действия стали значками БЕЗ подписей, но в кнопках 40x40: подпись
+ * ушла в title и aria-label, а площадь нажатия осталась пальцевой. Кнопка
+ * размером с текст в 11 пикселей была бы ровно тем, чего просили не делать.
+ *
+ * **Превью — первая страница САМОЙ колоды**, а не картинка её шаблона: адрес
+ * приходит полем preview_url готовой колоды (бэкенд рисует её из PDF лениво и
+ * кэширует). У колоды, которая ещё собирается или упала, такого адреса нет — и
+ * там показывается превью ШАБЛОНА, то есть оформление, которое заказывали. Это
+ * не подмена одного другим: пока своей страницы не существует, единственное
+ * правдивое утверждение о будущей колоде — как она будет оформлена, и карточка
+ * говорит именно его, приглушив картинку и накрыв её индикатором работы.
+ *
+ * Нажатие на карточку открывает колоду, а не выделяет её: у списка нет ни
+ * множественного выбора, ни второго действия по умолчанию, поэтому карточка —
+ * это большая кнопка «Открыть». Технически она именно кнопка, лежащая под
+ * содержимым (absolute inset-0): вкладывать <button> в <button> нельзя, а
+ * содержимое пропускает клики сквозь себя (pointer-events-none) — так у
+ * открытия остаётся и фокус с клавиатуры, и подпись для чтения с экрана.
  *
  * Данные и опрос живут выше (NotebookPresentationsPage): здесь показ, открытие,
  * скачивание, удаление и повторный заказ неудавшейся колоды (последний — тоже
@@ -74,13 +105,13 @@ const resolveDownloadFilename = (response, presentationId) => {
  */
 const PresentationList = ({
     items,
-    total,
     templates,
     isLoading,
     error,
     onRetry,
     onDeleted,
     onReorder,
+    onCreate,
 }) => {
     const { locale, t } = useLocale();
 
@@ -102,6 +133,29 @@ const PresentationList = ({
         () => Object.fromEntries((templates || []).map((template) => [template.key, template])),
         [templates],
     );
+
+    /**
+     * Чем подписана колода — здесь и в диалоге удаления.
+     *
+     * Порядок отката, а не одно значение, потому что заголовок появляется не
+     * сразу и не у всех:
+     *   1. title из ответа — то, о чём колода. Единственная настоящая подпись;
+     *   2. пока заказ в очереди или генерируется — прямая пометка, что название
+     *      будет позже. Подставить сюда описание пользователя нельзя: он писал
+     *      пожелание, а не заголовок, и карточка соврала бы о содержимом;
+     *   3. имя ШАБЛОНА — последнее прибежище для упавших колод и для старых,
+     *      чей заголовок не удалось восстановить из файла. Оно не различает
+     *      колоды между собой, и ровно поэтому стоит последним, а не первым,
+     *      как было раньше.
+     */
+    const resolveCardName = useCallback((presentation) => {
+        const fallback = ['queued', 'generating'].includes(resolvePresentationStatus(presentation?.status))
+            ? t('presentations.titlePending')
+            : resolveTemplateName(templatesByKey[presentation?.template_key], presentation?.language)
+                || presentation?.template_key
+                || '';
+        return resolvePresentationTitle(presentation, fallback);
+    }, [t, templatesByKey]);
 
     const closeDeleteDialog = useCallback(() => {
         // Пока запрос в полёте, закрывать нечего: ответ всё равно придёт, а
@@ -153,8 +207,8 @@ const PresentationList = ({
      * «Открыть» — колода во вкладке браузера, без похода в «Загрузки».
      *
      * Готовую презентацию сначала смотрят («то ли вышло?») и только потом
-     * скачивают или заказывают заново — а до этой кнопки единственным способом
-     * посмотреть было скачать файл и открыть его руками.
+     * скачивают или заказывают заново — поэтому открытие и стало действием
+     * самой карточки, а не одной из кнопок в ряду.
      *
      * Вкладка открывается СИНХРОННО, до запроса: право на новое окно браузер
      * выдаёт только внутри обработчика клика, а после await оно уже потрачено —
@@ -170,9 +224,9 @@ const PresentationList = ({
      *
      * Object URL открытой вкладки НЕ освобождается намеренно: revoke сломал бы
      * ещё открытый просмотр (PDF-просмотрщик дочитывает документ лениво).
-     * Утечка ограничена числом явных нажатий «Открыть» и живёт до перезагрузки
-     * страницы — в отличие от превью галереи, где blob'ы плодились бы каждым
-     * обновлением списка и потому освобождаются обязательно.
+     * Утечка ограничена числом явных нажатий и живёт до перезагрузки страницы —
+     * в отличие от превью шаблонов, где blob'ы плодились бы каждым обновлением
+     * списка и потому освобождаются обязательно.
      */
     const handleOpen = async (presentation) => {
         if (isFileActionBusy) return;
@@ -222,9 +276,8 @@ const PresentationList = ({
 
         try {
             setReorderingId(presentation.id);
-            // Ошибку заказа показывает форма (createError страницы): исход
-            // повторного заказа — тот же исход заказа, и второго места для
-            // него не нужно.
+            // Ошибку заказа показывает страница (createError): исход повторного
+            // заказа — тот же исход заказа, и второго места для него не нужно.
             await onReorder({
                 template_key: presentation.template_key,
                 language: presentation.language,
@@ -276,21 +329,12 @@ const PresentationList = ({
     };
 
     return (
-        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <h2 className="text-lg font-semibold text-slate-900">{t('presentations.listTitle')}</h2>
-                {items.length > 0 ? (
-                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">
-                        {t('presentations.listCount', { count: items.length, total: total ?? items.length })}
-                    </span>
-                ) : null}
-            </div>
-
+        <div className="space-y-4">
             {/* Сбой ЗАГРУЗКИ списка показываем баннером над тем, что уже
                 получено: обнулять список из-за неудачного обновления — значит
                 прятать данные, которые никуда не делись. */}
             {error ? (
-                <div role="alert" className="mb-4 flex flex-col gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                <div role="alert" className="flex flex-col gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
                     <span className="flex items-center gap-2 font-semibold">
                         <AlertTriangle className="h-4 w-4" />
                         {error}
@@ -305,206 +349,260 @@ const PresentationList = ({
             ) : null}
 
             {fileActionError ? (
-                <p role="alert" className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                <p role="alert" className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
                     {fileActionError}
                 </p>
             ) : null}
 
             {isLoading && items.length === 0 ? (
-                <div role="status" className="flex items-center justify-center gap-2 py-10 text-sm text-slate-500">
+                <div role="status" className="flex items-center justify-center gap-2 py-16 text-sm text-slate-500">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     {t('presentations.listLoading')}
                 </div>
             ) : items.length === 0 ? (
                 error ? null : (
-                    <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50/70 px-6 py-10 text-center">
+                    /* Пусто — это не ошибка и не «список из нуля строк»: у
+                       раздела в этот момент ровно одно осмысленное действие, и
+                       оно стоит прямо здесь, а не только в шапке страницы. */
+                    <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50/70 px-6 py-14 text-center">
                         <div className="rounded-2xl bg-white p-4 text-[#1f3a60] shadow-sm">
                             <Presentation className="h-6 w-6" />
                         </div>
                         <p className="mt-4 text-sm font-semibold text-slate-800">{t('presentations.emptyTitle')}</p>
                         <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{t('presentations.emptyDescription')}</p>
+                        {onCreate ? (
+                            <Button type="button" size="lg" className="mt-5" onClick={onCreate}>
+                                <Plus className="h-4 w-4" />
+                                {t('presentations.create')}
+                            </Button>
+                        ) : null}
                     </div>
                 )
             ) : (
-                <ul className="space-y-3">
+                /* Плотность сетки. Ширина карточки нигде не задана числом: колонок
+                   тем больше, чем шире экран, и каждая ступень выбрана так, чтобы
+                   карточка не проваливалась ниже примерно 160 px — а это ширина, на
+                   которой ещё читаются две строки заголовка и помещается ряд из трёх
+                   кнопок 40x40. Шесть в ряд на самых широких экранах — ориентир,
+                   названный заказчиком (столько же в этом месте у Gamma). */
+                <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
                     {items.map((presentation) => {
                         const status = resolvePresentationStatus(presentation.status);
-                        const templateName = resolveTemplateName(templatesByKey[presentation.template_key], presentation.language)
-                            || presentation.template_key;
+                        const template = templatesByKey[presentation.template_key];
+                        const cardName = resolveCardName(presentation);
                         const errorMessage = resolvePresentationErrorMessage(presentation, t);
                         const isGenerating = status === 'generating';
                         const isInProgress = isGenerating || status === 'queued';
+                        const isReady = status === 'ready';
+                        const isOpening = openingId === presentation.id;
+                        const progress = resolveProgress(presentation.progress);
+                        // Своя первая страница — только у готовой колоды; у остальных
+                        // её ещё не существует, и картинкой служит превью заказанного
+                        // ОФОРМЛЕНИЯ (см. docstring компонента).
+                        const previewUrl = isReady
+                            ? presentation.preview_url
+                            : template?.preview_url;
 
                         return (
                             <li
                                 key={presentation.id}
-                                className="rounded-2xl border border-slate-200 p-4 transition hover:border-slate-300"
+                                className={cn(
+                                    'group relative flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition',
+                                    isReady && 'hover:-translate-y-0.5 hover:border-[#1f3a60]/40 hover:shadow-md',
+                                )}
                             >
-                                <div className="flex flex-wrap items-start justify-between gap-3">
-                                    <div className="min-w-0">
-                                        <p className="text-sm font-semibold text-slate-900">{templateName}</p>
-                                        <p className="mt-1 text-xs text-slate-400">
-                                            {t('presentations.cardMeta', {
-                                                slides: presentation.slide_count,
-                                                language: String(presentation.language || '').toUpperCase(),
-                                            })}
-                                        </p>
-                                    </div>
+                                {/* Кнопка «открыть» лежит ПОД содержимым и занимает всю
+                                    карточку. Её нет у незавершённых и упавших колод: файла
+                                    на диске ещё (или уже) нет, и нажатие ушло бы в 409/404. */}
+                                {isReady ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => handleOpen(presentation)}
+                                        disabled={isFileActionBusy}
+                                        aria-label={t('presentations.openCard', { name: cardName })}
+                                        className="absolute inset-0 z-0 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60]/50 focus-visible:ring-offset-2"
+                                    />
+                                ) : null}
 
-                                    {/* Свой role="status" на карточку, а не одна живая
-                                        область на весь список: объявлять надо изменение
-                                        конкретной презентации, иначе при каждом тике
-                                        опроса зачитывался бы список целиком. */}
+                                {/* Содержимое пропускает клики сквозь себя — иначе оно
+                                    перехватывало бы нажатие у кнопки под ним. Ряд действий
+                                    ниже возвращает себе события явно. */}
+                                <div className="pointer-events-none relative">
+                                    <PreviewImage
+                                        previewUrl={previewUrl}
+                                        alt={isReady
+                                            ? t('presentations.deckPreviewAlt', { name: cardName })
+                                            : t('presentations.previewAlt', {
+                                                name: resolveTemplateName(template, presentation.language)
+                                                    || presentation.template_key,
+                                            })}
+                                        className={cn(
+                                            'aspect-[16/9] w-full border-b border-slate-100',
+                                            !isReady && 'opacity-60',
+                                        )}
+                                        imageClassName="object-cover object-top"
+                                    />
+
                                     <span
                                         role="status"
                                         className={cn(
-                                            'shrink-0 rounded-full px-3 py-1 text-[11px] font-semibold',
+                                            'absolute left-2 top-2 rounded-full px-2 py-0.5 text-[10px] font-semibold shadow-sm',
                                             STATUS_BADGE_CLASSES[status],
                                         )}
                                     >
                                         {renderStatus(presentation)}
                                     </span>
+
+                                    {/* Генерация видна на самой карточке: крутящийся
+                                        индикатор поверх превью и полоса прогресса по
+                                        нижнему краю. Колода делается минуты, и «чем
+                                        занято ожидание» должно читаться без всякого
+                                        текста. */}
+                                    {isInProgress ? (
+                                        <span className="absolute inset-0 flex items-center justify-center bg-white/45">
+                                            <Loader2 className="h-6 w-6 animate-spin text-[#1f3a60]" />
+                                        </span>
+                                    ) : null}
+
+                                    {isGenerating ? (
+                                        /* Полоса — только картинка к проценту: число уже
+                                           объявляет бейдж статуса (role="status"), и второй
+                                           говорящий элемент читал бы то же самое дважды. */
+                                        <span aria-hidden="true" className="absolute inset-x-0 bottom-0 block h-1.5 bg-slate-200/80">
+                                            <span
+                                                className="block h-full bg-amber-500 transition-[width] duration-700 ease-out"
+                                                style={{ width: `${progress}%` }}
+                                            />
+                                        </span>
+                                    ) : null}
+
+                                    {isOpening ? (
+                                        <span className="absolute inset-0 flex items-center justify-center bg-white/70">
+                                            <Loader2 className="h-6 w-6 animate-spin text-[#1f3a60]" />
+                                        </span>
+                                    ) : null}
                                 </div>
 
-                                {presentation.description ? (
-                                    <p className="mt-3 line-clamp-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-500">
-                                        {presentation.description}
-                                    </p>
-                                ) : null}
-
-                                {isGenerating ? (
-                                    /* Полоса — только картинка к проценту: число уже
-                                       объявляет бейдж статуса (role="status"), и второй
-                                       говорящий элемент читал бы то же самое дважды. */
-                                    <div aria-hidden="true" className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
-                                        <div
-                                            className="h-full rounded-full bg-amber-500 transition-[width] duration-700 ease-out"
-                                            style={{ width: `${resolveProgress(presentation.progress)}%` }}
-                                        />
-                                    </div>
-                                ) : null}
-
-                                {isInProgress ? (
-                                    /* Минуты ожидания надо назвать заранее: без этой
-                                       строки «Генерируется 0%» через полминуты читается
-                                       как «зависло», и активных заказов у блокнота по
-                                       построению не больше одного — подсказка в списке
-                                       не размножается. */
-                                    <p className="mt-2 text-xs leading-5 text-slate-400">
-                                        {t('presentations.inProgressHint')}
-                                    </p>
-                                ) : null}
-
-                                {errorMessage ? (
-                                    /* error_text остаётся и подсказкой при наведении:
-                                       в тексте он появляется только когда код неизвестен
-                                       (см. resolvePresentationErrorMessage). */
+                                <div className="pointer-events-none flex flex-1 flex-col gap-0.5 px-2.5 pb-1 pt-2">
+                                    {/* Две строки, а не одна: заголовок темы редко
+                                        помещается в строку узкой карточки, а обрезка по
+                                        первой строке съедала бы как раз ту часть, которая
+                                        отличает колоду от соседней. Полный текст остаётся
+                                        в подсказке. min-h держит карточки в ряду одной
+                                        высоты, когда у одной заголовок в строку, а у
+                                        другой в две. */}
                                     <p
-                                        className="mt-3 flex items-start gap-1.5 rounded-xl bg-red-50 px-3 py-2 text-xs leading-5 text-red-600"
-                                        title={presentation.error_text || undefined}
+                                        className={cn(
+                                            'line-clamp-2 min-h-[2.1rem] break-words text-[13px] font-semibold leading-[1.3]',
+                                            presentation.title ? 'text-slate-900' : 'text-slate-400',
+                                        )}
+                                        title={cardName}
                                     >
-                                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                                        <span className="min-w-0 break-words">{errorMessage}</span>
+                                        {cardName}
                                     </p>
-                                ) : null}
 
-                                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                                    <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
-                                        {/* Размер — только когда файл существует. file_size
-                                            до готовности — null, а formatSize превращает
-                                            null в «0 Б»: ноль байт у колоды, которой ещё
-                                            нет, — неправда, а не размер. */}
-                                        {presentation.file_size != null ? (
-                                            <span className="inline-flex items-center gap-1.5">
-                                                <FileText className="h-3.5 w-3.5" />
-                                                {formatSize(presentation.file_size, t)}
-                                            </span>
-                                        ) : null}
-                                        <span>
-                                            {t('presentations.createdAt', {
-                                                date: formatLocaleDate(presentation.created_at, locale, {
-                                                    day: 'numeric',
-                                                    month: 'short',
-                                                    year: 'numeric',
-                                                    hour: '2-digit',
-                                                    minute: '2-digit',
-                                                }, '—'),
-                                            })}
-                                        </span>
-                                    </div>
+                                    <p className="truncate text-[11px] text-slate-400">
+                                        {t('presentations.cardMeta', {
+                                            date: formatLocaleDate(presentation.created_at, locale, {
+                                                day: 'numeric',
+                                                month: 'short',
+                                                year: 'numeric',
+                                            }, '—'),
+                                            slides: presentation.slide_count,
+                                            language: String(presentation.language || '').toUpperCase(),
+                                        })}
+                                    </p>
 
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        {/* Открытие и скачивание только у готовой: у
-                                            остальных файла на диске ещё нет, и кнопки
-                                            вели бы в 409/404. */}
-                                        {status === 'ready' ? (
-                                            <>
-                                                <Button
-                                                    type="button"
-                                                    variant="outline"
-                                                    size="sm"
-                                                    onClick={() => handleOpen(presentation)}
-                                                    isLoading={openingId === presentation.id}
-                                                >
-                                                    <ExternalLink className="h-4 w-4" />
-                                                    {t('presentations.open')}
-                                                </Button>
-                                                <Button
-                                                    type="button"
-                                                    variant="outline"
-                                                    size="sm"
-                                                    onClick={() => handleDownload(presentation)}
-                                                    isLoading={downloadingId === presentation.id}
-                                                >
-                                                    <Download className="h-4 w-4" />
-                                                    {t('presentations.download')}
-                                                </Button>
-                                            </>
-                                        ) : null}
+                                    {isInProgress ? (
+                                        /* Минуты ожидания надо назвать заранее: без этой
+                                           строки «Генерируется 0%» через полминуты читается
+                                           как «зависло». */
+                                        <p className="mt-0.5 line-clamp-3 text-[11px] leading-4 text-slate-400">
+                                            {t('presentations.inProgressHint')}
+                                        </p>
+                                    ) : null}
 
-                                        {status === 'error' && onReorder ? (
-                                            <Button
-                                                type="button"
-                                                variant="outline"
-                                                size="sm"
-                                                disabled={reorderBlocked}
-                                                title={reorderBlocked && reorderingId !== presentation.id
-                                                    ? t('presentations.orderAgainDisabledInProgress')
-                                                    : undefined}
-                                                isLoading={reorderingId === presentation.id}
-                                                onClick={() => handleReorder(presentation)}
-                                            >
-                                                <RefreshCw className="h-4 w-4" />
-                                                {t('presentations.orderAgain')}
-                                            </Button>
-                                        ) : null}
+                                    {errorMessage ? (
+                                        /* error_text остаётся и подсказкой при наведении:
+                                           в тексте он появляется только когда код неизвестен
+                                           (см. resolvePresentationErrorMessage). Событиям
+                                           мыши блок возвращён явно — иначе подсказки не было
+                                           бы вовсе. */
+                                        <p
+                                            className="pointer-events-auto mt-1 flex items-start gap-1 rounded-lg bg-red-50 px-2 py-1.5 text-[11px] leading-4 text-red-600"
+                                            title={presentation.error_text || errorMessage}
+                                        >
+                                            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                                            <span className="line-clamp-3 min-w-0 break-words">{errorMessage}</span>
+                                        </p>
+                                    ) : null}
+                                </div>
 
-                                        {/* Удаление во время генерации сервер отвергнет
-                                            конфликтом (presentation.generation_in_progress).
-                                            Кнопка выключена заранее и объясняет почему:
-                                            403/409 в ответ на разрешённое действие — это
-                                            сюрприз, а не сообщение. */}
+                                {/* Действия — значками без подписей, но кнопками 40x40
+                                    (size="icon"): на карточке шириной в шестую часть ряда
+                                    текстовые кнопки не помещаются, а мельчить площадь
+                                    нажатия нельзя. Название действия не потеряно — оно в
+                                    title и в aria-label, то есть доступно и наведению, и
+                                    чтению с экрана. */}
+                                <div className="relative z-10 flex items-center justify-end gap-0.5 px-1.5 pb-1.5">
+                                    {status === 'error' && onReorder ? (
                                         <Button
                                             type="button"
                                             variant="ghost"
-                                            size="sm"
-                                            className="text-red-600 hover:bg-red-50 hover:text-red-700"
-                                            disabled={isGenerating}
-                                            title={isGenerating
-                                                ? t('presentations.deleteDisabledGenerating')
-                                                : t('presentations.delete')}
-                                            aria-label={isGenerating
-                                                ? t('presentations.deleteDisabledGenerating')
-                                                : t('presentations.delete')}
-                                            onClick={() => {
-                                                setDeleteError('');
-                                                setDeleteTarget(presentation);
-                                            }}
+                                            size="icon"
+                                            className="mr-auto"
+                                            disabled={reorderBlocked}
+                                            title={reorderBlocked && reorderingId !== presentation.id
+                                                ? t('presentations.orderAgainDisabledInProgress')
+                                                : t('presentations.orderAgain')}
+                                            aria-label={t('presentations.orderAgain')}
+                                            isLoading={reorderingId === presentation.id}
+                                            onClick={() => handleReorder(presentation)}
                                         >
-                                            <Trash2 className="h-4 w-4" />
-                                            {t('presentations.delete')}
+                                            {reorderingId === presentation.id ? null : <RefreshCw className="h-4 w-4" />}
                                         </Button>
-                                    </div>
+                                    ) : null}
+
+                                    {/* Скачивание только у готовой: у остальных файла на
+                                        диске ещё нет, и кнопка вела бы в 409/404. */}
+                                    {isReady ? (
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            onClick={() => handleDownload(presentation)}
+                                            isLoading={downloadingId === presentation.id}
+                                            title={t('presentations.download')}
+                                            aria-label={t('presentations.download')}
+                                        >
+                                            {downloadingId === presentation.id ? null : <Download className="h-4 w-4" />}
+                                        </Button>
+                                    ) : null}
+
+                                    {/* Удаление во время генерации сервер отвергнет
+                                        конфликтом (presentation.generation_in_progress).
+                                        Кнопка выключена заранее и объясняет почему:
+                                        403/409 в ответ на разрешённое действие — это
+                                        сюрприз, а не сообщение. */}
+                                    <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="text-red-600 hover:bg-red-50 hover:text-red-700"
+                                        disabled={isGenerating}
+                                        title={isGenerating
+                                            ? t('presentations.deleteDisabledGenerating')
+                                            : t('presentations.delete')}
+                                        aria-label={isGenerating
+                                            ? t('presentations.deleteDisabledGenerating')
+                                            : t('presentations.delete')}
+                                        onClick={() => {
+                                            setDeleteError('');
+                                            setDeleteTarget(presentation);
+                                        }}
+                                    >
+                                        <Trash2 className="h-4 w-4" />
+                                    </Button>
                                 </div>
                             </li>
                         );
@@ -537,9 +635,12 @@ const PresentationList = ({
                                         из конкретной карточки, а машинный ID подтвердить
                                         удаление не помогает — он ничего не значит для
                                         того, кто заказывал колоду. */}
+                                    {/* Подпись — та же, что на карточке, и берётся тем же
+                                        resolveCardName: в подтверждении удаления обязано
+                                        стоять ровно то имя, по которому пользователь эту
+                                        колоду и опознал. */}
                                     {t('presentations.deleteConfirmDescription', {
-                                        name: resolveTemplateName(templatesByKey[deleteTarget.template_key], deleteTarget.language)
-                                            || deleteTarget.template_key,
+                                        name: resolveCardName(deleteTarget),
                                     })}
                                 </p>
                             </div>
@@ -568,7 +669,7 @@ const PresentationList = ({
                     </div>
                 </div>
             ) : null}
-        </section>
+        </div>
     );
 };
 

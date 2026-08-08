@@ -26,6 +26,10 @@ from app.domain_profiles import list_domain_profiles
 from app.modules.presentations import (
     STATUS_GENERATING as PRESENTATION_STATUS_GENERATING,
 )
+# Прямо из модуля превью, а не из пакета: он тянет за собой только PyMuPDF и
+# схемы, то есть та же дисциплина, что у константы выше, — сервис и воркер
+# раздела сюда не приезжают.
+from app.modules.presentations.preview import remove_card_preview
 from app.shared.models import (
     Chunk,
     Document,
@@ -517,6 +521,11 @@ async def delete_notebook(
     # список путей — одной строкой, готовой к вставке в rm.
     orphan_paths: list[str] = []
     for kind, row_id, path in file_rows:
+        if kind == "presentation":
+            # Кэш превью карточки лежит рядом с колодой и вычисляется из её
+            # пути (modules/presentations/preview.py). Убирается здесь же, а не
+            # обходом каталога: после commit о нём не помнит ни одна строка.
+            remove_card_preview(path)
         try:
             os.remove(path)
         except FileNotFoundError:

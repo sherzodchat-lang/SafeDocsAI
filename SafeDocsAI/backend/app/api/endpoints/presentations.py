@@ -47,7 +47,16 @@ presentation.generation_in_progress, что и предпроверка. Пре�
 в своём каталоге — исходники шаблона в templates/presentations, нарисованное
 Chrome превью в data/presentation_previews (templates.py: default_templates_dir
 и default_preview_dir). Обхода каталога тут нет по построению, а не по
-фильтрации ввода.
+фильтрации ввода. Превью КОЛОДЫ отдаётся по id строки, и путь его картинки
+выводится из presentation.file_path — то есть из того же места, откуда берётся
+файл на скачивании, и защищён той же зависимостью владения.
+
+**Превью колоды закрыто ровно как её скачивание.** На титульном слайде стоят
+название темы и имя блокнота, поэтому картинка первой страницы — это выдержка
+из чужой работы, а не безобидная иконка. Проверку делает та же зависимость
+get_owned_presentation, что и у download; собственной проверки владения у
+превью нет намеренно — вторая, разойдясь с первой, стала бы дырой в том месте,
+где её никто не ищет.
 
 **Тип и имя скачиваемого файла выводятся из ХРАНИМОГО ПУТИ, а не из константы.**
 Колоды печатает headless Chrome, и новые файлы — .pdf; но на дисках лежат
@@ -97,6 +106,11 @@ from app.modules.presentations.constants import (
     STATUS_READY,
     SUPPORTED_LANGUAGES,
     normalize_language,
+)
+from app.modules.presentations.preview import (
+    CARD_PREVIEW_MEDIA_TYPE,
+    ensure_card_preview,
+    remove_card_preview,
 )
 from app.modules.presentations.service import PresentationsService
 from app.modules.presentations.templates import TemplateInfo, template_registry
@@ -360,6 +374,16 @@ class PresentationResponse(BaseModel):
     queue_position приходит только у 'queued' и там всегда >= 1. Ноль означал бы
     «следующая на очереди», то есть ровно обратное «в очереди не стоит», поэтому
     вне очереди тут null (см. PresentationsService.queue_position).
+
+    title и description соседствуют намеренно и разными полями: description
+    пользователь пишет ДО генерации как пожелание, title формулирует модель
+    ПОСЛЕ неё по найденному материалу. Свести их в одно поле значит подписать
+    карточку то одним, то другим — а это разные утверждения о колоде.
+
+    preview_url — путь того же API, как и у шаблона, и он есть ТОЛЬКО у готовой
+    колоды: у очередной и упавшей файла нет, и адрес картинки, ведущий в 409,
+    был бы обещанием, которого сервер не держит. Null здесь клиент читает как
+    «картинки не будет», не делая лишнего запроса.
     """
 
     id: int
@@ -368,6 +392,8 @@ class PresentationResponse(BaseModel):
     language: str
     slide_count: int
     description: str | None = None
+    title: str | None = None
+    preview_url: str | None = None
     status: str
     progress: int
     queue_position: int | None = None
@@ -398,6 +424,16 @@ class TemplateResponse(BaseModel):
     preview_url: str
 
 
+def _presentation_preview_url(presentation_id: int) -> str:
+    """Адрес картинки колоды — путь API, а не файл на диске.
+
+    Ровно та же схема, что у превью шаблона (_preview_url ниже) и по той же
+    причине: картинки лежат вне каталога статики, отдаёт их эндпоинт, и клиент
+    обязан брать адрес из ответа, а не склеивать его сам.
+    """
+    return f"{settings.API_V1_STR}/presentations/{presentation_id}/preview"
+
+
 def _to_response(
     presentation: Presentation, queue_position: int | None = None
 ) -> PresentationResponse:
@@ -408,6 +444,12 @@ def _to_response(
         language=presentation.language,
         slide_count=presentation.slide_count,
         description=presentation.description,
+        title=presentation.title,
+        preview_url=(
+            _presentation_preview_url(presentation.id)
+            if presentation.status == STATUS_READY
+            else None
+        ),
         status=presentation.status,
         progress=presentation.progress,
         queue_position=queue_position,
@@ -816,6 +858,60 @@ async def download_presentation(
     )
 
 
+# --- Превью колоды --------------------------------------------------------
+
+
+@router.get("/presentations/{presentation_id}/preview")
+async def get_presentation_preview(
+    presentation: Presentation = Depends(get_owned_presentation),
+) -> FileResponse:
+    """Первая страница готовой колоды картинкой — превью её карточки в сетке.
+
+    Права — той же зависимостью, что у скачивания (get_owned_presentation), и
+    это здесь не формальность: титульный слайд несёт название темы и имя
+    блокнота, то есть по превью читается содержимое чужой работы. Второй
+    проверки владения быть не должно — разойдясь с первой, она стала бы дырой
+    ровно в том месте, где её никто не ищет.
+
+    Три исхода те же, что у скачивания, и по тем же причинам: чужая или
+    несуществующая строка — 404 ещё в зависимости, не готовая — 409 (продолжай
+    опрос), готовая без пригодного файла — 404 file_missing.
+
+    Рисование ленивое и кэшируется на диск рядом с колодой; почему именно так,
+    а не шагом конвейера — в docstring modules/presentations/preview.py. Через
+    run_in_threadpool, потому что декодирование страницы блокирует поток на
+    сотни миллисекунд, а сетка запрашивает картинки пачкой.
+    """
+    if presentation.status != STATUS_READY:
+        raise ApiError(
+            409,
+            PresentationErrors.NOT_READY,
+            f"Presentation is not ready yet (status={presentation.status})",
+        )
+    path = presentation.file_path
+    if not path or not os.path.exists(path):
+        logger.warning(
+            "Presentation %s is ready but its file is missing: %s",
+            presentation.id,
+            path or "<empty path>",
+        )
+        raise ApiError(
+            404, PresentationErrors.FILE_MISSING, "Presentation file not found on disk"
+        )
+
+    preview_path = await run_in_threadpool(ensure_card_preview, path)
+    if preview_path is None:
+        # Файл есть, картинки из него не вышло: .pptx прежнего рендерера или
+        # повреждённый PDF. Причину уже записал в журнал сам рендер превью;
+        # наружу — тот же код, что у отсутствующего файла (см. FILE_MISSING).
+        raise ApiError(
+            404,
+            PresentationErrors.FILE_MISSING,
+            "Presentation preview cannot be rendered from the stored file",
+        )
+    return FileResponse(preview_path, media_type=CARD_PREVIEW_MEDIA_TYPE)
+
+
 # --- Удаление -------------------------------------------------------------
 
 
@@ -871,5 +967,9 @@ async def delete_presentation(
                 presentation_id,
                 exc,
             )
+        # Кэш превью лежит рядом с колодой и вычисляется из её пути — поэтому
+        # убирается здесь же, а не отдельным обходом каталога. Оставленный, он
+        # был бы файлом, о котором не помнит уже ни одна строка в базе.
+        remove_card_preview(file_path)
 
     return {"detail": "Presentation deleted", "id": presentation_id}
