@@ -104,3 +104,10 @@ SafeDocsAI/backend/data/topics_tj/embeddings.npz
 # см. backend/data/test_corpus/*/manifest.json — там у каждого файла адрес,
 # ревизия и лицензия.
 SafeDocsAI/backend/data/test_corpus/
+
+# Папка академической передачи модели тем преподавателю (topic_model_review/).
+# Внутри — эмбеддинги отложенной выборки и фрагменты статей того же корпуса,
+# что и выше: сбор шёл с объявлением non-redistributed, репозиторий публичный.
+# Папка передаётся проверяющему напрямую, а не через репозиторий: это
+# академическая передача работы, а не публикация корпуса.
+SafeDocsAI/topic_model_review/
