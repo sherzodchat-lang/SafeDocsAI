@@ -261,6 +261,23 @@ export const SourcesProvider = ({ children }) => {
         await invalidate();
     }, [invalidate]);
 
+    /**
+     * Снять источники с блокнота, не удаляя их. Обратная операция к
+     * attachSources и сделана так же: сам документ остаётся в области «все
+     * источники», меняется только его блокнот, поэтому точечной правки кэша
+     * мало — область блокнота и область «все источники» расходятся, и обе
+     * перечитываются общей инвалидацией.
+     *
+     * Наружу отдаём updated_count ответа: ноль означает «в этом блокноте его
+     * уже не было» (повторное нажатие, вторая вкладка) — это успех, а не сбой,
+     * и разговор с пользователем у него другой.
+     */
+    const detachSources = useCallback(async (notebookId, sourceIds) => {
+        const response = await sourcesService.detachExisting({ notebook_id: notebookId, source_ids: sourceIds });
+        await invalidate();
+        return Number(response?.data?.updated_count ?? 0);
+    }, [invalidate]);
+
     // Индексация идёт в фоне: опрашиваем только те области, что открыты и содержат источники в очереди.
     const scopesToPoll = useMemo(
         () => subscribedScopes.filter((scope) => hasSourcesInProgress(entries[scope]?.items)),
@@ -282,8 +299,9 @@ export const SourcesProvider = ({ children }) => {
         uploadSource,
         deleteSource,
         attachSources,
+        detachSources,
         updateSource,
-    }), [attachSources, deleteSource, ensureLoaded, entries, invalidate, refresh, subscribe, updateSource, uploadSource]);
+    }), [attachSources, deleteSource, detachSources, ensureLoaded, entries, invalidate, refresh, subscribe, updateSource, uploadSource]);
 
     return <SourcesContext.Provider value={value}>{children}</SourcesContext.Provider>;
 };
@@ -294,10 +312,10 @@ export const useSourcesActions = () => {
         throw new Error('useSourcesActions must be used within SourcesProvider');
     }
 
-    const { uploadSource, deleteSource, attachSources, updateSource, invalidate } = context;
+    const { uploadSource, deleteSource, attachSources, detachSources, updateSource, invalidate } = context;
     return useMemo(
-        () => ({ uploadSource, deleteSource, attachSources, updateSource, invalidate }),
-        [attachSources, deleteSource, invalidate, updateSource, uploadSource],
+        () => ({ uploadSource, deleteSource, attachSources, detachSources, updateSource, invalidate }),
+        [attachSources, deleteSource, detachSources, invalidate, updateSource, uploadSource],
     );
 };
 

@@ -474,7 +474,7 @@ const AdminDocumentsPage = () => {
                             type="button"
                             onClick={() => fileInputRef.current?.click()}
                             disabled={isUploading}
-                            className="inline-flex items-center gap-2 rounded-lg bg-[#c5a059] px-5 py-2 text-sm font-semibold text-[#1f3a60] transition hover:bg-[#d7b878] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-60"
+                            className="inline-flex items-center gap-2 rounded-lg bg-[#c5a059] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#d7b878] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1f3a60] focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-60"
                         >
                             {isUploading ? (
                                 <>

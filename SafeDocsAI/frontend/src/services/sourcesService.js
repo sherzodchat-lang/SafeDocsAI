@@ -21,6 +21,14 @@ export const sourcesService = {
     },
   }),
   attachExisting: (payload) => api.post('/sources/attach', payload),
+  // Пара к attachExisting, и тело у неё намеренно то же самое
+  // (backend/app/api/endpoints/documents.py, DetachSourcesPayload):
+  // {notebook_id, source_ids}. notebook_id обязателен — он говорит, ИЗ ЧЕГО
+  // убирают, поэтому вкладка со старым списком не снимет документ с блокнота,
+  // куда его успели перенести. Ответ — {updated_count, documents}, где
+  // updated_count это число реально изменённых строк: повторный вызов по уже
+  // отвязанному документу отвечает 200 с нулём, а не ошибкой.
+  detachExisting: (payload) => api.post('/sources/detach', payload),
   delete: (id) => api.delete(`/sources/${id}`),
   getChunks: (id) => api.get(`/sources/${id}/chunks`),
   getPreviewBlob: (id) => api.get(`/sources/${id}/preview`, { responseType: 'blob' }),

@@ -92,6 +92,11 @@ const ERROR_CODE_KEYS = {
     'source.text_extraction_failed': 'documents.errors.extractionFailed',
     'source.encoding_not_utf8': 'documents.errors.invalidEncoding',
     'source.deleted_before_indexing': 'documents.errors.deletedBeforeIndexing',
+    // Отдельный код, а не общий с extractionFailed: там файл не читается и
+    // чинит его пользователь, а здесь файл в порядке — на сервере нет пакетов
+    // распознавания, и страницы-сканы читать нечем. Поэтому и перевод свой:
+    // он зовёт администратора, а не предлагает пересохранить файл.
+    'source.ocr_unavailable': 'documents.errors.ocrUnavailable',
     // Коды аутентификации: мёртвый токен приходит с 401, нехватка прав — с 403.
     'auth.invalid_token': 'auth.errors.sessionExpired',
     'auth.token_revoked': 'auth.errors.sessionRevoked',

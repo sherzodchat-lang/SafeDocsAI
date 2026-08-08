@@ -19,6 +19,7 @@ import {
   Search,
   Tag,
   Trash2,
+  Unlink,
   X,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -80,16 +81,19 @@ const AddSourceSplitButton = ({ onUpload, onExisting, isLoading, uploadProgress,
       {/* Primary action */}
       <button
         type="button"
-        onClick={onUpload}
+        onClick={onExisting}
         disabled={isLoading}
         className="flex flex-1 items-center justify-center gap-2 rounded-l-lg bg-[#1f3a60] px-4 py-2 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(31,58,96,0.22)] transition hover:bg-[#162945] disabled:pointer-events-none disabled:opacity-60"
       >
         {isLoading ? (
           <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
-          <Plus className="h-4 w-4" />
+          <Link2 className="h-4 w-4" />
         )}
-        {isLoading && uploadProgress ? `${labels.loading} ${uploadProgress}` : labels.addSource}
+        {/* Загрузка живёт в выпадающем пункте, а её ход показывается здесь: во
+            время загрузки меню закрыто, и на кнопке-пункте прогресса никто бы
+            не увидел. Единственная постоянно видимая поверхность — эта. */}
+        {isLoading && uploadProgress ? `${labels.loading} ${uploadProgress}` : labels.addExistingSources}
       </button>
 
       {/* Divider */}
@@ -112,11 +116,11 @@ const AddSourceSplitButton = ({ onUpload, onExisting, isLoading, uploadProgress,
         <div className="absolute left-0 top-full z-50 mt-1.5 w-full overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
           <button
             type="button"
-            onClick={() => { setOpen(false); onExisting(); }}
+            onClick={() => { setOpen(false); onUpload(); }}
             className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-sm text-slate-700 transition hover:bg-slate-50"
           >
-            <Link2 className="h-4 w-4 text-slate-400" />
-            {labels.addExistingSources}
+            <Plus className="h-4 w-4 text-slate-400" />
+            {labels.addSource}
           </button>
         </div>
       )}
@@ -412,6 +416,14 @@ const NotebookWorkspace = ({
   const [sourceDeleteTarget, setSourceDeleteTarget] = useState(null);
   const [deletingSource, setDeletingSource] = useState(false);
   const [sourceDeleteError, setSourceDeleteError] = useState('');
+  // Отвязка: помним id источника, по которому ждём ответ, чтобы крутилка стояла
+  // на его карточке, а не на всей полосе — как у архивации заметки.
+  const [detachingSourceId, setDetachingSourceId] = useState(null);
+  const [detachError, setDetachError] = useState('');
+  // Что произошло после успеха. Без этой строки отвязка выглядит РОВНО как
+  // удаление: карточка исчезает из списка блокнота, и по одному этому признаку
+  // не отличить «убрали отсюда» от «стёрли навсегда».
+  const [detachNotice, setDetachNotice] = useState('');
 
   // Общий слой данных: тот же кэш читают шапка блокнота и таблица «Все источники».
   const {
@@ -430,7 +442,7 @@ const NotebookWorkspace = ({
     reload: reloadExistingSources,
   } = useSources(null, { enabled: isExistingSheetOpen });
 
-  const { uploadSource, attachSources, deleteSource, invalidate } = useSourcesActions();
+  const { uploadSource, attachSources, detachSources, deleteSource, invalidate } = useSourcesActions();
 
   // Список заметок — общий с шапкой блокнота, поэтому приходит сверху: своего запроса панель не шлёт.
   const [selectedNote, setSelectedNote] = useState(null);
@@ -698,6 +710,52 @@ const NotebookWorkspace = ({
     }
   }, [deleteSource, deletingSource, sourceDeleteTarget, t]);
 
+  /**
+   * Отвязка источника от блокнота — без диалога подтверждения, и это решение, а
+   * не экономия.
+   *
+   * Подтверждают то, чего не вернуть: удаление уносит файл, фрагменты и векторы
+   * навсегда, поэтому у него диалог был и остаётся. Отвязка не трогает документ
+   * — он остаётся у пользователя и возвращается сюда тем же «Добавить
+   * существующие источники», из которого пришёл. Одинаковые диалоги у двух
+   * действий стирали бы единственную разницу, которую пользователь обязан
+   * видеть; вместо диалога здесь работает связка «крутилка на карточке —
+   * строка о том, что документ остался».
+   */
+  const handleDetachSource = useCallback(async (source) => {
+    if (!source || detachingSourceId != null) return;
+
+    try {
+      setDetachingSourceId(source.id);
+      setDetachError('');
+      setDetachNotice('');
+      const updatedCount = await detachSources(currentNotebookId, [source.id]);
+      // Отвязанный документ нельзя оставить открытым в просмотре: список под
+      // ним уже перечитан, и вьюер показывал бы карточку из прошлого состояния.
+      setViewerSource((prev) => (prev && prev.id === source.id ? null : prev));
+      // updated_count = 0 — документа в блокноте уже не было (второе нажатие,
+      // соседняя вкладка). Ответ успешный, врать про «убрали» нечестно.
+      setDetachNotice(updatedCount > 0
+        ? t('notebook.detachDone', { name: source.name })
+        : t('notebook.detachAlreadyDone', { name: source.name }));
+    } catch (error) {
+      console.error('Failed to detach source', error);
+      // Список остаётся на месте: источник не убран, и карточка должна это показывать.
+      setDetachError(resolveApiErrorMessage(error, t, 'notebook.detachFailed'));
+    } finally {
+      setDetachingSourceId(null);
+    }
+  }, [currentNotebookId, detachSources, detachingSourceId, t]);
+
+  // Сообщение об успехе живёт недолго: оно объясняет уже случившееся, а не
+  // требует действия, и висеть над списком до конца сеанса ему незачем.
+  useEffect(() => {
+    if (!detachNotice) return undefined;
+
+    const timer = setTimeout(() => setDetachNotice(''), 10000);
+    return () => clearTimeout(timer);
+  }, [detachNotice]);
+
   useModalDialog(Boolean(selectedNote), closeNoteViewer, noteViewDialogRef, noteViewCloseRef);
   useModalDialog(noteComposerOpen, closeNoteComposer, noteComposerDialogRef, noteTitleInputRef);
   useModalDialog(Boolean(noteDeleteTarget), closeNoteDeleteDialog, noteDeleteDialogRef, noteDeleteCancelRef);
@@ -819,6 +877,24 @@ const NotebookWorkspace = ({
         </p>
       ) : null}
 
+      {/* Сбой отвязки: список источников на месте — убрать не удалось, и карточка
+          обязана остаться там же, где была. */}
+      {detachError ? (
+        <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
+          {detachError}
+        </p>
+      ) : null}
+
+      {/* Успех отвязки: не «готово», а что именно стало с документом. Синяя
+          плашка, а не зелёная галочка, — тут нечего праздновать, тут надо
+          прочитать, где искать файл дальше. */}
+      {detachNotice ? (
+        <p role="status" className="flex items-start gap-2 rounded-xl border border-[#1f3a60]/20 bg-[#1f3a60]/5 px-3 py-2.5 text-sm text-slate-600">
+          <Unlink className="mt-0.5 h-4 w-4 shrink-0 text-[#1f3a60]" />
+          <span className="min-w-0 break-words">{detachNotice}</span>
+        </p>
+      ) : null}
+
       {/* Сбой загрузки списка показываем баннером: полоса с уже полученными источниками остаётся на месте. */}
       {sourcesError ? (
         <div role="alert" className="flex flex-col gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-600">
@@ -891,17 +967,39 @@ const NotebookWorkspace = ({
                     </span>
                   ) : null}
                 </div>
-                {/* Действие внутри карточки-кнопки: без stopPropagation клик по
-                    корзине заодно открывал бы просмотр удаляемого документа. */}
-                <button
-                  type="button"
-                  onClick={(event) => { event.stopPropagation(); openSourceDeleteDialog(source); }}
-                  title={t('documents.delete')}
-                  aria-label={t('documents.deleteSource', { name: source.name })}
-                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-red-600"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                {/* Два действия рядом, и они НЕ равны: отвязка убирает документ
+                    из блокнота, удаление стирает его целиком. Спутать их стоит
+                    потерянных данных, поэтому различаются они не подсказкой, а
+                    видом: у отвязки — обведённая кнопка со словом и разорванным
+                    звеном, у удаления — голая красная корзина. Разные форма,
+                    цвет и наличие подписи; чтобы выбрать, читать нечего.
+                    Без stopPropagation каждый клик заодно открывал бы просмотр. */}
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={(event) => { event.stopPropagation(); handleDetachSource(source); }}
+                    disabled={detachingSourceId != null}
+                    title={t('notebook.detachSourceHint')}
+                    aria-label={t('notebook.detachSource', { name: source.name })}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 px-2 text-xs font-semibold text-slate-600 transition hover:border-[#1f3a60]/40 hover:bg-slate-50 hover:text-[#1f3a60] disabled:pointer-events-none disabled:opacity-60"
+                  >
+                    {detachingSourceId === source.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Unlink className="h-3.5 w-3.5" />
+                    )}
+                    {t('notebook.detach')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(event) => { event.stopPropagation(); openSourceDeleteDialog(source); }}
+                    title={t('documents.delete')}
+                    aria-label={t('documents.deleteSource', { name: source.name })}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-red-400 transition hover:bg-red-50 hover:text-red-600"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
               {sourceErrorMessage ? (
                 /* error_text — техническая строка на одном языке (путь, имя библиотеки):
