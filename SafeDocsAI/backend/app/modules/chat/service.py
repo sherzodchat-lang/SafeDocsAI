@@ -24,6 +24,7 @@ from app.modules.chat.schemas import (
     SourceItem,
 )
 from app.modules.rag.constants import DEFAULT_CHAT_MODEL
+from app.modules.rag.text_utils import contains_article_reference, detect_language
 from app.services.profile_resolver import resolve_profile
 from app.services.rag_service import RAGService, RELEVANCE_DISTANCE_THRESHOLD
 from app.services.runtime_settings_service import RuntimeSettingsService
@@ -691,8 +692,12 @@ async def lexical_retrieve_chunks_batch(
         # Boost for exact phrase match in any query variant
         if any(nq and nq in normalized_text for nq in normalized_queries):
             score += 0.25
-        # Boost for article references
-        if any(ref in normalized_text for ref in article_refs):
+        # Буст статьи через общий матчер: он знает обе языковые формы
+        # (русский вопрос «статья 91» должен находить «Моддаи 91») и не
+        # засчитывает «статью 91» тексту про статью 910.
+        if any(
+            contains_article_reference(normalized_text, ref) for ref in article_refs
+        ):
             score += 0.35
         if query_years and any(year in (document.name or "") for year in query_years):
             score += 0.3
@@ -924,12 +929,24 @@ def rerank_retrieval_candidates(
     query_tokens = set(RAGService._query_tokens(query_text))
     article_ref = RAGService._detect_article_reference(normalized_query)
 
+    # Потолок оценки для кандидатов без расстояния: не выше худшего из реально
+    # найденных вектором в этом же пуле (и не выше прежних нейтральных 0.5).
+    # min по пулу, а не константа: шкала расстояний зависит от embedding-модели
+    # и метрики коллекции, а пул — единственное, что заведомо в той же шкале.
+    found_distance_scores = [
+        1.0 / (1.0 + max(item["distance"], 0.0))
+        for item in filtered
+        if item.get("distance") is not None
+    ]
+    none_distance_score = min([0.5, *found_distance_scores])
+
     for item in filtered:
         item["rerank_score"] = _score_retrieval_candidate(
             item,
             normalized_query=normalized_query,
             query_tokens=query_tokens,
             article_ref=article_ref,
+            none_distance_score=none_distance_score,
         )
 
     filtered.sort(
@@ -939,7 +956,53 @@ def rerank_retrieval_candidates(
             item.get("idx", 0),
         )
     )
-    return filtered[:final_top_k]
+    return _take_top_without_text_duplicates(filtered, final_top_k)
+
+
+# Порог схожести двух чанков по множеству слов, начиная с которого второй
+# считается копией первого. Подобран по фактическим парам pdf/docx одного
+# закона: 573 из 887 чанков совпадают дословно (Jaccard 1.0), остальные
+# разъезжаются границами нарезки, но остаются далеко выше 0.9. Настоящие
+# соседние чанки одного документа делят только overlap-хвост (~10% текста)
+# и до порога не дотягиваются.
+_DUPLICATE_TEXT_JACCARD = 0.9
+
+
+def _candidate_word_set(item: dict[str, Any]) -> frozenset[str]:
+    return frozenset(str(item.get("text") or "").lower().split())
+
+
+def _take_top_without_text_duplicates(
+    ranked: list[dict[str, Any]], final_top_k: int
+) -> list[dict[str, Any]]:
+    """Верхние final_top_k кандидатов, но без дословных копий текста.
+
+    Дедупликация по candidate_identity здесь бессильна: один закон, загруженный
+    и как PDF, и как DOCX, — это разные doc_id с одинаковым содержимым, и обе
+    копии занимали два слота из пяти в выдаче. Сравниваем сам текст и именно
+    в выдаче, а не в базе: какие документы держать в базе — решение
+    пользователя, а вот показывать одну цитату дважды решает этот код.
+    Пропущенная копия не пропадает даром — её слот получает следующий по
+    оценке содержательно другой кандидат.
+    """
+    selected: list[dict[str, Any]] = []
+    selected_word_sets: list[frozenset[str]] = []
+    for item in ranked:
+        if len(selected) >= final_top_k:
+            break
+        words = _candidate_word_set(item)
+        if words:
+            is_duplicate = False
+            for seen in selected_word_sets:
+                union = len(words | seen)
+                if union and len(words & seen) / union >= _DUPLICATE_TEXT_JACCARD:
+                    is_duplicate = True
+                    break
+            if is_duplicate:
+                continue
+        selected.append(item)
+        selected_word_sets.append(words)
+    return selected
 
 
 def _score_retrieval_candidate(
@@ -947,6 +1010,7 @@ def _score_retrieval_candidate(
     normalized_query: str,
     query_tokens: set[str],
     article_ref: str | None,
+    none_distance_score: float = 0.5,
 ) -> float:
     text = str(item.get("text") or "")
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
@@ -980,7 +1044,13 @@ def _score_retrieval_candidate(
     exact_phrase_boost = (
         0.25 if normalized_query and normalized_query in combined_text else 0.0
     )
-    article_boost = 0.35 if article_ref and article_ref in combined_text else 0.0
+    # Матчер вместо подстроки: русский вопрос «статья 91» обязан засчитываться
+    # чанку с «Моддаи 91», а тексту про статью 910 — нет.
+    article_boost = (
+        0.35
+        if article_ref and contains_article_reference(combined_text, article_ref)
+        else 0.0
+    )
     best_rank = min(
         [
             rank
@@ -1000,16 +1070,33 @@ def _score_retrieval_candidate(
         and any(year in (metadata.get("doc_name") or "") for year in query_years)
         else 0.0
     )
-    distance_score = 0.5 if distance is None else 1.0 / (1.0 + max(distance, 0.0))
+    # Кандидат без расстояния — это кандидат, которого векторный поиск по тому
+    # же запросу НЕ нашёл. Нейтральные 0.5 ставили его выше реально найденных
+    # (1/(1+d) < 0.5 уже при d > 1), поэтому потолок — оценка худшего
+    # найденного вектором (none_distance_score считает rerank_retrieval_candidates).
+    distance_score = (
+        none_distance_score if distance is None else 1.0 / (1.0 + max(distance, 0.0))
+    )
+
+    # Разноязычная пара запрос-чанк: лексическое пересечение токенов здесь
+    # неинформативно структурно, а не по вине чанка — у правильного таджикского
+    # ответа на русский вопрос оно ноль, и те же ноль весов 0.3 + 0.12
+    # доставались ему штрафом. Ровно так русский вопрос про отпуск получал в
+    # топ-5 русские энциклопедические чанки вместо найденного вектором
+    # Трудового кодекса. Весовую массу лексики отдаём расстоянию: пусть решает
+    # та модальность, которая языковую границу переходит. Бусты (точная фраза,
+    # статья, год) остаются — они и в разных языках осмысленны.
+    if detect_language(normalized_query) != detect_language(text):
+        weighted = distance_score * (0.45 + 0.3 + 0.12)
+    else:
+        weighted = (
+            (distance_score * 0.45)
+            + (overlap_ratio * 0.3)
+            + (title_overlap_ratio * 0.12)
+        )
 
     return round(
-        (distance_score * 0.45)
-        + (overlap_ratio * 0.3)
-        + (title_overlap_ratio * 0.12)
-        + exact_phrase_boost
-        + article_boost
-        + year_boost
-        + rank_boost,
+        weighted + exact_phrase_boost + article_boost + year_boost + rank_boost,
         6,
     )
 

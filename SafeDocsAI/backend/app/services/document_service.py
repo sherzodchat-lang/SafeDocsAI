@@ -290,6 +290,12 @@ class DocumentService:
         """
         blocks: List[TextBlock] = []
         order = 0
+        # Страницы-сканы, текст которых взять неоткуда: OCR недоступен, а в
+        # текстовом слое пусто. Раньше такая страница молча пропускалась, и
+        # документ со статусом 'indexed' стоял в базе с дырами — «не нашлось»
+        # при этом неотличимо от «не было проиндексировано».
+        lost_scan_pages: list[int] = []
+        ocr_available = OCRService.dependencies_available()
 
         with fitz.open(file_path) as doc:
             for page_num, page in enumerate(doc, start=1):
@@ -312,6 +318,14 @@ class DocumentService:
 
                 # Check if this page needs OCR
                 if OCRService.page_needs_ocr(page_text):
+                    # Страница без текстового слоя, но С КАРТИНКОЙ — это скан
+                    # с содержимым. Пустая страница (без картинок) сканом не
+                    # считается: её и распознавать не в чем, пропуск честен.
+                    page_has_image = bool(page.get_images())
+                    if not ocr_available:
+                        if page_has_image:
+                            lost_scan_pages.append(page_num)
+                        continue
                     # OCR fallback for this specific page
                     ocr_text = OCRService.ocr_single_page(file_path, page_num)
                     if ocr_text.strip():
@@ -324,6 +338,16 @@ class DocumentService:
                             )
                         )
                         order += 1
+                    elif page_has_image:
+                        # OCR отработал, но ничего не прочёл на странице с
+                        # изображением: не отказ (картинка может быть
+                        # декоративной), но и не молчание — след в журнале
+                        # обязан остаться.
+                        logger.warning(
+                            "OCR returned no text for image page %s of %s",
+                            page_num,
+                            file_path,
+                        )
                     continue
 
                 # Add each text block separately (preserves structure)
@@ -340,6 +364,19 @@ class DocumentService:
                             )
                         )
                         order += 1
+
+        if lost_scan_pages:
+            # Отказ, а не индексация с дырами: пользователь, получивший
+            # 'indexed', вправе считать, что поиск видит весь документ.
+            # Чинится установкой tesseract и poppler на сервер — код ошибки
+            # отдельный, чтобы интерфейс мог сказать именно это.
+            pages_str = ", ".join(str(p) for p in lost_scan_pages[:20])
+            raise UploadValidationError(
+                "В документе есть отсканированные страницы "
+                f"({pages_str}), а распознавание текста на сервере "
+                "недоступно: не установлены tesseract/poppler",
+                SourceErrors.OCR_UNAVAILABLE,
+            )
 
         return blocks
 

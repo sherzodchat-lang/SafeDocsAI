@@ -7,8 +7,21 @@ from app.modules.rag.chunker_config import (
 )
 
 
+# Текстовый слой государственных PDF (и DOCX, свёрстанных из них) кодирует «ё»
+# как «ѐ» (U+0450, е с грависом): в базе таких чанков около четверти. Регэксп
+# токенизатора буквы «ѐ» не знает, поэтому без свёртки «меъѐр» разваливался на
+# «меъ» и «р» и BM25 не находил слово ни по какой словоформе. Сворачиваем в
+# обоих направлениях чтения — и запрос, и текст чанка проходят через
+# normalize_query/tokenize.
+_YO_FOLD = str.maketrans({"ѐ": "ё", "Ѐ": "Ё"})
+
+
+def fold_yo_variants(text: str) -> str:
+    return (text or "").translate(_YO_FOLD)
+
+
 def normalize_query(query_text: str) -> str:
-    normalized = (query_text or "").strip().lower()
+    normalized = fold_yo_variants((query_text or "").strip().lower())
     return re.sub(r"\s+", " ", normalized)
 
 
@@ -118,7 +131,10 @@ def tokenize(text: str, ngram_size: int = 3) -> list[str]:
     налога» ранжировался бы наравне с чанком с одним случайным упоминанием.
     Для стороны запроса, где повторы не нужны, есть query_tokens().
     """
-    raw_tokens = re.findall(r"[а-яёА-ЯЁa-zA-Z0-9ӯқҳҷғӣӮҚҲҶҒӢ\-]+", (text or "").lower())
+    raw_tokens = re.findall(
+        r"[а-яёА-ЯЁa-zA-Z0-9ӯқҳҷғӣӮҚҲҶҒӢ\-]+",
+        fold_yo_variants((text or "").lower()),
+    )
     normalized: list[str] = []
     for token in raw_tokens:
         if token not in RU_TJ_STOPWORDS:
@@ -214,6 +230,51 @@ def detect_article_reference(query: str) -> str | None:
     return None
 
 
+# «Статья» и «модда» — одна и та же сущность в двух языках корпуса, а ссылка
+# из detect_article_reference приходит в языке ВОПРОСА. Корпус по большей части
+# таджикский, спрашивают и по-русски: без пары форм русский вопрос «статья 91»
+# не находил «Моддаи 91» ни бустом, ни лексикой — формы просто не совпадали
+# как строки.
+_ARTICLE_REF_EQUIVALENTS = {"статья": "моддаи", "моддаи": "статья"}
+
+
+def article_reference_variants(article_ref: str) -> list[str]:
+    """Ссылка на статью и её форма на втором языке корпуса.
+
+    Только статья↔модда: у «закон»/«пункт» надёжного одно-однозначного
+    соответствия нет («банд» — и пункт, и запрет), и неверная пара стоила бы
+    ложных бустов.
+    """
+    ref = (article_ref or "").strip().lower()
+    if not ref:
+        return []
+    keyword, _, number = ref.partition(" ")
+    twin = _ARTICLE_REF_EQUIVALENTS.get(keyword)
+    if twin and number:
+        return [ref, f"{twin} {number}"]
+    return [ref]
+
+
+def contains_article_reference(normalized_text: str, article_ref: str) -> bool:
+    """Есть ли в тексте ссылка на статью — в любой из языковых форм.
+
+    (?!\\d) обязателен: подстрочное `in` засчитывало «статья 91» тексту про
+    статью 910 — буст уезжал в чужую статью, а с ним и место в выдаче.
+    Между словом и номером допускается любой пробельный разрыв: в тексте из
+    PDF на этом месте бывает перенос строки.
+    """
+    lowered = (normalized_text or "").lower()
+    for variant in article_reference_variants(article_ref):
+        keyword, _, number = variant.partition(" ")
+        if number:
+            pattern = re.escape(keyword) + r"\s+" + re.escape(number) + r"(?!\d)"
+        else:
+            pattern = re.escape(variant) + r"(?!\d)"
+        if re.search(pattern, lowered):
+            return True
+    return False
+
+
 def boost_article_chunks(results: dict, article_ref: str) -> dict:
     if not results.get("documents") or not results["documents"][0]:
         return results
@@ -229,11 +290,10 @@ def boost_article_chunks(results: dict, article_ref: str) -> dict:
     normal = []
     for i, doc_text in enumerate(docs):
         text_lower = (doc_text or "").lower()
-        contains_ref = ref_lower in text_lower
-        if not contains_ref and number_str:
-            keyword = ref_lower.replace(number_str, "").strip()
-            pattern = re.escape(keyword) + r"\s+" + re.escape(number_str) + r"\b"
-            contains_ref = bool(re.search(pattern, text_lower))
+        # Общий матчер знает обе языковые формы (статья↔модда) и не пускает
+        # «статью 91» в статью 910 — прежние подстрочные проверки и то и
+        # другое пропускали.
+        contains_ref = contains_article_reference(text_lower, ref_lower)
         if not contains_ref and is_list_item_ref and number_str:
             list_pattern = r"(?:^|\n)" + re.escape(number_str) + r"[.\s]"
             contains_ref = bool(re.search(list_pattern, text_lower))

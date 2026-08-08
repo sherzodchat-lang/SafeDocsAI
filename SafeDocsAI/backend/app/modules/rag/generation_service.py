@@ -166,6 +166,18 @@ class GenerationService:
     ) -> str:
         if not chat_history:
             return query
+        # То же окно, что и у генерации ответа, — не ради длины (промпт
+        # конденсации крошечный), а ради того, чтобы Ollama не пересоздавала
+        # раннер. num_ctx входит в конфигурацию раннера, и другой размер окна
+        # на соседнем вызове означает выгрузку и загрузку 20-гигабайтной
+        # модели: с дефолтными 12288 здесь и chat_model_num_ctx у генерации
+        # каждый вопрос перезагружал модель дважды (замер: пять стартов
+        # llama-server с чередованием -c 12288/-c 30720 на два вопроса).
+        from app.services.runtime_settings_service import RuntimeSettingsService
+
+        chat_num_ctx = RuntimeSettingsService.get_settings().get(
+            "chat_model_num_ctx", 20000
+        )
         history_str = ""
         for msg in chat_history[-3:]:
             role = "User" if msg["role"] == "user" else "AI"
@@ -185,6 +197,7 @@ class GenerationService:
             condensed = await self.model_manager.chat(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
+                num_ctx=chat_num_ctx,
             )
             condensed = condensed.strip().strip('"')
             return query if not condensed or len(condensed.split()) > 20 else condensed

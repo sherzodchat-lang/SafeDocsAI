@@ -4,17 +4,35 @@ OCR Service — per-page OCR for mixed/scanned PDFs.
 Returns TextBlock objects compatible with HybridChunker.
 """
 
-import pytesseract
-from pdf2image import convert_from_path
+import logging
+import shutil
 from typing import List
 
+import pytesseract
+from pdf2image import convert_from_path
+
 from app.services.hybrid_chunker import TextBlock
+
+logger = logging.getLogger(__name__)
 
 
 class OCRService:
     # Minimum meaningful text length on a page (in characters).
     # Pages with less extractable text than this are considered scan-like.
     OCR_THRESHOLD_CHARS = 80
+
+    @staticmethod
+    def dependencies_available() -> bool:
+        """Установлены ли системные пакеты, без которых OCR не работает.
+
+        Проверка нужна ДО обработки: pytesseract и pdf2image — это python-
+        обёртки, их наличие в venv ничего не говорит о самих tesseract и
+        poppler. На стенде без них ocr_single_page падал на каждой странице,
+        отказ гасился, и страницы-сканы молча выпадали из индекса при статусе
+        документа 'indexed'. Не кэшируем: shutil.which — дёшево, а пакеты
+        могут доставить без перезапуска процесса.
+        """
+        return bool(shutil.which("tesseract")) and bool(shutil.which("pdftoppm"))
 
     @staticmethod
     def page_needs_ocr(page_text: str, threshold: int | None = None) -> bool:
@@ -58,8 +76,12 @@ class OCRService:
             )
             if images:
                 return pytesseract.image_to_string(images[0], lang=lang)
-        except Exception as e:
-            print(f"OCR Error on page {page_num}: {e}")
+        except Exception:
+            # logger, а не print: print уходил в stdout процесса и в журнале
+            # не оставался — потерянные страницы было не с чем связать.
+            logger.warning(
+                "OCR failed on page %s of %s", page_num, file_path, exc_info=True
+            )
         return ""
 
     @staticmethod
@@ -82,6 +104,8 @@ class OCRService:
                         order=i,
                         source="ocr",
                     ))
-        except Exception as e:
-            print(f"OCR Error: {e}")
+        except Exception:
+            logger.warning(
+                "Full-document OCR failed for %s", file_path, exc_info=True
+            )
         return blocks
