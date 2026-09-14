@@ -1216,10 +1216,10 @@ const NotebookWorkspace = ({
             role="dialog"
             aria-modal="true"
             aria-label={t('notebook.addExistingTitle')}
-            className="relative flex w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl max-h-[80vh]"
+            className="relative flex h-[85dvh] max-h-[calc(100dvh-2rem)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
           >
             {/* Header */}
-            <div className="flex items-start justify-between gap-4 px-6 py-5">
+            <div className="flex shrink-0 items-start justify-between gap-4 px-6 py-5">
               <div>
                 <div className="flex items-center gap-2">
                   <Link2 className="h-4 w-4 text-[#1f3a60]" />
@@ -1241,7 +1241,7 @@ const NotebookWorkspace = ({
             </div>
 
             {/* Search */}
-            <div className="px-6 pb-3">
+            <div className="shrink-0 px-6 pb-3">
               <div className="flex items-center gap-3">
                 <div className="relative flex-1">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
@@ -1267,7 +1267,7 @@ const NotebookWorkspace = ({
             </div>
 
             {/* Body */}
-            <div className="min-h-[240px] flex-1 overflow-y-auto px-6 pb-2" aria-live="polite">
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-2" aria-live="polite">
               {existingSourcesError || notebooksError ? (
                 <div role="alert" className="mb-2 flex flex-col gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
                   <span>{existingSourcesError || notebooksError}</span>
@@ -1317,7 +1317,7 @@ const NotebookWorkspace = ({
             ) : null}
 
             {/* Footer */}
-            <div className="flex items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-slate-200 px-6 py-4">
               <Button type="button" variant="ghost" onClick={closeSourceSheet}>
                 {t('notebook.cancel')}
               </Button>
