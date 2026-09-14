@@ -18,6 +18,7 @@ python-jose[cryptography]
 passlib[bcrypt]
 pdf2image
 python-docx
+lxml
 python-pptx
 # Шаблоны презентаций — Jinja2 (app/modules/presentations/templates.py). До сих
 # пор пакет приезжал только как зависимость torch; на этом и держался рендер,

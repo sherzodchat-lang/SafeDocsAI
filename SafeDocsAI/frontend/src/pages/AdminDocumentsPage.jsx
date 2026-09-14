@@ -28,11 +28,14 @@ import { formatDocumentLanguage, formatLocaleDate, parseTimestamp } from '../lib
 import { SOURCE_STATUS_BADGE_CLASS, formatSize, resolveSourceErrorMessage, resolveStatus } from '../lib/sources';
 import { TOPIC_LABEL_PARAM, TOPIC_PARAM, isTopicUnclear, matchesTopicFilter, readTopicFilter, resolveTopicLabel } from '../lib/topics';
 
-const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt'];
+const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt', 'fb2'];
 const ALLOWED_MIME_TYPES = new Set([
     'application/pdf',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'text/plain',
+    'application/x-fictionbook+xml',
+    'application/xml',
+    'text/xml',
     'application/octet-stream',
     'binary/octet-stream',
     'application/zip',
@@ -493,7 +496,7 @@ const AdminDocumentsPage = () => {
                             type="file"
                             multiple
                             className="hidden"
-                            accept=".pdf,.docx,.txt,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            accept=".pdf,.docx,.txt,.fb2,application/x-fictionbook+xml,application/xml,text/xml,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                             onChange={(event) => applyFileSelection(Array.from(event.target.files || []))}
                         />
                     </div>

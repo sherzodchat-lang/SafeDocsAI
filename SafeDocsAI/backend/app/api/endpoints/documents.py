@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import datetime
 from typing import Annotated, Any, List, Optional
@@ -11,7 +12,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -21,7 +22,7 @@ from app.core.exceptions import ApiError, SourceErrors
 from app.core.rate_limit import RateLimiter, check_rate_limit
 from app.models.models import User, Document, Chunk, as_utc
 from app.modules.documents import DocumentModuleService
-from app.services.document_service import DocumentService
+from app.services.document_service import DocumentService, UploadValidationError
 from app.shared.settings import RuntimeSettingsService
 
 router = APIRouter()
@@ -408,6 +409,7 @@ async def reindex_all_documents(
 MIME_MAP = {
     ".pdf": "application/pdf",
     ".txt": "text/plain; charset=utf-8",
+    ".fb2": "application/x-fictionbook+xml",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
@@ -415,10 +417,19 @@ MIME_MAP = {
 @router.get("/{id}/preview")
 async def preview_document(
     doc: Document = Depends(deps.get_owned_document),
-) -> FileResponse:
+    download: bool = Query(default=False),
+) -> Response:
     if not doc.path or not os.path.exists(doc.path):
         raise ApiError(404, SourceErrors.FILE_MISSING, "File not found on disk")
     ext = os.path.splitext(doc.name or doc.path)[1].lower()
+    if ext == ".fb2" and not download:
+        # The viewer needs reading text, not XML tags and base64 cover images.
+        # download=true still returns the unmodified original book.
+        try:
+            blocks = await asyncio.to_thread(DocumentService.extract_blocks, doc.path, ext)
+        except UploadValidationError as exc:
+            raise ApiError(422, exc.error_code, str(exc)) from exc
+        return PlainTextResponse("\n\n".join(block.text for block in blocks))
     media_type = MIME_MAP.get(ext, "application/octet-stream")
     return FileResponse(
         doc.path,

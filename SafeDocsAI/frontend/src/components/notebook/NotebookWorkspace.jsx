@@ -1174,7 +1174,7 @@ const NotebookWorkspace = ({
 
   return (
     <div className="flex min-h-0 flex-col gap-4 xl:h-full xl:flex-row">
-      <input ref={sourceInputRef} type="file" className="hidden" multiple accept=".pdf,.docx,.txt" onChange={handleSourceUpload} />
+      <input ref={sourceInputRef} type="file" className="hidden" multiple accept=".pdf,.docx,.txt,.fb2" onChange={handleSourceUpload} />
 
       {/* Чат стоит первым и забирает всё свободное место: блокнот открывают,
           чтобы спросить по его документам, а не чтобы разглядывать списки.

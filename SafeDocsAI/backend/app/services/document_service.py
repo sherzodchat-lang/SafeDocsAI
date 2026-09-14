@@ -1,7 +1,7 @@
 """
 Document Service — unified extraction pipeline.
 
-All document types (PDF, DOCX, TXT) are converted to TextBlock objects,
+All document types (PDF, DOCX, TXT, FB2) are converted to TextBlock objects,
 then chunked with HybridChunker. No more dual-path agentic/semantic branching.
 """
 
@@ -63,7 +63,7 @@ class UploadValidationError(ValueError):
 
 
 class DocumentService:
-    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".fb2"}
     GENERIC_MIME_TYPES = {"application/octet-stream", "binary/octet-stream"}
     MIME_BY_EXTENSION = {
         ".pdf": {"application/pdf"},
@@ -72,6 +72,7 @@ class DocumentService:
             "application/zip",
         },
         ".txt": {"text/plain"},
+        ".fb2": {"application/x-fictionbook+xml", "application/xml", "text/xml", "text/plain"},
     }
 
     # Кодировка в .txt не записана, определяем по содержимому. Запасные
@@ -143,7 +144,7 @@ class DocumentService:
         ext = cls.get_extension(upload_file.filename)
         if ext not in cls.ALLOWED_EXTENSIONS:
             raise UploadValidationError(
-                "Unsupported file type. Allowed: PDF, DOCX, TXT",
+                "Unsupported file type. Allowed: PDF, DOCX, TXT, FB2",
                 SourceErrors.UNSUPPORTED_TYPE,
             )
 
@@ -245,6 +246,13 @@ class DocumentService:
             return cls._extract_blocks_from_docx(file_path)
         if extension == ".txt":
             return cls._extract_blocks_from_txt(file_path)
+        if extension == ".fb2":
+            from app.services.fb2_reader import extract_fb2_blocks
+
+            try:
+                return extract_fb2_blocks(file_path)
+            except ValueError as exc:
+                raise UploadValidationError(str(exc), SourceErrors.INVALID_UPLOAD) from exc
         raise ValueError(f"Unsupported file extension: {extension}")
 
     @classmethod
