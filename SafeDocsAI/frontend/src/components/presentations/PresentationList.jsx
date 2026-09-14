@@ -364,7 +364,7 @@ const PresentationList = ({
                     /* Пусто — это не ошибка и не «список из нуля строк»: у
                        раздела в этот момент ровно одно осмысленное действие, и
                        оно стоит прямо здесь, а не только в шапке страницы. */
-                    <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50/70 px-6 py-14 text-center">
+                    <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-white px-6 py-14 text-center">
                         <div className="rounded-2xl bg-white p-4 text-[#1f3a60] shadow-sm">
                             <Presentation className="h-6 w-6" />
                         </div>

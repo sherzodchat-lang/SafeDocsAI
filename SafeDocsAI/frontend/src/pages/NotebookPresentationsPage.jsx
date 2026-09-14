@@ -283,18 +283,18 @@ const NotebookPresentationsPage = () => {
                     ) : null}
                 </div>
 
-                {/* Одна заметная кнопка вместо прежней формы на пол-экрана.
-                    Всё, что нужно заказу, живёт в окне (PresentationForm). */}
-                <Button
-                    type="button"
-                    size="lg"
-                    onClick={openDialog}
-                    disabled={createBlocked}
-                    title={createBlocked ? t('presentations.createDisabledInProgress') : undefined}
-                >
-                    <Plus className="h-4 w-4" />
-                    {t('presentations.create')}
-                </Button>
+                {items.length > 0 ? (
+                    <Button
+                        type="button"
+                        size="lg"
+                        onClick={openDialog}
+                        disabled={createBlocked}
+                        title={createBlocked ? t('presentations.createDisabledInProgress') : undefined}
+                    >
+                        <Plus className="h-4 w-4" />
+                        {t('presentations.create')}
+                    </Button>
+                ) : null}
             </div>
 
             {/* Результат отправки объявляется отдельно от окна — окно к этому
