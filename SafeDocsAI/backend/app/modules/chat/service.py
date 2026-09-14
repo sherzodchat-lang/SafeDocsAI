@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from time import perf_counter, time as time_now
 from typing import Any, AsyncIterator
 
+from sqlalchemy import func, literal_column
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -55,6 +56,11 @@ MAX_SEARCH_QUERY_VARIANTS = 3
 # Пул для cross-encoder'а: эвристический реранкер отдаёт ему столько кандидатов,
 # и только он режет список до final_top_k.
 RERANKER_CANDIDATE_POOL = 45
+# BM25 used to load and tokenize every row in ``chunk`` on every question.
+# The production corpus has 235k rows, so this Python pass alone took about
+# 72 seconds. PostgreSQL's GIN full-text index narrows the working set first;
+# the existing BM25 code then keeps its typo-aware scoring inside that set.
+LEXICAL_PREFILTER_LIMIT = 2000
 
 # TTL cache for hybrid retrieval results (notebook_id, query) → results
 _RETRIEVAL_CACHE: dict[str, tuple[float, dict[str, list[dict[str, Any]]]]] = {}
@@ -610,6 +616,35 @@ async def lexical_retrieve_chunks_batch(
     statement = select(Chunk, Document).join(Document, Document.id == Chunk.doc_id)
     if allowed_doc_ids is not None:
         statement = statement.where(Chunk.doc_id.in_(allowed_doc_ids))
+
+    # Keep only real query terms here. Three-character n-grams are useful for
+    # the BM25 scorer below, but putting all of them into the database query
+    # makes almost every chunk a candidate and recreates the full-table Python
+    # scan. Prefix lexemes retain the lightweight ru/tj stemming behaviour:
+    # e.g. ``ставк:*`` matches both ``ставка`` and ``ставки``.
+    prefilter_tokens = sorted(
+        {
+            piece
+            for token, weight in token_weights.items()
+            if weight == 1.0
+            for piece in token.split("-")
+            if (len(piece) >= 3 or piece.isdigit())
+            and re.fullmatch(r"[а-яёa-z0-9ӯқҳҷғӣ]+", piece)
+        },
+        key=lambda token: (-len(token), token),
+    )[:32]
+    if prefilter_tokens:
+        tsquery_text = " | ".join(
+            f"'{token.replace(chr(39), chr(39) * 2)}':*"
+            for token in prefilter_tokens
+        )
+        simple_config = literal_column("'simple'::regconfig")
+        search_vector = func.to_tsvector(
+            simple_config, func.coalesce(Chunk.text, "")
+        )
+        search_query = func.to_tsquery(simple_config, tsquery_text)
+        statement = statement.where(search_vector.op("@@")(search_query))
+    statement = statement.limit(LEXICAL_PREFILTER_LIMIT)
 
     rows = (await session.exec(statement)).all()
     if not rows:

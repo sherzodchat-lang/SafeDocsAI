@@ -92,6 +92,23 @@ async def init_db():
                 )
             )
 
+            # Hybrid retrieval performs its exact BM25 scoring in Python, but
+            # only after this full-text index has reduced the 235k-row corpus
+            # to a bounded candidate set. Without the index every chat request
+            # read and tokenized the entire chunk table (about 72 seconds on
+            # the production corpus). ``simple`` is deliberate: it indexes
+            # Russian and Tajik lexemes without an English-only stemmer.
+            await conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_chunk_text_fts_simple
+                    ON chunk USING GIN (
+                        to_tsvector('simple'::regconfig, coalesce(text, ''))
+                    )
+                    """
+                )
+            )
+
             # Причина ошибки индексации. Пишется фоновым воркером и уходит
             # в API вместе со статусом документа.
             await conn.execute(
