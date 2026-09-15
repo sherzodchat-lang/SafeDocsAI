@@ -156,7 +156,10 @@ const Layout = () => {
 
     return (
         <NotebookHeaderContext.Provider value={{ notebookHeader, setNotebookHeader, notebookActions, setNotebookActions, notebookTabs, setNotebookTabs }}>
-        <div className="min-h-screen bg-[#f3f5f8] lg:flex lg:h-screen lg:overflow-hidden">
+        {/* dvh, а не vh: на телефоне 100vh меряется по экрану со свёрнутой
+            адресной строкой, поэтому вёрстка оказывается выше видимой области
+            и внизу остаётся полоса пустоты. dvh следует за реальным вьюпортом. */}
+        <div className="min-h-dvh bg-[#f3f5f8] lg:flex lg:h-screen lg:overflow-hidden">
             <aside className={cn(
                 'hidden flex-col bg-[#1f3a60] text-white transition-[width] duration-300 lg:flex lg:h-screen',
                 sidebarCollapsed ? 'w-[84px]' : 'w-64'
@@ -236,7 +239,7 @@ const Layout = () => {
                 </div>
             </aside>
 
-            <div className="flex min-h-screen flex-1 flex-col lg:h-screen">
+            <div className="flex min-h-dvh flex-1 flex-col lg:h-screen">
                 {/* Вкладки блокнота стоят в самой шапке, а не блоком под ней:
                     нижняя граница шапки служит им направляющей, и экран не
                     начинается с двух полос навигации подряд. */}

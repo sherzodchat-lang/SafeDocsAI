@@ -687,19 +687,25 @@ const ChatPage = ({ notebookId, mode = 'page' }) => {
                         </>
                     ) : (
                         <>
-                            <div className="mb-3 flex flex-wrap gap-2">
-                                {quickQuestions.map((question) => (
-                                    <button
-                                        key={question}
-                                        type="button"
-                                        onClick={() => handleQuickQuestion(question)}
-                                        disabled={hasPendingMessage}
-                                        className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:opacity-55"
-                                    >
-                                        {question}
-                                    </button>
-                                ))}
-                            </div>
+                            {/* Подсказки нужны, пока спрашивать не о чем. После
+                                первого вопроса разговор сам показывает, что тут
+                                можно спросить, и чипы только занимают место —
+                                на телефоне отодвигая поле ввода от клавиатуры. */}
+                            {!hasConversation && (
+                                <div className="mb-3 flex flex-wrap gap-2">
+                                    {quickQuestions.map((question) => (
+                                        <button
+                                            key={question}
+                                            type="button"
+                                            onClick={() => handleQuickQuestion(question)}
+                                            disabled={hasPendingMessage}
+                                            className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:opacity-55"
+                                        >
+                                            {question}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
 
                             <form onSubmit={handleFormSubmit} className="relative">
                                 <Paperclip className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
